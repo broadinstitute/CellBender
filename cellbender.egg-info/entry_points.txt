@@ -1,3 +1,0 @@
-[console_scripts]
-cellbender = cellbender.command_line:main
-

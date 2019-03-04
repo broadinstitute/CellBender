@@ -1,8 +1,0 @@
-numpy
-scipy
-tables
-torch
-torchvision
-pyro-ppl
-scikit-learn
-matplotlib
