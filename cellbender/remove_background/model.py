@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.distributions import constraints
 import pyro
 import pyro.distributions as dist
+import pyro.nn
 from pyro.infer import config_enumerate
 from cellbender.remove_background.distributions.NegativeBinomial \
     import NegativeBinomial
@@ -57,7 +58,8 @@ class VariationalInferenceModel(nn.Module):
                  phi_scale_prior: float = 0.2,
                  rho_alpha_prior: float = 3,
                  rho_beta_prior: float = 80,
-                 use_decaying_avg_baseline: bool = True,
+                 use_decaying_avg_baseline: bool = False,
+                 use_IAF: bool = False,
                  lambda_reg: float = 0.,
                  use_cuda: bool = False):
         super(VariationalInferenceModel, self).__init__()
@@ -71,12 +73,26 @@ class VariationalInferenceModel(nn.Module):
             self.include_rho = True
 
         self.use_decaying_avg_baseline = use_decaying_avg_baseline
+        self.use_IAF = use_IAF
         self.n_genes = dataset_obj.analyzed_gene_inds.size
         self.z_dim = decoder.input_dim
         self.encoder = encoder
         self.decoder = decoder
         self.loss = {'train': {'epoch': [], 'elbo': []},
                      'test': {'epoch': [], 'elbo': []}}
+
+        # Inverse autoregressive flow
+        if self.use_IAF:
+            num_iafs = 1
+            iaf_dim = self.z_dim
+            iafs = [dist.iaf.InverseAutoregressiveFlow(
+                pyro.nn.AutoRegressiveNN(self.z_dim, [iaf_dim]))
+                for _ in range(num_iafs)]
+            self.iafs = iafs  # pyro's recommended 'nn.ModuleList(iafs)' is wrong
+            if len(self.iafs) > 0:
+                logging.info("Using inverse autoregressive flows for inference.")
+        else:
+            self.iafs = []
 
         # Determine whether we are working on a GPU.
         if use_cuda:
@@ -88,6 +104,9 @@ class VariationalInferenceModel(nn.Module):
                     value.cuda()
             except KeyError:
                 pass
+            if len(self.iafs) > 0:
+                for iaf in self.iafs:
+                    iaf.cuda()
             self.device = 'cuda'
         else:
             self.device = 'cpu'
@@ -121,7 +140,7 @@ class VariationalInferenceModel(nn.Module):
             assert chi_ambient_sum == 1., f"Issue with prior: chi_ambient should " \
                                           f"sum to 1, but is {chi_ambient_sum}"
             chi_bar_sum = np.round(dataset_obj.priors['chi_bar'].sum().item(),
-                                       decimals=4)
+                                   decimals=4)
             assert chi_bar_sum == 1., f"Issue with prior: chi_bar should " \
                                       f"sum to 1, but is {chi_bar_sum}"
 
@@ -159,11 +178,11 @@ class VariationalInferenceModel(nn.Module):
     def _calculate_mu(self,
                       chi: torch.Tensor,
                       d_cell: torch.Tensor,
-                      chi_ambient: Union[torch.Tensor, None] = None,
-                      d_empty: Union[torch.Tensor, None] = None,
-                      y: Union[torch.Tensor, None] = None,
-                      rho: Union[torch.Tensor, None] = None,
-                      chi_bar: Union[torch.Tensor, None] = None):
+                      chi_ambient: torch.Tensor,
+                      d_empty: torch.Tensor,
+                      y: torch.Tensor,
+                      rho: torch.Tensor,
+                      chi_bar: torch.Tensor):
         """Implement a calculation of mean expression based on the model."""
 
         if self.model_type == "simple":
@@ -247,7 +266,7 @@ class VariationalInferenceModel(nn.Module):
 
         return mu
 
-    def model(self, x, observe=True):
+    def model(self, x, observe=True) -> torch.Tensor:
         """Data likelihood model."""
 
         # Register the decoder with pyro.
@@ -260,6 +279,7 @@ class VariationalInferenceModel(nn.Module):
                                      torch.ones(torch.Size([])).to(self.device),
                                      constraint=constraints.simplex)
         else:
+            # chi_ambient = torch.rand(1)  # dummy tensor for Jit static typing
             chi_ambient = None
 
         # Sample phi from Gamma prior.
@@ -299,6 +319,7 @@ class VariationalInferenceModel(nn.Module):
                                                    self.rho_beta_prior)
                                   .expand_by([x.size(0)]))
             else:
+                # rho = torch.rand(1)  # dummy tensor for Jit static typing
                 rho = None
 
             # If modelling empty droplets:
@@ -314,8 +335,11 @@ class VariationalInferenceModel(nn.Module):
                 y = pyro.sample("y",
                                 dist.Bernoulli(logits=self.p_logit_prior)
                                 .expand_by([x.size(0)]))
+
             else:
+                d_empty = torch.rand(1)  # dummy tensor for Jit static typing
                 d_empty = None
+                # y = torch.rand(1)  # dummy tensor for Jit static typing
                 y = None
 
             # Calculate the mean gene expression counts (for each barcode).
@@ -336,14 +360,15 @@ class VariationalInferenceModel(nn.Module):
                 #             obs=x.reshape(-1, self.n_genes))
 
                 # Negative binomial:
-                pyro.sample("obs", NegativeBinomial(total_count=r,
-                                                    logits=logit).to_event(1),
-                            obs=x.reshape(-1, self.n_genes))
+                c = pyro.sample("obs", NegativeBinomial(total_count=r,
+                                                        logits=logit).to_event(1),
+                                obs=x.reshape(-1, self.n_genes))
             else:
                 # For data generation only
                 c = pyro.sample("obs", NegativeBinomial(total_count=r,
                                                         logits=logit).to_event(1))
-                return c
+
+        return c
 
     @config_enumerate(default='parallel')
     def guide(self, x, observe=True):
@@ -352,6 +377,10 @@ class VariationalInferenceModel(nn.Module):
         # Register the encoder(s) with pyro.
         for name, module in self.encoder.items():
             pyro.module("encoder_" + name, module)
+
+        # If necessary, register the IAF with pyro.
+        for i, iaf in enumerate(self.iafs):
+            pyro.module(f"iaf_{i}", iaf)
 
         # Initialize variational parameters for d_cell.
         d_cell_scale = pyro.param("d_cell_scale",
@@ -432,12 +461,18 @@ class VariationalInferenceModel(nn.Module):
                                            d_empty_scale).expand_by([x.size(0)]))
 
                 # Mask out the barcodes which are likely to be empty droplets.
-                masking = (enc['p_y'] >= 0).to(self.device, dtype=torch.float32)
+                # masking = (enc['p_y'] >= 0).to(self.device, dtype=torch.float32)
+                masking = dist.Bernoulli(logits=enc['p_y']).sample()  # for Jit
+
+                # Determine the posterior distribution for z...
+                z_dist = dist.Normal(enc['z']['loc'], enc['z']['scale'])
+
+                # ... adding an inverse autoregressive flow if called for.
+                if len(self.iafs) > 0:
+                    z_dist = dist.TransformedDistribution(z_dist, self.iafs)
 
                 # Sample latent code z for the barcodes containing real cells.
-                pyro.sample("z",
-                            dist.Normal(enc['z']['loc'],
-                                        enc['z']['scale']).to_event(1).mask(masking))
+                pyro.sample("z", z_dist.to_event(1).mask(masking))
 
                 # Sample the Bernoulli y from encoded p(y).
                 pyro.sample("y", dist.Bernoulli(logits=enc['p_y']),

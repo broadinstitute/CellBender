@@ -2,7 +2,8 @@
 
 import pyro
 import pyro.distributions as dist
-from pyro.infer import SVI, TraceEnum_ELBO, Trace_ELBO, JitTrace_ELBO, JitTraceEnum_ELBO
+from pyro.infer import SVI, TraceEnum_ELBO, Trace_ELBO, \
+    JitTrace_ELBO, JitTraceEnum_ELBO
 from pyro.optim import ClippedAdam
 
 from cellbender.remove_background.model import VariationalInferenceModel
@@ -65,7 +66,7 @@ def evaluate_epoch(svi: pyro.infer.SVI,
 
     # Initialize loss accumulator and training set size.
     test_loss = 0.
-    normalizer_test = 0.
+    normalizer_test = 1e-10  # no division by zero in the case of no test data
 
     # Compute the loss over the entire tests set.
     for x_cell_batch in test_loader:
@@ -123,7 +124,7 @@ def run_training(model: VariationalInferenceModel,
                          % (epoch, total_epoch_loss_train))
 
             # Every test_freq epochs, evaluate tests loss.
-            if epoch % test_freq == 0:
+            if len(test_loader) > 0 and epoch % test_freq == 0:
                 total_epoch_loss_test = evaluate_epoch(svi, test_loader)
                 test_elbo.append(-total_epoch_loss_test)
                 model.loss['test']['epoch'].append(epoch)
@@ -150,7 +151,8 @@ def run_inference(dataset_obj: Dataset,
         args: Input command line parsed arguments.
 
     Returns:
-         model: cellbender.model.VariationalInferenceModel that has had inference run.
+         model: cellbender.model.VariationalInferenceModel that has had
+         inference run.
 
     """
 
@@ -174,7 +176,8 @@ def run_inference(dataset_obj: Dataset,
     encoder_d = EncodeD(input_dim=count_matrix.shape[1],
                         hidden_dims=args.d_hidden_dims,
                         output_dim=1,
-                        log_count_crossover=dataset_obj.priors['log_counts_crossover'])
+                        log_count_crossover=
+                        dataset_obj.priors['log_counts_crossover'])
 
     if args.model[0] == "simple":
 
@@ -188,7 +191,8 @@ def run_inference(dataset_obj: Dataset,
                                    hidden_dims=args.p_hidden_dims,
                                    output_dim=1,
                                    input_transform='normalize',
-                                   log_count_crossover=dataset_obj.priors['log_counts_crossover'])
+                                   log_count_crossover=
+                                   dataset_obj.priors['log_counts_crossover'])
         encoder = CompositeEncoder({'z': encoder_z,
                                     'd_loc': encoder_d,
                                     'p_y': encoder_p})
@@ -203,35 +207,42 @@ def run_inference(dataset_obj: Dataset,
                                       encoder=encoder,
                                       decoder=decoder,
                                       dataset_obj=dataset_obj,
-                                      use_decaying_avg_baseline=args.use_decaying_average_baseline,
+                                      use_decaying_avg_baseline=
+                                      args.use_decaying_average_baseline,
+                                      use_IAF=args.use_IAF,
                                       use_cuda=args.use_cuda)
+
+    # Load the dataset into DataLoaders.
+    frac = args.training_fraction
+    batch_size = int(min(500,
+                         frac * dataset_obj.analyzed_barcode_inds.size / 2))
+    train_loader, test_loader = \
+        prep_data_for_training(dataset=count_matrix,
+                               empty_drop_dataset=
+                               dataset_obj.get_count_matrix_empties(),
+                               batch_size=batch_size,
+                               training_fraction=frac,
+                               fraction_empties=args.fraction_empties,
+                               shuffle=True,
+                               use_cuda=args.use_cuda)
+
+    # Run the guide once for Jit. (can hang on StopIteration if no test data!)
+    # model.guide(test_loader.__iter__().__next__())  # This seems unnecessary
 
     # Set up the optimizer.
     adam_args = {"lr": args.learning_rate}
     optimizer = ClippedAdam(adam_args)
 
     # Determine the loss function.
-    loss_function = TraceEnum_ELBO(max_plate_nesting=1)
-    # loss_function = JitTraceEnum_ELBO(max_plate_nesting=1)
+    # loss_function = TraceEnum_ELBO(max_plate_nesting=1)
+    loss_function = JitTraceEnum_ELBO(max_plate_nesting=1,
+                                      strict_enumeration_warning=False)
     if args.model[0] == "simple":
         loss_function = JitTrace_ELBO()
 
     # Set up the inference process.
     svi = SVI(model.model, model.guide, optimizer,
               loss=loss_function)
-
-    # Load the dataset into DataLoaders.
-    frac = 0.9  # Fraction of selected barcodes to use for training
-    batch_size = int(min(500,
-                         frac * dataset_obj.analyzed_barcode_inds.size / 2))
-    train_loader, test_loader = \
-        prep_data_for_training(dataset=count_matrix,
-                               empty_drop_dataset=dataset_obj.get_count_matrix_empties(),
-                               batch_size=batch_size,
-                               training_fraction=frac,
-                               fraction_empties=args.fraction_empties,
-                               shuffle=True,
-                               use_cuda=args.use_cuda)
 
     # Run training.
     run_training(model, svi, train_loader, test_loader,

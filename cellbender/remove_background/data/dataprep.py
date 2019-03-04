@@ -9,8 +9,7 @@ import torch.utils.data
 from typing import Tuple, List
 
 
-# TODO: if the dataset is small enough, can I transfer the whole thing to
-# CUDA memory, and batch densify all on the GPU?  post PR
+# TODO: if the dataset is small enough, can I transfer the whole thing to CUDA?
 
 class SparseDataset(torch.utils.data.Dataset):
     """torch.utils.data.Dataset wrapping a scipy.sparse.csr.csr_matrix
@@ -77,7 +76,9 @@ class DataLoader:
         return self
 
     def __next__(self):
-        if self.ptr == self.ind_list.size:
+        # if self.ptr == self.ind_list.size:
+        # This throws out the last bit because Jit + mask was not working:
+        if self.ptr + self.cell_batch_size > self.ind_list.size:
             self._reset()
             raise StopIteration()
 

@@ -3,6 +3,7 @@
 import tables
 import numpy as np
 import scipy.sparse as sp
+import scipy.io as io
 import cellbender.remove_background.model
 import cellbender.remove_background.data.transform as trans
 from sklearn.decomposition import PCA
@@ -108,7 +109,10 @@ class Dataset:
         logging.info(f"Loading data from file {self.input_file}")
 
         # Load the dataset.
-        self.data = get_matrix_from_h5(self.input_file)
+        if os.path.isdir(self.input_file):
+            self.data = get_matrix_from_mtx(self.input_file)
+        else:
+            self.data = get_matrix_from_h5(self.input_file)
 
     def _trim_dataset_for_analysis(self,
                                    low_UMI_count_cutoff: int = 30,
@@ -446,9 +450,11 @@ class Dataset:
             cell_barcode_inds = \
                 self.analyzed_barcode_inds[filtered_inds_of_analyzed_barcodes]
 
+            cell_barcodes = self.data['barcodes'][cell_barcode_inds]
+
             write_matrix_to_h5(output_file=filtered_output_file,
                                gene_names=self.data['gene_names'],
-                               barcodes=self.data['barcodes'][cell_barcode_inds],
+                               barcodes=cell_barcodes,
                                inferred_count_matrix=
                                inferred_count_matrix[cell_barcode_inds, :],
                                cell_barcode_inds=None,
@@ -460,7 +466,17 @@ class Dataset:
                                p=p[filtered_inds_of_analyzed_barcodes],
                                loss=inferred_model.loss)
 
-        # TODO: also save cell_barcodes.csv
+            # Save barcodes determined to contain cells as _cell_barcodes.csv
+            try:
+                barcode_names = np.array([str(cell_barcodes[i], encoding='UTF-8')
+                                         for i in range(cell_barcodes.size)])
+            except UnicodeDecodeError:
+                barcode_names = cell_barcodes  # necessary if barcodes are ints
+            except TypeError:
+                barcode_names = cell_barcodes  # necessary if barcodes are already decoded
+            bc_file_name = os.path.join(file_dir, file_name + "_cell_barcodes.csv")
+            np.savetxt(bc_file_name, barcode_names, delimiter=',', fmt='%s')
+            logging.info(f"Saved cell barcodes in {bc_file_name}")
 
         try:
             # Save plots, if called for.
@@ -473,7 +489,11 @@ class Dataset:
                 plt.plot(inferred_model.loss['test']['epoch'],
                          inferred_model.loss['test']['elbo'], 'o:')
                 plt.gca().set_ylim(bottom=max(inferred_model.loss['train']['elbo'][0],
-                                              inferred_model.loss['train']['elbo'][-1] - 2000))
+                                   inferred_model.loss['train']['elbo'][-1] - 2000))
+                if np.any(np.array(inferred_model.loss['test']['elbo']) == 0):
+                    # in case there is no test data and the loss is zero
+                    plt.gca().set_ylim(top=max(inferred_model.loss['train']['elbo'])
+                                       + 10)
                 plt.legend(['Train', 'Test'])
                 plt.xlabel('Epoch')
                 plt.ylabel('ELBO')
@@ -518,6 +538,65 @@ class Dataset:
             logging.warning("Unable to save plot.")
 
         return write_succeeded
+
+
+def get_matrix_from_mtx(filedir: str) -> Dict[str,
+                                              Union[sp.csr.csr_matrix,
+                                                    List[np.ndarray],
+                                                    np.ndarray]]:
+    """Load a count matrix from an mtx directory from CellRanger's output.
+
+    The directory must contain three files:
+        matrix.mtx
+        barcodes.tsv
+        genes.tsv
+    This function returns a dictionary that includes the count matrix, the gene
+    names (which correspond to columns of the count matrix), and the barcodes
+    (which correspond to rows of the count matrix).
+
+    Args:
+        filedir: string path to .mtx file that contains the raw gene
+            barcode matrix in a sparse coo text format.
+
+    Returns:
+        out['matrix']: scipy.sparse.csr.csr_matrix of unique UMI counts, with
+            barcodes as rows and genes as columns
+        out['barcodes']: numpy array of strings which are the nucleotide
+            sequences of the barcodes that correspond to the rows in
+            the out['matrix']
+        out['gene_names']: List of numpy arrays, where the number of elements
+            in the list is the number of genomes in the dataset.  Each numpy
+            array contains the string names of genes in the genome, which
+            correspond to the columns in the out['matrix'].
+
+    """
+
+    assert os.path.isdir(filedir), "The directory {filedir} is not accessible."
+
+    # Read in the count matrix using scipy.
+    count_matrix = io.mmread(os.path.join(filedir,
+                                          'matrix.mtx')).tocsr().transpose()
+
+    # Read in gene names.
+    gene_names = np.genfromtxt(fname=os.path.join(filedir, "genes.tsv"),
+                               delimiter="\t", skip_header=0,
+                               dtype='<U50')[:, 1].squeeze()  # second column
+
+    # Read in barcode names.
+    barcodes = np.genfromtxt(fname=os.path.join(filedir, "barcodes.tsv"),
+                             delimiter="\t", skip_header=0, dtype='<U20')
+
+    # Issue warnings if necessary, based on dimensions matching.
+    if count_matrix.shape[1] != len(gene_names):
+        logging.warning(f"Number of gene names in {filedir}/genes.tsv does not "
+                        f"match the number expected from the count matrix.")
+    if count_matrix.shape[0] != len(barcodes):
+        logging.warning(f"Number of barcodes in {filedir}/barcodes.tsv does not "
+                        f"match the number expected from the count matrix.")
+
+    return {'matrix': count_matrix,
+            'gene_names': gene_names,
+            'barcodes': barcodes}
 
 
 def get_matrix_from_h5(filename: str) -> Dict[str,

@@ -81,6 +81,10 @@ class CLI(AbstractCLI):
                                dest="fraction_empties",
                                help="Fraction of the training data that should be "
                                     "empty droplets.")
+        subparser.add_argument("--training_fraction",
+                               type=float, default=0.95,
+                               dest="training_fraction",
+                               help="Fraction of the data to use for training.")
         subparser.add_argument("--blacklist_genes", nargs="+", type=int, default=[],
                                dest="blacklisted_genes",
                                help="Indices of genes to ignore entirely.")
@@ -119,6 +123,13 @@ class CLI(AbstractCLI):
                                help="Including the flag "
                                     "--decaying_average_baseline will use a "
                                     "decaying average baseline during inference.")
+        subparser.add_argument("--use_IAF",
+                               dest="use_IAF",
+                               action="store_true",
+                               help="Including the flag "
+                                    "--use_IAF will use an inverse autoregressive "
+                                    "flow during inference to allow more "
+                                    "flexibility in the learned posterior.")
         subparser.add_argument("--low_count_threshold", type=int, default=30,
                                dest="low_count_threshold",
                                help="Droplets with UMI counts below this are"
@@ -180,6 +191,9 @@ class CLI(AbstractCLI):
 
         assert args.learning_rate < 0.1, "learning_rate must be < 0.1"
         assert args.learning_rate > 0, "learning_rate must be > 0"
+
+        assert args.training_fraction < 1.0, "training_fraction must be < 1"
+        assert args.training_fraction > 0.0, "training_fraction must be > 0"
 
         # If cuda is requested, make sure it is available.
         if args.use_cuda:

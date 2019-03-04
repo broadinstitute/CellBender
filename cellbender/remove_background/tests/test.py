@@ -101,10 +101,12 @@ class TestConsole(unittest.TestCase):
             args.p_hidden_dims = [100, 10]
             args.z_dim = 10
             args.learning_rate = 0.001
-            args.epochs = 10
+            args.epochs = 3
             args.model = ["full"]
-            args.use_decaying_average_baseline = True
-            args.fraction_empties = 0.5
+            args.use_decaying_average_baseline = False
+            args.fraction_empties = 0.2
+            args.training_fraction = 0.8
+            args.use_IAF = False
 
             args.expected_cell_count = n_cells
 
