@@ -5,7 +5,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.io as io
 import cellbender.remove_background.model
-import cellbender.remove_background.data.transform as trans
+import cellbender.remove_background.consts as consts
 from sklearn.decomposition import PCA
 import torch
 from scipy.stats import mode
@@ -19,15 +19,15 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # This needs to be after matplotlib.use('Agg')
 
 
-class Dataset:
-    """Object for storing scRNA-seq count matrix data and basic manipulations.
+class SingleCellRNACountsDataset:
+    """Object for storing scRNA-seq count matrix data and basic manipulations
+    and pre-processing (e.g. estimation of prior hyperparameters).
 
     Args:
-        transformation: Transformation to be applied to count data.
         input_file: Input data file path.
         expected_cell_count: Expected number of real cells a priori.
-        num_transition_barcodes: Number of droplets after the cells that could
-            possibly have cells.
+        total_droplet_barcodes: Total number of droplets to include in the
+            cell-calling analysis.
         model_name: Model to use.
         gene_blacklist: List of integer indices of genes to exclude entirely.
         low_count_threshold: Droplets with UMI counts below this number are
@@ -45,7 +45,6 @@ class Dataset:
         is_trimmed: This gets set to True after running
             trim_dataset_for_analysis().
         model_name: Name of model being run.
-        transformation: Transformation applied to count data (and priors).
         priors: Priors estimated from the data useful for modelling.
 
     Note: Count data is kept as the original, untransformed data.  Priors are
@@ -53,15 +52,16 @@ class Dataset:
 
     """
 
-    def __init__(self, transformation: trans.DataTransform,
+    def __init__(self,
                  input_file: Union[str, None] = None,
                  expected_cell_count: Union[int, None] = None,
-                 num_transition_barcodes: Union[int, None] = None,
+                 total_droplet_barcodes: int = consts.TOTAL_DROPLET_DEFAULT,
                  fraction_empties: float = 0.5,
                  model_name: str = None,
                  gene_blacklist: List[int] = [],
                  low_count_threshold: int = 30):
-        super(Dataset, self).__init__()
+        assert input_file is not None, "Attempting to load data, but no " \
+                                       "input file was specified."
         self.input_file = input_file
         self.analyzed_barcode_inds = np.array([])  # Barcodes trained each epoch
         self.analyzed_gene_inds = np.array([])
@@ -70,67 +70,78 @@ class Dataset:
         self.model_name = model_name
         self.fraction_empties = fraction_empties
         self.is_trimmed = False
-        self.transformation = transformation
         self.low_count_threshold = low_count_threshold
         self.priors = {'n_cells': expected_cell_count}
+        self.random = np.random.RandomState(seed=1234)
+        self.EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD = \
+            consts.EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD
+        self.SIMPLE_MODEL_D_STD_PRIOR = consts.SIMPLE_MODEL_D_STD_PRIOR
+        self.CELL_PROB_CUTOFF = consts.CELL_PROB_CUTOFF
 
         # Load the dataset.
         self._load_data()
-
-        # For an empty dataset object, skip the rest of initialization.
-        if self.data is None:
-            return
-
-        # Set a default number of transition barcodes if not specified.
-        if num_transition_barcodes is None:
-            num_transition_barcodes = 10000
 
         # At first, set the cell count prior to expected cells (could be None).
         self.priors['n_cells'] = expected_cell_count
 
         # Trim the dataset.
-        self._trim_dataset_for_analysis(num_transition_barcodes=
-                                        num_transition_barcodes,
-                                        low_UMI_count_cutoff=
-                                        low_count_threshold,
+        self._trim_dataset_for_analysis(total_droplet_barcodes=total_droplet_barcodes,
+                                        low_UMI_count_cutoff=low_count_threshold,
                                         gene_blacklist=gene_blacklist)
 
         # Estimate priors.
         self._estimate_priors()
 
-    def _load_data(self):
-        """Load a dataset into the Dataset object from the self.input_file"""
+    def _detect_input_data_type(self) -> str:
+        """Detect the type of input data."""
 
-        # This allows a simulated dataset to use the same constructor.
-        if self.input_file is None:
-            return
+        # Error if no input data file has been specified.
+        assert self.input_file is not None, \
+            "Attempting to load data, but no input file was specified."
 
-        # Load the dataset.
+        # Detect type.
         if os.path.isdir(self.input_file):
-
-            logging.info(f"Loading data from directory {self.input_file}")
-            self.data = get_matrix_from_mtx(self.input_file)
+            return 'cellranger_mtx'
 
         else:
+            return 'cellranger_h5'
+
+    def _load_data(self):
+        """Load a dataset into the SingleCellRNACountsDataset object from
+        the self.input_file"""
+
+        # Detect input data type.
+        data_type = self._detect_input_data_type()
+
+        # Load the dataset.
+        if data_type == 'cellranger_mtx':
+
+            logging.info(f"Loading data from directory {self.input_file}")
+            self.data = get_matrix_from_cellranger_mtx(self.input_file)
+
+        elif data_type == 'cellranger_h5':
 
             logging.info(f"Loading data from file {self.input_file}")
-            self.data = get_matrix_from_h5(self.input_file)
+            self.data = get_matrix_from_cellranger_h5(self.input_file)
 
-    def _trim_dataset_for_analysis(self,
-                                   low_UMI_count_cutoff: int = 15,
-                                   num_transition_barcodes: Union[int, None]
-                                   = 10000,
-                                   gene_blacklist: List[int] = []):
+        else:
+            raise NotImplementedError
+
+    def _trim_dataset_for_analysis(
+            self,
+            total_droplet_barcodes: int = consts.TOTAL_DROPLET_DEFAULT,
+            low_UMI_count_cutoff: int = consts.LOW_UMI_CUTOFF,
+            gene_blacklist: List[int] = []):
         """Trim the dataset for inference, choosing barcodes and genes to use.
 
         Sets the values of self.analyzed_barcode_inds, and
         self.empty_barcode_inds, which are used throughout training.
 
         Args:
-            low_UMI_count_cutoff: Barcodes with total UMI counts below this
-                number are excluded.
-            num_transition_barcodes: Number of uncertain droplets to include
-                during inference.
+            total_droplet_barcodes: Number of total droplets to include
+                during inference each epoch, and for which to make cell calls.
+            low_UMI_count_cutoff: Barcodes with total UMI counts below
+                this number are excluded.
             gene_blacklist: List of gene indices to trim out and exclude.
 
         Note:
@@ -159,23 +170,35 @@ class Dataset:
         # Expected cells must not exceed nonzero count barcodes.
         num_nonzero_barcodes = np.sum(umi_counts > 0).item()
 
-        try:
+        # Choose which genes to use based on their having nonzero counts.
+        # (All barcodes must be included so that inference can generalize.)
+        gene_counts_per_barcode = np.array(matrix.sum(axis=0)).squeeze()
+        self.analyzed_gene_inds = np.where(gene_counts_per_barcode
+                                           > 0)[0].astype(dtype=int)
 
-            # Choose which genes to use based on their having nonzero counts.
-            # (All barcodes must be included so that inference can generalize.)
-            gene_counts_per_barcode = np.array(matrix.sum(axis=0)).squeeze()
-            self.analyzed_gene_inds = np.where(gene_counts_per_barcode
-                                               > 0)[0].astype(dtype=int)
+        if self.analyzed_gene_inds.size == 0:
+            logging.warning("During data loading, found no genes with > 0 "
+                            "counts.  Terminating analysis.")
+            raise AssertionError("No genes with nonzero counts.  Check the "
+                                 "input data file.")
 
-            if len(gene_blacklist) > 0:
+        # Remove blacklisted genes.
+        if len(gene_blacklist) > 0:
 
-                # Ensure genes on the blacklist are excluded.
-                self.analyzed_gene_inds = np.array([g for g in
-                                                    self.analyzed_gene_inds
-                                                    if g not in gene_blacklist])
+            # Make gene_blacklist a set for fast inclusion testing.
+            gene_blacklist = set(gene_blacklist)
 
-        except IndexError:
-            logging.warning("Something went wrong trying to trim genes.")
+            # Ensure genes on the blacklist are excluded.
+            self.analyzed_gene_inds = np.array([g for g in
+                                                self.analyzed_gene_inds
+                                                if g not in gene_blacklist])
+
+        if self.analyzed_gene_inds.size == 0:
+            logging.warning("All nonzero genes have been blacklisted.  "
+                            "Terminating analysis.")
+            raise AssertionError("All genes with nonzero counts have been "
+                                 "blacklisted.  Examine the dataset and "
+                                 "reduce the blacklist.")
 
         # Estimate priors on cell size and 'empty' droplet size.
         self.priors['cell_counts'], self.priors['empty_counts'] = \
@@ -187,6 +210,11 @@ class Dataset:
 
         # n_cells is at most the number of nonzero barcodes.
         n_cells = min(self.priors['n_cells'], num_nonzero_barcodes)
+
+        assert n_cells > 0, "No cells identified.  Try to use the option " \
+                            "--expected-cells to specify a prior on cell " \
+                            "count.  Also ensure that --low-count-threshold " \
+                            "is not too large (less than empty droplets)."
 
         # If running the simple model, just use the expected cells, no more.
         if self.model_name == "simple":
@@ -200,61 +228,93 @@ class Dataset:
         # If not using the simple model, include empty droplets.
         else:
 
-            try:
+            # Get the cell barcodes.
+            cell_barcodes = umi_count_order[:n_cells]
 
-                # Get the cell barcodes.
-                cell_barcodes = umi_count_order[:n_cells]
+            # Set the low UMI count cutoff to be the greater of either
+            # the user input value, or an empirically-derived value.
+            empirical_low_UMI = int(self.priors['empty_counts'] *
+                                    self.EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD)
+            low_UMI_count_cutoff = max(low_UMI_count_cutoff,
+                                       empirical_low_UMI)
+            logging.info(f"Excluding barcodes with counts below "
+                         f"{low_UMI_count_cutoff}")
 
-                # Set the low UMI count cutoff to be the greater of either
-                # the user input value, or an empirically-derived value.
-                empirical_low_UMI = int(self.priors['empty_counts'] * 0.8)
-                low_UMI_count_cutoff = max(low_UMI_count_cutoff,
-                                           empirical_low_UMI)
-                logging.info(f"Excluding barcodes with counts below "
-                             f"{low_UMI_count_cutoff}")
+            # See how many barcodes there are to work with total.
+            num_barcodes_above_umi_cutoff = \
+                np.sum(umi_counts > low_UMI_count_cutoff).item()
 
-                # See how many barcodes there are to work with total.
-                num_barcodes_above_umi_cutoff = \
-                    np.sum(umi_counts > low_UMI_count_cutoff).item()
+            assert num_barcodes_above_umi_cutoff > 0, \
+                f"There are no barcodes with UMI counts over the lower " \
+                f"cutoff of {low_UMI_count_cutoff}"
 
-                # Get a number of transition-region barcodes.
-                num = min(num_transition_barcodes,
-                          num_barcodes_above_umi_cutoff - cell_barcodes.size)
-                num = max(0, num)
-                transition_barcodes = umi_count_order[n_cells:
-                                                      (n_cells + num)]
+            assert num_barcodes_above_umi_cutoff > n_cells, \
+                f"There are no empty droplets with UMI counts over the lower " \
+                f"cutoff of {low_UMI_count_cutoff}.  Some empty droplets are " \
+                f"necessary for the analysis.  Reduce the " \
+                f"--low-count-threshold parameter."
 
-                # Use the cell barcodes and transition barcodes for analysis.
-                self.analyzed_barcode_inds = np.concatenate((
-                    cell_barcodes,
-                    transition_barcodes)).astype(dtype=int)
+            # Get a number of transition-region barcodes.
+            num_transition_barcodes = (total_droplet_barcodes
+                                       - cell_barcodes.size)
 
-                # Identify probable empty droplet barcodes.
-                if num < num_transition_barcodes:
+            assert num_transition_barcodes > 0, \
+                f"The number of cells is {cell_barcodes.size}, but the " \
+                f"number of total droplets included is " \
+                f"{total_droplet_barcodes}.  Increase " \
+                f"--total_droplet_barcodes above {cell_barcodes.size}, or " \
+                f"specify a different number of expected cells using " \
+                f"--expected-cells"
 
-                    # This means we already used all the barcodes.
-                    empty_droplet_barcodes = np.array([])
+            num = min(num_transition_barcodes,
+                      num_barcodes_above_umi_cutoff - cell_barcodes.size)
+            num = max(0, num)
+            transition_barcodes = umi_count_order[n_cells:
+                                                  (n_cells + num)]
 
-                else:
+            assert transition_barcodes.size > 0, \
+                f"There are no barcodes identified from the transition " \
+                f"region between cell and empty.  The intended number of " \
+                f"transition barcodes was {num_transition_barcodes}.  " \
+                f"This indicates that the low UMI count cutoff, " \
+                f"{low_UMI_count_cutoff}, was likely too high.  Try to " \
+                f"reduce --low-count-threshold"
 
-                    # Decide which empty barcodes to include.
-                    empty_droplet_sorted_barcode_inds = \
-                        np.arange(n_cells + num, num_barcodes_above_umi_cutoff,
-                                  dtype=int)  # The entire range
-                    empty_droplet_barcodes = \
-                        umi_count_order[empty_droplet_sorted_barcode_inds]
+            # Use the cell barcodes and transition barcodes for analysis.
+            self.analyzed_barcode_inds = np.concatenate((
+                cell_barcodes,
+                transition_barcodes)).astype(dtype=int)
 
-                self.empty_barcode_inds = empty_droplet_barcodes\
-                    .astype(dtype=int)
+            # Identify probable empty droplet barcodes.
+            if num < num_transition_barcodes:
 
-                logging.info(f"Using {cell_barcodes.size} probable cell "
-                             f"barcodes, plus an additional "
-                             f"{transition_barcodes.size} barcodes, "
-                             f"and {empty_droplet_barcodes.size} empty "
-                             f"droplets.")
+                # This means we already used all the barcodes.
+                empty_droplet_barcodes = np.array([])
 
-            except IndexError:
-                logging.warning("Something went wrong trying to trim barcodes.")
+            else:
+
+                # Decide which empty barcodes to include.
+                empty_droplet_sorted_barcode_inds = \
+                    np.arange(n_cells + num, num_barcodes_above_umi_cutoff,
+                              dtype=int)  # The entire range
+                empty_droplet_barcodes = \
+                    umi_count_order[empty_droplet_sorted_barcode_inds]
+
+            self.empty_barcode_inds = empty_droplet_barcodes\
+                .astype(dtype=int)
+
+            logging.info(f"Using {cell_barcodes.size} probable cell "
+                         f"barcodes, plus an additional "
+                         f"{transition_barcodes.size} barcodes, "
+                         f"and {empty_droplet_barcodes.size} empty "
+                         f"droplets.")
+
+            if ((low_UMI_count_cutoff == self.low_count_threshold)
+                    and (empty_droplet_barcodes.size == 0)):
+                logging.warning("Warning: few empty droplets identified. Low "
+                                "UMI cutoff may be too high. Check the UMI "
+                                "decay curve, and decrease the "
+                                "--low-count-threshold parameter if necessary.")
 
         self.is_trimmed = True
 
@@ -272,7 +332,8 @@ class Dataset:
             self.priors['d_std'] = (np.log1p(self.priors['cell_counts'])
                                     - self.priors['log_counts_crossover']) / 5
         else:
-            self.priors['d_std'] = 0.2  # This is reasonable in log space.
+            # Use a reasonable prior in log space.
+            self.priors['d_std'] = self.SIMPLE_MODEL_D_STD_PRIOR
 
         # Priors for models that include empty droplets:
         if self.model_name != "simple":
@@ -298,7 +359,7 @@ class Dataset:
 
             # Estimate the ambient gene expression profile.
             self.priors['chi_ambient'], self.priors['chi_bar'] = \
-                estimate_chi_from_dataset(self)
+                estimate_chi_ambient_from_dataset(self)
 
     def get_count_matrix(self) -> sp.csr.csr_matrix:
         """Get the count matrix, trimmed if trimming has occurred."""
@@ -310,16 +371,12 @@ class Dataset:
                                                     :].tocsc()
             trimmed_matrix = trimmed_bc_matrix[:,
                                                self.analyzed_gene_inds].tocsr()
-
-            # Apply transformation to the count data.
-            return self.transformation.transform(trimmed_matrix)
+            return trimmed_matrix
 
         else:
             logging.warning("Using full count matrix, without any trimming.  "
                             "Could be slow.")
-
-            # Apply transformation to the count data.
-            return self.transformation.transform(self.data['matrix'])
+            return self.data['matrix']
 
     def get_count_matrix_empties(self) -> sp.csr.csr_matrix:
         """Get the count matrix for empty drops, trimmed if possible."""
@@ -331,16 +388,12 @@ class Dataset:
                                                     :].tocsc()
             trimmed_matrix = trimmed_bc_matrix[:,
                                                self.analyzed_gene_inds].tocsr()
-
-            # Apply transformation to the count data.
-            return self.transformation.transform(trimmed_matrix)
+            return trimmed_matrix
 
         else:
             logging.error("Trying to get empty count matrix without "
                           "trimmed data.")
-
-            # Apply transformation to the count data.
-            return self.transformation.transform(self.data['matrix'])
+            return self.data['matrix']
 
     def get_count_matrix_all_barcodes(self) -> sp.csr.csr_matrix:
         """Get the count matrix, trimming only genes, not barcodes."""
@@ -351,21 +404,18 @@ class Dataset:
             trimmed_bc_matrix = self.data['matrix'].tocsc()
             trimmed_matrix = trimmed_bc_matrix[:,
                                                self.analyzed_gene_inds].tocsr()
-
-            # Apply transformation to the count data.
-            return self.transformation.transform(trimmed_matrix)
+            return trimmed_matrix
 
         else:
             logging.warning("Using full count matrix, without any trimming.  "
                             "Could be slow.")
+            return self.data['matrix']
 
-            # Apply transformation to the count data.
-            return self.transformation.transform(self.data['matrix'])
-
-    def save_to_output_file(self,
-                            output_file: str,
-                            inferred_model,
-                            save_plots: bool = False) -> bool:
+    def save_to_output_file(
+            self,
+            output_file: str,
+            inferred_model: 'RemoveBackgroundPyroModel',
+            save_plots: bool = False) -> bool:
         """Write the results of an inference procedure to an output file.
 
         Output is an HDF5 file.  To be written:
@@ -379,7 +429,7 @@ class Dataset:
             space.
 
         Args:
-            inferred_model: cellbender.model.VariationalInferenceModel which has
+            inferred_model: RemoveBackgroundPyroModel which has
                 already had the inference procedure run.
             output_file: Name of output .h5 file
             save_plots: Setting this to True will save plots of outputs.
@@ -393,20 +443,17 @@ class Dataset:
 
         # Calculate quantities of interest from the model.
         # Encoded values of latent variables.
-        z, d, p = cellbender.remove_background.\
-            model.get_encodings(inferred_model,
-                                self,
-                                cells_only=True)
+        z, d, p = cellbender.remove_background.model.get_encodings(
+            inferred_model, self, cells_only=True)
 
         # Estimate the ambient-background-subtracted UMI count matrix.
         if self.model_name != "simple":
 
-            inferred_count_matrix = \
-                cellbender.remove_background.model.\
-                    get_count_matrix_from_encodings(z, d, p,
-                                                    inferred_model,
-                                                    self,
-                                                    cells_only=True)
+            inferred_count_matrix = cellbender.remove_background.model.\
+                generate_maximum_a_posteriori_count_matrix(z, d, p,
+                                                           inferred_model,
+                                                           self,
+                                                           cells_only=True)
         else:
 
             # No need to generate a new count matrix for simple model.
@@ -415,7 +462,7 @@ class Dataset:
 
         # Inferred ambient gene expression vector.
         ambient_expression_trimmed = cellbender.remove_background.model.\
-            get_ambient_expression()
+            get_ambient_expression_from_pyro_param_store()
 
         # Convert the indices from trimmed gene set to original gene indices.
         ambient_expression = np.zeros(self.data['matrix'].shape[1])
@@ -425,7 +472,8 @@ class Dataset:
         rho = cellbender.remove_background.model.get_contamination_fraction()
 
         # Inferred overdispersion hyperparameters.
-        phi = cellbender.remove_background.model.get_overdispersion()
+        phi = cellbender.remove_background.model.\
+            get_overdispersion_from_pyro_param_store()
 
         # Figure out the indices of barcodes that have cells.
         if p is not None:
@@ -433,29 +481,23 @@ class Dataset:
             cell_barcode_inds = self.analyzed_barcode_inds
             if np.sum(p > 0.5) == 0:
                 logging.warning("Warning: Found no cells!")
-            filtered_inds_of_analyzed_barcodes = p > 0.5
+            filtered_inds_of_analyzed_barcodes = p > self.CELL_PROB_CUTOFF
         else:
             cell_barcode_inds = self.analyzed_barcode_inds
             filtered_inds_of_analyzed_barcodes = np.arange(0, d.size)
 
-        # If used, invert the transformation applied to input data.
-        inferred_count_matrix = \
-            self.transformation.inverse_transform(inferred_count_matrix)
-
         # Write to output file.
-        write_succeeded = write_matrix_to_h5(output_file=output_file,
-                                             gene_names=self.data['gene_names'],
-                                             barcodes=self.data['barcodes'],
-                                             inferred_count_matrix=
-                                             inferred_count_matrix,
-                                             cell_barcode_inds=
-                                             cell_barcode_inds,
-                                             ambient_expression=
-                                             ambient_expression,
-                                             rho=rho,
-                                             phi=phi,
-                                             z=z, d=d, p=p,
-                                             loss=inferred_model.loss)
+        write_succeeded = write_matrix_to_cellranger_h5(
+            output_file=output_file,
+            gene_names=self.data['gene_names'],
+            barcodes=self.data['barcodes'],
+            inferred_count_matrix=inferred_count_matrix,
+            cell_barcode_inds=cell_barcode_inds,
+            ambient_expression=ambient_expression,
+            rho=rho,
+            phi=phi,
+            z=z, d=d, p=p,
+            loss=inferred_model.loss)
 
         # Generate filename for filtered matrix output.
         file_dir, file_base = os.path.split(output_file)
@@ -470,19 +512,19 @@ class Dataset:
 
             cell_barcodes = self.data['barcodes'][cell_barcode_inds]
 
-            write_matrix_to_h5(output_file=filtered_output_file,
-                               gene_names=self.data['gene_names'],
-                               barcodes=cell_barcodes,
-                               inferred_count_matrix=
-                               inferred_count_matrix[cell_barcode_inds, :],
-                               cell_barcode_inds=None,
-                               ambient_expression=ambient_expression,
-                               rho=rho,
-                               phi=phi,
-                               z=z[filtered_inds_of_analyzed_barcodes, :],
-                               d=d[filtered_inds_of_analyzed_barcodes],
-                               p=p[filtered_inds_of_analyzed_barcodes],
-                               loss=inferred_model.loss)
+            write_matrix_to_cellranger_h5(
+                output_file=filtered_output_file,
+                gene_names=self.data['gene_names'],
+                barcodes=cell_barcodes,
+                inferred_count_matrix=inferred_count_matrix[cell_barcode_inds, :],
+                cell_barcode_inds=None,
+                ambient_expression=ambient_expression,
+                rho=rho,
+                phi=phi,
+                z=z[filtered_inds_of_analyzed_barcodes, :],
+                d=d[filtered_inds_of_analyzed_barcodes],
+                p=p[filtered_inds_of_analyzed_barcodes],
+                loss=inferred_model.loss)
 
             # Save barcodes determined to contain cells as _cell_barcodes.csv
             try:
@@ -567,10 +609,29 @@ class Dataset:
         return write_succeeded
 
 
-def get_matrix_from_mtx(filedir: str) -> Dict[str,
-                                              Union[sp.csr.csr_matrix,
-                                                    List[np.ndarray],
-                                                    np.ndarray]]:
+def detect_cellranger_version_mtx(filedir: str) -> int:
+    """Detect which version of CellRanger (2 or 3) created this mtx directory.
+
+    Args:
+        filedir: string path to .mtx file that contains the raw gene
+            barcode matrix in a sparse coo text format.
+
+    Returns:
+        CellRanger version, either 2 or 3, as an integer.
+
+    """
+
+    assert os.path.isdir(filedir), "The directory {filedir} is not accessible."
+
+    if os.path.isfile(os.path.join(filedir, 'features.tsv.gz')):
+        return 3
+
+    else:
+        return 2
+
+
+def get_matrix_from_cellranger_mtx(filedir: str) \
+        -> Dict[str, Union[sp.csr.csr_matrix, List[np.ndarray], np.ndarray]]:
     """Load a count matrix from an mtx directory from CellRanger's output.
 
     For CellRanger v2:
@@ -609,9 +670,11 @@ def get_matrix_from_mtx(filedir: str) -> Dict[str,
     assert os.path.isdir(filedir), "The directory {filedir} is not accessible."
 
     # Decide whether data is CellRanger v2 or v3.
-    if os.path.isfile(os.path.join(filedir, 'features.tsv.gz')):
+    cellranger_version = detect_cellranger_version_mtx(filedir=filedir)
+    logging.info(f"CellRanger v{cellranger_version} format")
 
-        # CellRanger version 3
+    # CellRanger version 3
+    if cellranger_version == 3:
 
         matrix_file = os.path.join(filedir, 'matrix.mtx.gz')
         gene_file = os.path.join(filedir, "features.tsv.gz")
@@ -626,9 +689,8 @@ def get_matrix_from_mtx(filedir: str) -> Dict[str,
         gene_info = features[features[:, 2] == 'Gene Expression']
         gene_names = gene_info[:, 1].squeeze()  # second column
 
-    else:
-
-        # CellRanger version 2
+    # CellRanger version 2
+    elif cellranger_version == 2:
 
         # Read in the count matrix using scipy.
         matrix_file = os.path.join(filedir, 'matrix.mtx')
@@ -664,10 +726,40 @@ def get_matrix_from_mtx(filedir: str) -> Dict[str,
             'barcodes': barcodes}
 
 
-def get_matrix_from_h5(filename: str) -> Dict[str,
-                                              Union[sp.csr.csr_matrix,
-                                                    List[np.ndarray],
-                                                    np.ndarray]]:
+def detect_cellranger_version_h5(filename: str) -> int:
+    """Detect which version of CellRanger (2 or 3) created this h5 file.
+
+    Args:
+        filename: string path to .mtx file that contains the raw gene
+            barcode matrix in a sparse coo text format.
+
+    Returns:
+        version: CellRanger version, either 2 or 3, as an integer.
+
+    """
+
+    with tables.open_file(filename, 'r') as f:
+
+        # For CellRanger v2, each group in the table (other than root)
+        # contains a genome.
+        # For CellRanger v3, there is a 'matrix' group that contains 'features'.
+
+        version = 2
+
+        try:
+
+            # This works for version 3 but not for version 2.
+            getattr(f.root.matrix, 'features')
+            version = 3
+
+        except tables.NoSuchNodeError:
+            pass
+
+    return version
+
+
+def get_matrix_from_cellranger_h5(filename: str) \
+        -> Dict[str, Union[sp.csr.csr_matrix, List[np.ndarray], np.ndarray]]:
     """Load a count matrix from an h5 file from CellRanger's output.
 
     The file needs to be a _raw_gene_bc_matrices_h5.h5 file.  This function
@@ -694,62 +786,67 @@ def get_matrix_from_h5(filename: str) -> Dict[str,
 
     """
 
-    # try:
+    # Detect CellRanger version.
+    cellranger_version = detect_cellranger_version_h5(filename=filename)
+    logging.info(f"CellRanger v{cellranger_version} format")
+
     with tables.open_file(filename, 'r') as f:
         # Initialize empty lists.
         gene_names = []
         csc_list = []
         barcodes = None
 
-        # For CellRanger v2, each group in the table (other than root)
-        # contains a genome, so walk through the groups to get data for each
-        # genome.
-        # For v3, there is only the 'matrix' group.
-        for group in f.walk_groups():
-            try:
-                # Read in data for this genome, and put it into a
-                # scipy.sparse.csc.csc_matrix
-                barcodes = getattr(group, 'barcodes').read()
-                data = getattr(group, 'data').read()
-                indices = getattr(group, 'indices').read()
-                indptr = getattr(group, 'indptr').read()
-                shape = getattr(group, 'shape').read()
-                csc_list.append(sp.csc_matrix((data, indices, indptr),
-                                              shape=shape))
+        # CellRanger v2:
+        # Each group in the table (other than root) contains a genome,
+        # so walk through the groups to get data for each genome.
+        if cellranger_version == 2:
 
-                # Code for v2
+            for group in f.walk_groups():
                 try:
+                    # Read in data for this genome, and put it into a
+                    # scipy.sparse.csc.csc_matrix
+                    barcodes = getattr(group, 'barcodes').read()
+                    data = getattr(group, 'data').read()
+                    indices = getattr(group, 'indices').read()
+                    indptr = getattr(group, 'indptr').read()
+                    shape = getattr(group, 'shape').read()
+                    csc_list.append(sp.csc_matrix((data, indices, indptr),
+                                                  shape=shape))
                     gene_names.extend(getattr(group, 'gene_names').read())
 
                 except tables.NoSuchNodeError:
-                    # This exists in case the file is CellRanger v3
+                    # This exists to bypass the root node, which has no data.
                     pass
 
-                # Code for v3
-                try:
-                    # Read in 'feature' information
-                    feature_group = f.get_node(group, 'features')
-                    feature_types = getattr(feature_group,
-                                            'feature_type').read()
-                    feature_names = getattr(feature_group, 'name').read()
+        # CellRanger v3:
+        # There is only the 'matrix' group.
+        elif cellranger_version == 3:
 
-                    # The only 'feature' we want is 'Gene Expression'
-                    is_gene_expression = (feature_types == b'Gene Expression')
-                    gene_names.extend(feature_names[is_gene_expression])
+            # Read in data for this genome, and put it into a
+            # scipy.sparse.csc.csc_matrix
+            barcodes = getattr(f.root.matrix, 'barcodes').read()
+            data = getattr(f.root.matrix, 'data').read()
+            indices = getattr(f.root.matrix, 'indices').read()
+            indptr = getattr(f.root.matrix, 'indptr').read()
+            shape = getattr(f.root.matrix, 'shape').read()
+            csc_list.append(sp.csc_matrix((data, indices, indptr),
+                                          shape=shape))
 
-                    # Excise other 'features' from the count matrix
-                    gene_feature_inds = np.where(is_gene_expression)[0]
-                    csc_list[-1] = csc_list[-1][gene_feature_inds, :]
+            # Read in 'feature' information
+            feature_group = f.get_node(f.root.matrix, 'features')
+            feature_types = getattr(feature_group,
+                                    'feature_type').read()
+            feature_names = getattr(feature_group, 'name').read()
 
-                except tables.NoSuchNodeError:
-                    # This exists in case the file is CellRanger v2
-                    pass
+            # The only 'feature' we want is 'Gene Expression'
+            is_gene_expression = (feature_types == b'Gene Expression')
+            gene_names.extend(feature_names[is_gene_expression])
 
-            except tables.NoSuchNodeError:
-                # This exists to bypass the root node, which has no data.
-                pass
+            # Excise other 'features' from the count matrix
+            gene_feature_inds = np.where(is_gene_expression)[0]
+            csc_list[-1] = csc_list[-1][gene_feature_inds, :]
 
-    # Put the data from all genomes together (for v2 datasets).
+    # Put the data together (possibly from several genomes for v2 datasets).
     count_matrix = sp.vstack(csc_list, format='csc')
     count_matrix = count_matrix.transpose().tocsr()
 
@@ -766,18 +863,19 @@ def get_matrix_from_h5(filename: str) -> Dict[str,
             'barcodes': np.array(barcodes)}
 
 
-def write_matrix_to_h5(output_file: str,
-                       gene_names: np.ndarray,
-                       barcodes: np.ndarray,
-                       inferred_count_matrix: sp.csc.csc_matrix,
-                       cell_barcode_inds: Union[np.ndarray, None] = None,
-                       ambient_expression: Union[np.ndarray, None] = None,
-                       rho: Union[np.ndarray, None] = None,
-                       phi: Union[np.ndarray, None] = None,
-                       z: Union[np.ndarray, None] = None,
-                       d: Union[np.ndarray, None] = None,
-                       p: Union[np.ndarray, None] = None,
-                       loss: Union[Dict, None] = None) -> bool:
+def write_matrix_to_cellranger_h5(
+        output_file: str,
+        gene_names: np.ndarray,
+        barcodes: np.ndarray,
+        inferred_count_matrix: sp.csc.csc_matrix,
+        cell_barcode_inds: Union[np.ndarray, None] = None,
+        ambient_expression: Union[np.ndarray, None] = None,
+        rho: Union[np.ndarray, None] = None,
+        phi: Union[np.ndarray, None] = None,
+        z: Union[np.ndarray, None] = None,
+        d: Union[np.ndarray, None] = None,
+        p: Union[np.ndarray, None] = None,
+        loss: Union[Dict, None] = None) -> bool:
     """Write count matrix data to output HDF5 file using CellRanger format.
 
     Args:
@@ -869,7 +967,8 @@ def write_matrix_to_h5(output_file: str,
         return False
 
 
-def get_d_priors_from_dataset(dataset: Dataset) -> Tuple[float, float]:
+def get_d_priors_from_dataset(dataset: SingleCellRNACountsDataset) \
+        -> Tuple[float, float]:
     """Compute an estimate of reasonable priors on cell size and ambient size.
 
     Given a dataset (scipy.sparse.csr matrix of counts where
@@ -893,11 +992,6 @@ def get_d_priors_from_dataset(dataset: Dataset) -> Tuple[float, float]:
     """
 
     # Count the total unique UMIs per barcode (summing after transforming).
-    transformed_counts = \
-        np.array(dataset.transformation.transform(dataset.data['matrix']
-                                                  [:,
-                                                   dataset.analyzed_gene_inds])
-                 .sum(axis=1)).squeeze()
     counts = np.array(dataset.data['matrix']
                       [:, dataset.analyzed_gene_inds].sum(axis=1)).squeeze()
 
@@ -912,7 +1006,7 @@ def get_d_priors_from_dataset(dataset: Dataset) -> Tuple[float, float]:
         sort_order = np.argsort(counts)[::-1]
 
         # Estimate cell count by median, taking 'cells' to be largest counts.
-        cell_counts = int(np.median(transformed_counts[sort_order]
+        cell_counts = int(np.median(counts[sort_order]
                                     [:dataset.priors['n_cells']]).item())
 
         empty_counts = 0
@@ -927,8 +1021,7 @@ def get_d_priors_from_dataset(dataset: Dataset) -> Tuple[float, float]:
 
         # Mode of (rounded) log counts (for counts > cut) is a robust
         # empty estimator.
-        empty_log_counts = mode(np.round(np.log1p(transformed_counts[counts
-                                                                     > cut]),
+        empty_log_counts = mode(np.round(np.log1p(counts[counts > cut]),
                                          decimals=1))[0]
         empty_counts = int(np.expm1(empty_log_counts).item())
 
@@ -936,9 +1029,7 @@ def get_d_priors_from_dataset(dataset: Dataset) -> Tuple[float, float]:
 
         # Median of log counts above 5 * empty counts is a robust
         # cell estimator.
-        cell_log_counts = np.median(np.log1p(transformed_counts
-                                             [transformed_counts >
-                                              5 * empty_counts]))
+        cell_log_counts = np.median(np.log1p(counts[counts > 5 * empty_counts]))
         cell_counts = int(np.expm1(cell_log_counts).item())
 
         logging.info(f"Prior on counts in empty droplets is {empty_counts}")
@@ -948,7 +1039,8 @@ def get_d_priors_from_dataset(dataset: Dataset) -> Tuple[float, float]:
     return cell_counts, empty_counts
 
 
-def estimate_cell_count_from_dataset(dataset: Dataset) -> int:
+def estimate_cell_count_from_dataset(dataset: SingleCellRNACountsDataset) \
+        -> int:
     """Compute an estimate of number of real cells in a dataset.
 
     Given a Dataset, compute an estimate of the number of real cells.
@@ -982,8 +1074,8 @@ def estimate_cell_count_from_dataset(dataset: Dataset) -> int:
     return cell_count_est
 
 
-def estimate_chi_from_dataset(dataset: Dataset) -> Tuple[torch.Tensor,
-                                                         torch.Tensor]:
+def estimate_chi_ambient_from_dataset(dataset: SingleCellRNACountsDataset) \
+        -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute an estimate of ambient RNA levels.
 
     Given a Dataset, compute an estimate of the ambient gene expression and

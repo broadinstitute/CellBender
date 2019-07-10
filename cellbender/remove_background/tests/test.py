@@ -5,10 +5,11 @@ import warnings
 import cellbender
 import cellbender.remove_background.model
 from cellbender.remove_background.train import run_inference
-from cellbender.remove_background.data.simulate import simulate_ambient_dataset
-import cellbender.remove_background.data.transform as transform
-from cellbender.remove_background.data.dataset import Dataset, \
-    write_matrix_to_h5, get_matrix_from_h5
+from cellbender.remove_background.data.extras.simulate import \
+    simulate_dataset_with_ambient_rna
+from cellbender.remove_background.data.dataset import \
+    SingleCellRNACountsDataset, write_matrix_to_cellranger_h5, \
+    get_matrix_from_cellranger_h5
 import numpy as np
 import sys
 
@@ -34,10 +35,11 @@ class TestConsole(unittest.TestCase):
             # Generate a simulated dataset with ambient RNA.
             n_cells = 100
             csr_barcode_gene_synthetic, _, chi, _ = \
-                simulate_ambient_dataset(n_cells=n_cells, n_empty=3 * n_cells,
-                                         clusters=1, n_genes=1000,
-                                         d_cell=2000, d_empty=100,
-                                         ambient_different=False)
+                simulate_dataset_with_ambient_rna(n_cells=n_cells,
+                                                  n_empty=3 * n_cells,
+                                                  clusters=1, n_genes=1000,
+                                                  d_cell=2000, d_empty=100,
+                                                  ambient_different=False)
 
             # Generate some names for genes and barcodes.
             gene_names = np.array([f'g_{i}' for i in
@@ -48,16 +50,16 @@ class TestConsole(unittest.TestCase):
 
             # Save the data to a temporary file.
             temp_file_name = 'testfile.h5'
-            write_matrix_to_h5(temp_file_name,
-                               loss=None,
-                               gene_names=gene_names,
-                               barcodes=barcode_names,
-                               inferred_count_matrix=
-                               csr_barcode_gene_synthetic.tocsc(),
-                               ambient_expression=chi[0, :])
+            write_matrix_to_cellranger_h5(temp_file_name,
+                                          loss=None,
+                                          gene_names=gene_names,
+                                          barcodes=barcode_names,
+                                          inferred_count_matrix=
+                                          csr_barcode_gene_synthetic.tocsc(),
+                                          ambient_expression=chi[0, :])
 
             # Read the data back in.
-            reconstructed = get_matrix_from_h5(temp_file_name)
+            reconstructed = get_matrix_from_cellranger_h5(temp_file_name)
             new_matrix = reconstructed['matrix']
 
             # Check that the data matches.
@@ -90,10 +92,11 @@ class TestConsole(unittest.TestCase):
 
             # Generate a simulated dataset with ambient RNA.
             csr_barcode_gene_synthetic, _, _, _ = \
-                simulate_ambient_dataset(n_cells=n_cells, n_empty=3 * n_cells,
-                                         clusters=1, n_genes=1000,
-                                         d_cell=2000, d_empty=100,
-                                         ambient_different=False)
+                simulate_dataset_with_ambient_rna(n_cells=n_cells,
+                                                  n_empty=3 * n_cells,
+                                                  clusters=1, n_genes=1000,
+                                                  d_cell=2000, d_empty=100,
+                                                  ambient_different=False)
 
             # Fake some parsed command line inputs.
             args = ObjectWithAttributes()
@@ -112,7 +115,7 @@ class TestConsole(unittest.TestCase):
             args.expected_cell_count = n_cells
 
             # Wrap simulated count matrix in a Dataset object.
-            dataset_obj = Dataset(transformation=transform.IdentityTransform())
+            dataset_obj = SingleCellRNACountsDataset()
             dataset_obj.data = \
                 {'matrix': csr_barcode_gene_synthetic,
                  'gene_names':
@@ -134,13 +137,13 @@ class TestConsole(unittest.TestCase):
 
             # Make the background-subtracted dataset.
             inferred_count_matrix = cellbender.remove_background.model.\
-                get_count_matrix_from_encodings(z, d, p,
-                                                inferred_model,
-                                                dataset_obj)
+                generate_maximum_a_posteriori_count_matrix(z, d, p,
+                                                           inferred_model,
+                                                           dataset_obj)
 
             # Get the inferred background RNA expression from the model.
             ambient_expression = cellbender.remove_background.model.\
-                get_ambient_expression()
+                get_ambient_expression_from_pyro_param_store()
 
             return 1
 

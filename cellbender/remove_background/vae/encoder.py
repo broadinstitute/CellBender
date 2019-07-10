@@ -23,14 +23,12 @@ class CompositeEncoder(dict):
         super(CompositeEncoder, self).__init__(module_dict)
         self.module_dict = module_dict
 
-    def forward(self,
-                x: torch.Tensor,
-                chi_ambient: Union[torch.Tensor, None] = None) \
+    def forward(self, **kwargs) \
             -> Dict[str, torch.Tensor]:
         # For each module in the dict of the composite encoder, call forward().
         out = dict()
         for key, value in self.module_dict.items():
-            out[key] = value.forward(x, chi_ambient)
+            out[key] = value.forward(**kwargs)
 
         return out
 
@@ -89,7 +87,7 @@ class EncodeZ(nn.Module):
         # Set up the non-linear activations.
         self.softplus = nn.Softplus()
 
-    def forward(self, x: torch.Tensor, _) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
         # Define the forward computation to go from gene expression to latent
         # representation.
 
@@ -166,7 +164,7 @@ class EncodeD(nn.Module):
         # Set up the non-linear activations.
         self.softplus = nn.Softplus()
 
-    def forward(self, x: torch.Tensor, _) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         # Define the forward computation to go from gene expression to cell
         # probabilities.
 
@@ -185,7 +183,7 @@ class EncodeD(nn.Module):
                              + self.param).squeeze()
 
 
-class EncodePAmbient(nn.Module):
+class EncodeNonEmptyDropletLogitProb(nn.Module):
     """Encoder module that transforms gene expression into cell probabilities.
 
     The number of input units is the total number of genes and the number of
@@ -228,34 +226,40 @@ class EncodePAmbient(nn.Module):
     """
 
     def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int,
-                 input_transform: str = None, log_count_crossover: float = 7.):
-        super(EncodePAmbient, self).__init__()
+                 log_count_crossover: float, input_transform: str = None):
+        super(EncodeNonEmptyDropletLogitProb, self).__init__()
         self.input_dim = input_dim
         self.transform = input_transform
         self.param = log_count_crossover
+        self.INITIAL_WEIGHT_FOR_LOG_COUNTS = 1.
+        self.INITIAL_OUTPUT_SCALE_FOR_LOG_COUNTS = 5.
+        self.INITIAL_OUTPUT_BIAS_FOR_LOG_COUNTS = \
+            -1 * self.INITIAL_OUTPUT_SCALE_FOR_LOG_COUNTS
 
         # Set up the linear transformations used in fully-connected layers.
         # Adjust initialization conditions to start with a reasonable output.
         self.linears = nn.ModuleList([nn.Linear(1 + 2*input_dim,
                                                 hidden_dims[0])])
         with torch.no_grad():
-            self.linears[-1].weight[0][0] = 1.  # Weight for log sum
+            self.linears[-1].weight[0][0] = self.INITIAL_WEIGHT_FOR_LOG_COUNTS
         for i in range(1, len(hidden_dims)):  # Second hidden layer onward
             self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
             # Initialize p so that it starts out based (almost) on UMI counts.
             with torch.no_grad():
-                self.linears[-1].weight[0][0] = 1.  # Weight for log sum
+                self.linears[-1].weight[0][0] = self.INITIAL_WEIGHT_FOR_LOG_COUNTS
         self.output = nn.Linear(hidden_dims[-1], output_dim)
         # Initialize p to be a sigmoid function of UMI counts.
         with torch.no_grad():
-            self.output.weight[0][0] = 5.
-            self.output.bias = torch.nn.Parameter(
-                torch.Tensor([-5 * log_count_crossover]))
+            self.output.weight[0][0] = self.INITIAL_OUTPUT_SCALE_FOR_LOG_COUNTS
+            self.output.bias.data.copy_(torch.tensor([self.INITIAL_OUTPUT_BIAS_FOR_LOG_COUNTS
+                                                      * log_count_crossover]))
 
         # Set up the non-linear activations.
         self.softplus = nn.Softplus()
 
-    def forward(self, x: torch.Tensor, chi_ambient) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                chi_ambient: torch.Tensor) -> torch.Tensor:
         # Define the forward computation to go from gene expression to cell
         # probabilities.  The log of the total UMI counts is concatenated with
         # the input gene expression and the estimate of the difference between
@@ -276,95 +280,7 @@ class EncodePAmbient(nn.Module):
         for i in range(1, len(self.linears)):  # Second hidden layer onward
             hidden = self.softplus(self.linears[i](hidden))
 
-        return self.output(hidden).squeeze()
-
-
-class EncodeP(nn.Module):
-    """Encoder module that transforms gene expression into cell probabilities.
-
-    The number of input units is the total number of genes and the number of
-    output units is the dimension of the latent space.  This encoder transforms
-    a point in high-dimensional gene expression space to a latent probability
-    that a given barcode contains a real cell, via a learned transformation
-    involving fully-connected layers.
-
-    Args:
-        input_dim: Number of genes.  The size of the input of this encoder.
-        hidden_dims: Size of each of the hidden layers.
-        output_dim: Number of dimensions of the probability estimate (1).
-        input_transform: Name of transformation to be applied to the input
-            gene expression counts.  Must be one of
-            ['log', 'normalize', 'log_center'].
-        log_count_crossover: The log of the number of counts where the
-            transition from cells to empty droplets is expected to occur.
-
-    Attributes:
-        transform: Name of transformation to be applied to the input gene
-            expression counts.
-        param: The log of the number of counts where the transition from
-            cells to empty droplets is expected to occur.
-        linears: torch.nn.ModuleList of fully-connected layers before the
-            output layer.
-        output: torch.nn.Linear fully-connected output layer for the size
-            of each input barcode.
-        input_dim: Size of input gene expression.
-
-    Note:
-        An encoder with two hidden layers with sizes 100 and 500, respectively,
-        should set hidden_dims = [100, 500].  An encoder with only one hidden
-        layer should still pass in hidden_dims as a list, for example,
-        hidden_dims = [500].
-        The output is in the form of a logit, so can be any real number.  The
-        transformation from logit to probability is a sigmoid.
-
-    """
-
-    def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int,
-                 input_transform: str = None, log_count_crossover: float = 7.):
-        super(EncodeP, self).__init__()
-        self.input_dim = input_dim
-        self.transform = input_transform
-        self.param = log_count_crossover
-
-        # Set up the linear transformations used in fully-connected layers.
-        # Adjust initialization conditions to start with a reasonable output.
-        self.linears = nn.ModuleList([nn.Linear(1 + input_dim,
-                                                hidden_dims[0])])
-        with torch.no_grad():
-            self.linears[-1].weight[0][0] = 1.  # Weight for log sum
-        for i in range(1, len(hidden_dims)):  # Second hidden layer onward
-            self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
-            # Initialize p so that it starts out based (almost) on UMI counts.
-            with torch.no_grad():
-                self.linears[-1].weight[0][0] = 1.  # Weight for log sum
-        self.output = nn.Linear(hidden_dims[-1], output_dim)
-        # Initialize p to be a sigmoid function of UMI counts.
-        with torch.no_grad():
-            self.output.weight[0][0] = 5.
-            self.output.bias = torch.nn.Parameter(
-                torch.Tensor([-5 * log_count_crossover]))
-
-        # Set up the non-linear activations.
-        self.softplus = nn.Softplus()
-
-    def forward(self, x: torch.Tensor, _) -> torch.Tensor:
-        # Define the forward computation to go from gene expression to cell
-        # probabilities.  The input gene expression is concatenated with the
-        # log of the total UMI counts to form an augmented input.
-
-        # Transform input and calculate log total UMI counts per barcode.
-        x = x.reshape(-1, self.input_dim)
-        log_counts = x.sum(dim=-1, keepdim=True).log1p()
-        x = transform_input(x, self.transform)
-
-        # Form a new input by concatenation.
-        # Compute the hidden layers and the output.
-        hidden = self.softplus(self.linears[0](torch.cat((log_counts,
-                                                          x), dim=-1)))
-        for i in range(1, len(self.linears)):  # Second hidden layer onward
-            hidden = self.softplus(self.linears[i](hidden))
-
-        return self.output(hidden).squeeze()
+        return self.output(hidden).squeeze(-1)
 
 
 def transform_input(x: torch.Tensor, transform: str) -> Union[torch.Tensor,

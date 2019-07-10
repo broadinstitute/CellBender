@@ -1,11 +1,10 @@
 """Command-line tool functionality for remove-background."""
 
 import torch
-from cellbender.remove_background.data.dataset import Dataset
-import cellbender.remove_background.data.transform as transform
+from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
 from cellbender.remove_background.train import run_inference
-import cellbender.remove_background.tests.test
 from cellbender.command_line import AbstractCLI
+from cellbender.remove_background import consts as consts
 
 import argparse
 import logging
@@ -48,39 +47,48 @@ class CLI(AbstractCLI):
 
         subparser.add_argument("--input", nargs=None, type=str,
                                dest='input_file', default=None,
+                               required=True,
                                help="Data file on which to run tool, as either "
                                     "_raw_gene_barcode_matrices_h5.h5 file, or "
                                     "as the path containing the raw "
                                     "matrix.mtx, barcodes.tsv, and genes.tsv "
-                                    "files.")
+                                    "files. Supported for outputs of "
+                                    "CellRanger v2 and v3.")
         subparser.add_argument("--output", nargs=None, type=str,
                                dest='output_file', default=None,
-                               help="Name of output file, which will be HDF5.")
-        subparser.add_argument("--expected_cells", nargs=None, type=int,
+                               required=True,
+                               help="Output file location (the path must "
+                                    "exist, and the file name must have .h5 "
+                                    "extension).")
+        subparser.add_argument("--expected-cells", nargs=None, type=int,
                                default=None,
                                dest="expected_cell_count",
-                               help="Number of cells expected in the dataset.")
-        subparser.add_argument("--additional_barcodes", nargs=None, type=int,
-                               default=None, dest="additional_barcodes",
-                               help="The number of additional droplets after "
-                                    "the number of expected_cells "
-                                    "that have any chance of containing cells.  "
-                                    "The largest (expected_cells + "
-                                    "additional_barcodes) droplets will have "
-                                    "their cell probabilities inferred as an "
-                                    "output.")
+                               help="Number of cells expected in the dataset "
+                                    "(a rough estimate within a factor of 2 "
+                                    "is sufficient).")
+        subparser.add_argument("--total-droplets-included",
+                               nargs=None, type=int,
+                               default=consts.TOTAL_DROPLET_DEFAULT,
+                               dest="total_droplets",
+                               help="The number of droplets from the "
+                                    "rank-ordered UMI plot that will be "
+                                    "analyzed. The largest 'total_droplets' "
+                                    "droplets will have their cell "
+                                    "probabilities inferred as an output.")
         subparser.add_argument("--model", nargs=None, type=str, default="full",
                                choices=["simple", "ambient",
                                         "swapping", "full"],
                                dest="model",
                                help="Which model is being used for count data. "
-                                    " 'simple' does not model background or "
-                                    "ambient RNA.  'ambient' assumes "
-                                    "background RNA is incorporated into "
-                                    "droplets.  'swapping' assumes background "
-                                    "RNA comes from barcode swapping. "
-                                    "'full' uses a combined ambient and "
-                                    "swapping model.  Defaults to 'full'.")
+                                    " 'simple' does not model either ambient "
+                                    "RNA or random barcode swapping (for "
+                                    "debugging purposes -- not recommended).  "
+                                    "'ambient' assumes background RNA is "
+                                    "incorporated into droplets.  'swapping' "
+                                    "assumes background RNA comes from random "
+                                    "barcode swapping.  'full' uses a "
+                                    "combined ambient and swapping model.  "
+                                    "Defaults to 'full'.")
         subparser.add_argument("--epochs", nargs=None, type=int, default=150,
                                dest="epochs",
                                help="Number of epochs to train.")
@@ -88,7 +96,8 @@ class CLI(AbstractCLI):
                                dest="use_cuda", action="store_true",
                                help="Including the flag --cuda will run the "
                                     "inference on a GPU.")
-        subparser.add_argument("--low_count_threshold", type=int, default=15,
+        subparser.add_argument("--low-count-threshold", type=int,
+                               default=consts.LOW_UMI_CUTOFF,
                                dest="low_count_threshold",
                                help="Droplets with UMI counts below this "
                                     "number are completely excluded from the "
@@ -96,87 +105,68 @@ class CLI(AbstractCLI):
                                     "correct prior for empty droplet counts "
                                     "in the rare case where empty counts "
                                     "are extremely high (over 200).")
-        subparser.add_argument("--training_fraction", nargs=None,
-                               type=float, default=1.,
-                               dest="training_fraction",
-                               help="Fraction of the data to use for training.")
-        subparser.add_argument("--z_dim", type=int, default=20,
+        subparser.add_argument("--z-dim", type=int, default=20,
                                dest="z_dim",
                                help="Dimension of latent variable z.")
-        subparser.add_argument("--z_layers", nargs="+", type=int, default=[500],
+        subparser.add_argument("--z-layers", nargs="+", type=int, default=[500],
                                dest="z_hidden_dims",
                                help="Dimension of hidden layers in the encoder "
                                     "for z.")
-        subparser.add_argument("--d_layers", nargs="+", type=int,
+        subparser.add_argument("--d-layers", nargs="+", type=int,
                                default=[5, 2, 2],
                                dest="d_hidden_dims",
                                help="Dimension of hidden layers in the encoder "
                                     "for d.")
-        subparser.add_argument("--p_layers", nargs="+", type=int,
+        subparser.add_argument("--p-layers", nargs="+", type=int,
                                default=[100, 10],
                                dest="p_hidden_dims",
                                help="Dimension of hidden layers in the encoder "
                                     "for p.")
-        subparser.add_argument("--empty_drop_training_fraction",
-                               type=float, default=0.5, nargs=None,
+        subparser.add_argument("--empty-drop-training-fraction",
+                               type=float, nargs=None,
+                               default=consts.FRACTION_EMPTIES,
                                dest="fraction_empties",
                                help="Training detail: the fraction of the "
                                     "training data each epoch "
                                     "that is drawn (randomly sampled) from "
                                     "surely empty droplets.")
-        subparser.add_argument("--blacklist_genes", nargs="+", type=int,
+        subparser.add_argument("--blacklist-genes", nargs="+", type=int,
                                default=[],
                                dest="blacklisted_genes",
                                help="Integer indices of genes to ignore "
                                     "entirely.  In the output count matrix, "
                                     "the counts for these genes will be set "
                                     "to zero.")
-        subparser.add_argument("--transform_counts", nargs=None, type=str,
-                               default="identity",
-                               choices=["identity", "log", "sqrt"],
-                               dest="transform",
-                               help="Transformation to apply to count data "
-                                    "prior to running inference.  This should "
-                                    "be set to 'identity'.")
-        subparser.add_argument("--learning_rate", nargs=None,
+        subparser.add_argument("--learning-rate", nargs=None,
                                type=float, default=1e-3,
                                dest="learning_rate",
                                help="Training detail: learning rate for "
                                     "inference (probably "
                                     "do not exceed 1e-3).")
-        subparser.add_argument("--no_jit",
+        subparser.add_argument("--no-jit",
                                dest="use_jit", action="store_false",
                                help="Including the flag --no_jit will opt not "
                                     "to use a JIT compiler.  The JIT compiler "
                                     "provides a speed-up.")
-        subparser.add_argument("--test",
-                               dest="test", action="store_true",
-                               help="Including the flag --test will run tests "
-                                    "only, and disregard other input "
-                                    "parameters.")
 
         return subparsers
 
     def validate_args(self, args):
         """Validate parsed arguments."""
 
-        # If running tests, skip the rest of the validation.
-        if args.test:
-            self.args = args
-            return args
-
         # Ensure that if there's a tilde for $HOME in the file path, it works.
         try:
             args.input_file = os.path.expanduser(args.input_file)
             args.output_file = os.path.expanduser(args.output_file)
         except TypeError:
-            print("Please specify input and output files.")
+            raise ValueError("Problem with provided input and output paths.")
 
         # Ensure write access to the save directory.
         file_dir, _ = os.path.split(args.output_file)  # Get the output directory
         if file_dir:
             assert os.access(file_dir, os.W_OK), \
-                f"Cannot write to specified output directory {file_dir}"
+                f"Cannot write to specified output directory {file_dir}. " \
+                f"Ensure the directory exists and is write accessible."
 
         # If cell counts are specified, it should be positive.
         if args.expected_cell_count is not None:
@@ -185,9 +175,11 @@ class CLI(AbstractCLI):
 
         # If additional barcodes are specified, they must be specified for
         # all files.
-        if args.additional_barcodes is not None:
-            assert args.additional_barcodes > 0, \
-                "additional_barcodes must be an integer greater than zero."
+        if ((args.total_droplets is not None)
+                and (args.expected_cell_count is not None)):
+            assert args.total_droplets > args.expected_cell_count, \
+                f"total_droplets must be an integer greater than the input " \
+                f"expected_cell_count, which is {args.expected_cell_count}."
 
         assert (args.fraction_empties > 0) and (args.fraction_empties < 1), \
             "fraction_empties must be between 0 and 1, exclusive.  This is " \
@@ -196,8 +188,8 @@ class CLI(AbstractCLI):
         assert args.learning_rate < 0.1, "learning_rate must be < 0.1"
         assert args.learning_rate > 0, "learning_rate must be > 0"
 
-        assert args.training_fraction <= 1.0, "training_fraction must be <= 1"
-        assert args.training_fraction > 0.0, "training_fraction must be > 0"
+        # Set training_fraction to consts.TRAINING_FRACTION (which is 1.).
+        args.training_fraction = consts.TRAINING_FRACTION
 
         # If cuda is requested, make sure it is available.
         if args.use_cuda:
@@ -237,18 +229,6 @@ def run_remove_background(args):
 
     """
 
-    # Set up the count data transformation.
-    if args.transform == "identity":
-        trans = transform.IdentityTransform()
-    elif args.transform == "log":
-        trans = transform.LogTransform(scale_factor=1.)
-    elif args.transform == "sqrt":
-        trans = transform.SqrtTransform(scale_factor=1.)
-    else:
-        raise NotImplementedError(f"transform_counts was set to "
-                                  f"{args.transform}, "
-                                  f"which is not implemented.")
-
     # Load dataset, run inference, and write the output to a file.
 
     # Send logging messages to stdout as well as a log file.
@@ -276,16 +256,17 @@ def run_remove_background(args):
 
     # Load data from file and choose barcodes and genes to analyze.
     try:
-        dataset_obj = Dataset(transformation=trans,
-                              input_file=args.input_file,
-                              expected_cell_count=
-                              args.expected_cell_count,
-                              num_transition_barcodes=
-                              args.additional_barcodes,
-                              fraction_empties=args.fraction_empties,
-                              model_name=args.model,
-                              gene_blacklist=args.blacklisted_genes,
-                              low_count_threshold=args.low_count_threshold)
+        dataset_obj = \
+            SingleCellRNACountsDataset(input_file=args.input_file,
+                                       expected_cell_count=
+                                       args.expected_cell_count,
+                                       total_droplet_barcodes=
+                                       args.total_droplets,
+                                       fraction_empties=args.fraction_empties,
+                                       model_name=args.model,
+                                       gene_blacklist=args.blacklisted_genes,
+                                       low_count_threshold=
+                                       args.low_count_threshold)
     except OSError:
         logging.error(f"OSError: Unable to open file {args.input_file}.")
         return
@@ -326,15 +307,5 @@ def run_remove_background(args):
 def main(args):
     """Take command-line input, parse arguments, and run tests or tool."""
 
-    # Figure out whether we are just running tests.
-    testing = args.test
-
-    if testing:
-
-        # Run tests.
-        cellbender.remove_background.tests.test.main()
-
-    else:
-
-        # Run the full tool.
-        run_remove_background(args)
+    # Run the tool.
+    run_remove_background(args)

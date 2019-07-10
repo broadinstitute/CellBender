@@ -8,16 +8,15 @@ from torch.distributions import constraints
 import pyro
 import pyro.distributions as dist
 from pyro.infer import config_enumerate
-from cellbender.remove_background.distributions.NegativeBinomial \
-    import NegativeBinomial
 from cellbender.remove_background.vae import encoder as encoder_module
-from cellbender.remove_background.data.dataset import Dataset
+import cellbender.remove_background.consts as consts
 
 from typing import Union, Tuple
+from numbers import Number
 import logging
 
 
-class VariationalInferenceModel(nn.Module):
+class RemoveBackgroundPyroModel(nn.Module):
     """Class that contains the model and guide used for variational inference.
 
     Args:
@@ -48,13 +47,13 @@ class VariationalInferenceModel(nn.Module):
                  model_type: str,
                  encoder: Union[nn.Module, encoder_module.CompositeEncoder],
                  decoder: nn.Module,
-                 dataset_obj: Dataset,
+                 dataset_obj: 'SingleCellRNACountsDataset',
                  phi_loc_prior: float = 0.2,
                  phi_scale_prior: float = 0.2,
                  rho_alpha_prior: float = 3,
                  rho_beta_prior: float = 80,
                  use_cuda: bool = False):
-        super(VariationalInferenceModel, self).__init__()
+        super(RemoveBackgroundPyroModel, self).__init__()
 
         self.model_type = model_type
         self.include_empties = True
@@ -253,8 +252,13 @@ class VariationalInferenceModel(nn.Module):
 
         return mu
 
-    def model(self, x):
-        """Data likelihood model."""
+    def model(self, x: torch.Tensor):
+        """Data likelihood model.
+
+            Args:
+                x: Mini-batch of data. Barcodes are rows, genes are columns.
+
+        """
 
         # Register the decoder with pyro.
         pyro.module("decoder", self.decoder)
@@ -337,13 +341,18 @@ class VariationalInferenceModel(nn.Module):
             # Negative binomial:
             r = 1. / phi
             logit = torch.log(mu * phi)
-            pyro.sample("obs", NegativeBinomial(total_count=r,
-                                                logits=logit).to_event(1),
+            pyro.sample("obs", dist.NegativeBinomial(total_count=r,
+                                                     logits=logit).to_event(1),
                         obs=x.reshape(-1, self.n_genes))
 
     @config_enumerate(default='parallel')
-    def guide(self, x):
-        """Variational posterior."""
+    def guide(self, x: torch.Tensor):
+        """Variational posterior.
+
+            Args:
+                x: Mini-batch of data. Barcodes are rows, genes are columns.
+
+        """
 
         # Register the encoder(s) with pyro.
         for name, module in self.encoder.items():
@@ -406,10 +415,10 @@ class VariationalInferenceModel(nn.Module):
 
             # Encode the latent variables from the input gene expression counts.
             if self.include_empties:
-                enc = self.encoder.forward(x, chi_ambient)
+                enc = self.encoder.forward(x=x, chi_ambient=chi_ambient)
 
             else:
-                enc = self.encoder.forward(x, None)
+                enc = self.encoder.forward(x=x, chi_ambient=None)
 
             # Sample swapping fraction rho.
             if self.include_rho:
@@ -457,8 +466,8 @@ class VariationalInferenceModel(nn.Module):
                                              enc['z']['scale']).independent(1))
 
 
-def get_encodings(model: VariationalInferenceModel,
-                  dataset_obj,
+def get_encodings(model: RemoveBackgroundPyroModel,
+                  dataset_obj: 'SingleCellRNACountsDataset',
                   cells_only: bool = True) -> Tuple[np.ndarray,
                                                     np.ndarray,
                                                     np.ndarray]:
@@ -500,7 +509,7 @@ def get_encodings(model: VariationalInferenceModel,
     p = np.zeros((dataset.shape[0]))
 
     # Get chi ambient, if it was part of the model.
-    chi_ambient = get_ambient_expression()
+    chi_ambient = get_ambient_expression_from_pyro_param_store()
     if chi_ambient is not None:
         chi_ambient = torch.Tensor(chi_ambient).to(device=model.device)
 
@@ -514,34 +523,31 @@ def get_encodings(model: VariationalInferenceModel,
             dtype=int).squeeze()).to(device=model.device)
 
         # Send data chunk through encoder.
-        enc = model.encoder.forward(x, chi_ambient)
+        enc = model.encoder.forward(x=x, chi_ambient=chi_ambient)
 
         # Get d_cell_scale from fit model.
-        d_sig = \
-            pyro.get_param_store().get_param('d_cell_scale')\
-                .detach().cpu().numpy()
+        d_sig = to_ndarray(pyro.get_param_store().get_param('d_cell_scale'))
 
         # Put the resulting encodings into the appropriate numpy arrays.
-        z[i:min(dataset.shape[0], i + s), :] = \
-            enc['z']['loc'].detach().cpu().numpy()
-        d[i:min(dataset.shape[0], i + s)] = \
-            np.exp(enc['d_loc'].detach().cpu().numpy() + d_sig.item()**2 / 2)
+        z[i:min(dataset.shape[0], i + s), :] = to_ndarray(enc['z']['loc'])
+        d[i:min(dataset.shape[0], i + s)] = (np.exp(to_ndarray(enc['d_loc']))
+                                             + d_sig.item()**2 / 2)
         try:  # p is not always available: it depends which model was used.
-            p[i:min(dataset.shape[0], i + s)] = \
-                enc['p_y'].detach().sigmoid().cpu().numpy()
+            p[i:min(dataset.shape[0], i + s)] = to_ndarray(enc['p_y'].sigmoid())
         except KeyError:
             p = None  # Simple model gets None for p.
 
     return z, d, p
 
 
-def get_count_matrix_from_encodings(z: np.ndarray,
-                                    d: np.ndarray,
-                                    p: Union[np.ndarray, None],
-                                    model: VariationalInferenceModel,
-                                    dataset_obj,
-                                    cells_only: bool = True) \
-        -> sp.csc.csc_matrix:
+def generate_maximum_a_posteriori_count_matrix(
+        z: np.ndarray,
+        d: np.ndarray,
+        p: Union[np.ndarray, None],
+        model: RemoveBackgroundPyroModel,
+        dataset_obj: 'SingleCellRNACountsDataset',
+        cells_only: bool = True,
+        chunk_size: int = 200) -> sp.csc.csc_matrix:
     """Make a point estimate of ambient-background-subtracted UMI count matrix.
 
     Sample counts by maximizing the model posterior based on learned latent
@@ -558,6 +564,7 @@ def get_count_matrix_from_encodings(z: np.ndarray,
         dataset_obj: Input dataset.
         cells_only: If True, only returns the encodings of barcodes that are
             determined to contain cells.
+        chunk_size: Size of mini-batch of data to send through encoder at once.
 
     Returns:
         inferred_count_matrix: Matrix of the same dimensions as the input
@@ -588,25 +595,26 @@ def get_count_matrix_from_encodings(z: np.ndarray,
 
     # Trim everything down to the barcodes we are interested in (just cells?).
     if cells_only:
-        d = d[p_no_nans > 0.5]
-        z = z[p_no_nans > 0.5, :]
-        barcode_inds = dataset_obj.analyzed_barcode_inds[p_no_nans > 0.5]
+        d = d[p_no_nans > consts.CELL_PROB_CUTOFF]
+        z = z[p_no_nans > consts.CELL_PROB_CUTOFF, :]
+        barcode_inds = \
+            dataset_obj.analyzed_barcode_inds[p_no_nans
+                                              > consts.CELL_PROB_CUTOFF]
     else:
         # Set cell size factors equal to zero where cell probability < 0.5.
-        d[p_no_nans < 0.5] = 0.
-        z[p_no_nans < 0.5, :] = 0.
+        d[p_no_nans < consts.CELL_PROB_CUTOFF] = 0.
+        z[p_no_nans < consts.CELL_PROB_CUTOFF, :] = 0.
         barcode_inds = np.arange(0, count_matrix.shape[0])  # All barcodes
 
     # Get mean of the inferred posterior for the overdispersion, phi.
-    phi = pyro.get_param_store().get_param("phi_loc")\
-        .detach().cpu().numpy().item()
+    phi = to_ndarray(pyro.get_param_store().get_param("phi_loc")).item()
 
     # Get the gene expression vectors by sending latent z through the decoder.
     # Send dataset through the learned encoder in chunks.
     barcodes = []
     genes = []
     counts = []
-    s = 200
+    s = chunk_size
     for i in np.arange(0, barcode_inds.size, s):
 
         # TODO: for 117000 cells, this routine overflows (~15GB) memory
@@ -616,12 +624,12 @@ def get_count_matrix_from_encodings(z: np.ndarray,
         # Decode gene expression for a chunk of barcodes.
         decoded = model.decoder(torch.Tensor(
             z[i:last_ind_this_chunk]).to(device=model.device))
-        chi = decoded.detach().cpu().numpy()
+        chi = to_ndarray(decoded)
 
-        # Estimate counts for the chunk of barcodes.
-        chunk_dense_counts = estimate_counts(chi,
-                                             d[i:last_ind_this_chunk],
-                                             phi)
+        # Estimate counts for the chunk of barcodes as d * chi.
+        chunk_dense_counts = \
+            np.maximum(0,
+                       np.expand_dims(d[i:last_ind_this_chunk], axis=1) * chi)
 
         # Turn the floating point count estimates into integers.
         decimal_values, _ = np.modf(chunk_dense_counts)  # Stuff after decimal.
@@ -661,39 +669,7 @@ def get_count_matrix_from_encodings(z: np.ndarray,
     return inferred_count_matrix
 
 
-def estimate_counts(chi: np.ndarray,
-                    d: np.ndarray,
-                    phi: float) -> np.ndarray:
-    """Return an estimate of the number of counts, based on inferred latents.
-
-    Args:
-        chi: Vector (or matrix) of inferred fractional gene expression, where
-            rightmost dimension corresponds to genes.
-        d: Vector of size scale factors, one for each barcode.  Must contain
-            zeros for barcodes determined not to contain a real cell.
-        phi: Overdispersion parameter of the negative binomial distribution.
-
-    Note:
-        mode of NB is p(r-1)/(1-p)
-        where r = 1/phi
-        and p/(1-p) = mu*phi
-        so the mode is mu*phi*(1/phi-1) = mu - mu*phi = mu*(1-phi)
-        and mu = chi*d
-        [if phi>1, then the MAP is zero]
-
-        But, the output is mu = chi * d, as a float.
-
-    """
-
-    # assert phi >= 0., "Over-dispersion of negative binomial must be >= 0."
-
-    mu = np.expand_dims(d, axis=1) * chi
-    return np.maximum(0, mu)
-
-    # return np.maximum(0, np.array(mu * (1 - phi), dtype=int))
-
-
-def get_ambient_expression() -> Union[np.ndarray, None]:
+def get_ambient_expression_from_pyro_param_store() -> Union[np.ndarray, None]:
     """Get ambient RNA expression for 'empty' droplets.
 
     Return:
@@ -710,8 +686,7 @@ def get_ambient_expression() -> Union[np.ndarray, None]:
 
     try:
         # Get fit hyperparameter for ambient gene expression from model.
-        chi_ambient = pyro.param("chi_ambient").\
-            detach().cpu().numpy().squeeze()
+        chi_ambient = to_ndarray(pyro.param("chi_ambient")).squeeze()
     except KeyError:
         pass
 
@@ -735,10 +710,8 @@ def get_contamination_fraction() -> Union[np.ndarray, None]:
 
     try:
         # Get fit hyperparameters for contamination fraction from model.
-        rho_alpha = pyro.param("rho_alpha").\
-            detach().cpu().numpy().squeeze()
-        rho_beta = pyro.param("rho_beta").\
-            detach().cpu().numpy().squeeze()
+        rho_alpha = to_ndarray(pyro.param("rho_alpha")).squeeze()
+        rho_beta = to_ndarray(pyro.param("rho_beta")).squeeze()
         rho = np.array([rho_alpha, rho_beta])
     except KeyError:
         pass
@@ -746,7 +719,7 @@ def get_contamination_fraction() -> Union[np.ndarray, None]:
     return rho
 
 
-def get_overdispersion() -> Union[np.ndarray, None]:
+def get_overdispersion_from_pyro_param_store() -> Union[np.ndarray, None]:
     """Get overdispersion hyperparameters.
 
     Return:
@@ -763,12 +736,23 @@ def get_overdispersion() -> Union[np.ndarray, None]:
 
     try:
         # Get fit hyperparameters for contamination fraction from model.
-        phi_loc = pyro.param("phi_loc").\
-            detach().cpu().numpy().squeeze()
-        phi_scale = pyro.param("phi_scale").\
-            detach().cpu().numpy().squeeze()
+        phi_loc = to_ndarray(pyro.param("phi_loc")).squeeze()
+        phi_scale = to_ndarray(pyro.param("phi_scale")).squeeze()
         phi = np.array([phi_loc, phi_scale])
     except KeyError:
         pass
 
     return phi
+
+
+def to_ndarray(x: Union[Number, np.ndarray, torch.Tensor]) -> np.ndarray:
+    """Convert a numeric value or array to a numpy array on cpu."""
+
+    if type(x) is Number:
+        return np.array(x)
+
+    elif type(x) is np.ndarray:
+        return x
+
+    elif type(x) is torch.Tensor:
+        return x.detach().cpu().numpy()

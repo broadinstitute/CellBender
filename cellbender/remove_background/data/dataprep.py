@@ -4,8 +4,12 @@ a class to implement loading data from a sparse matrix in mini-batches.
 
 import numpy as np
 import scipy.sparse as sp
+
+import cellbender.remove_background.consts as consts
+
 import torch
 import torch.utils.data
+
 from typing import Tuple, List
 
 
@@ -44,8 +48,8 @@ class DataLoader:
     def __init__(self,
                  dataset: sp.csr_matrix,
                  empty_drop_dataset: sp.csr_matrix,
-                 batch_size: int = 128,
-                 fraction_empties: float = 0.5,
+                 batch_size: int = consts.DEFAULT_BATCH_SIZE,
+                 fraction_empties: float = consts.FRACTION_EMPTIES,
                  shuffle: bool = True,
                  use_cuda: bool = True):
         self.dataset = dataset
@@ -56,6 +60,7 @@ class DataLoader:
         self.fraction_empties = fraction_empties
         self.cell_batch_size = int(batch_size * (1. - fraction_empties))
         self.shuffle = shuffle
+        self.random = np.random.RandomState(seed=1234)
         self.device = 'cpu'
         self.use_cuda = use_cuda
         if self.use_cuda:
@@ -64,7 +69,7 @@ class DataLoader:
 
     def _reset(self):
         if self.shuffle:
-            np.random.shuffle(self.ind_list)  # Shuffle these cell inds in place
+            self.random.shuffle(self.ind_list)  # Shuffle cell inds in place
         self.ptr = 0
 
     def __len__(self):
@@ -92,9 +97,9 @@ class DataLoader:
                              (1 - self.fraction_empties)))
             if self.empty_ind_list.size > 0:
                 # This does not happen for 'simple' model.
-                empty_inds = np.random.choice(self.empty_ind_list,
-                                              size=n_empties,
-                                              replace=True)
+                empty_inds = self.random.choice(self.empty_ind_list,
+                                                size=n_empties,
+                                                replace=True)
 
                 if empty_inds.size > 0:
                     csr_list = [self.dataset[cell_inds, :],
@@ -114,9 +119,10 @@ class DataLoader:
 
 def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
                                   empty_drop_dataset: sp.csr.csr_matrix,
-                                  training_fraction: float = 0.9,
-                                  fraction_empties: float = 0.5,
-                                  batch_size: int = 128,
+                                  random_state: np.random.RandomState,
+                                  training_fraction: float = consts.TRAINING_FRACTION,
+                                  fraction_empties: float = consts.FRACTION_EMPTIES,
+                                  batch_size: int = consts.DEFAULT_BATCH_SIZE,
                                   shuffle: bool = True,
                                   use_cuda: bool = True) -> Tuple[
                                       torch.utils.data.DataLoader,
@@ -134,6 +140,8 @@ def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
             columns are genes.
         empty_drop_dataset: Matrix of gene counts, where rows are surely-empty
             droplet barcodes and columns are genes.
+        random_state: numpy.random.RandomState from the Dataset object, for
+            deterministic outputs.
         training_fraction: Fraction of data to use as the training set.  The
             rest becomes the test set.
         fraction_empties: Fraction of each minibatch to be composed of empty
@@ -155,14 +163,14 @@ def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
     """
 
     # Choose train and test indices from analysis dataset.
-    training_mask = np.random.rand(dataset.shape[0]) < training_fraction
+    training_mask = random_state.rand(dataset.shape[0]) < training_fraction
     training_indices = [idx for idx in range(dataset.shape[0])
                         if training_mask[idx]]
     test_indices = [idx for idx in range(dataset.shape[0])
                     if not training_mask[idx]]
 
     # Choose train and test indices from empty drop dataset.
-    training_mask_empty = (np.random.rand(empty_drop_dataset.shape[0])
+    training_mask_empty = (random_state.rand(empty_drop_dataset.shape[0])
                            < training_fraction)
     training_indices_empty = [idx for idx in range(empty_drop_dataset.shape[0])
                               if training_mask_empty[idx]]

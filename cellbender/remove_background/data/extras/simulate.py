@@ -5,14 +5,15 @@ import scipy.sparse as sp
 from typing import Tuple, List, Union
 
 
-def simulate_simple_dataset(n_cells: int = 100,
-                            clusters: int = 1,
-                            n_genes: int = 10000,
-                            cells_in_clusters: Union[List[int], None] = None,
-                            d_cell: int = 5000) -> Tuple[sp.csr.csr_matrix,
-                                                         np.ndarray,
-                                                         np.ndarray,
-                                                         np.ndarray]:
+def simulate_dataset_without_ambient_rna(
+        n_cells: int = 100,
+        clusters: int = 1,
+        n_genes: int = 10000,
+        cells_in_clusters: Union[List[int], None] = None,
+        d_cell: int = 5000) -> Tuple[sp.csr.csr_matrix,
+                                     np.ndarray,
+                                     np.ndarray,
+                                     np.ndarray]:
     """Simulate a dataset with ambient background RNA counts.
 
     Empty drops have ambient RNA only, while barcodes with cells have cell RNA
@@ -85,15 +86,16 @@ def simulate_simple_dataset(n_cells: int = 100,
     return csr_barcode_gene_synthetic, z, chi, d
 
 
-def simulate_ambient_dataset(n_cells: int = 150,
-                             n_empty: int = 300,
-                             clusters: int = 3,
-                             n_genes: int = 10000,
-                             d_cell: int = 5000,
-                             d_empty: int = 100,
-                             cells_in_clusters: Union[List[int], None] = None,
-                             ambient_different: bool = False,
-                             chi_input: Union[np.ndarray, None] = None) \
+def simulate_dataset_with_ambient_rna(
+        n_cells: int = 150,
+        n_empty: int = 300,
+        clusters: int = 3,
+        n_genes: int = 10000,
+        d_cell: int = 5000,
+        d_empty: int = 100,
+        cells_in_clusters: Union[List[int], None] = None,
+        ambient_different: bool = False,
+        chi_input: Union[np.ndarray, None] = None) \
         -> Tuple[sp.csr.csr_matrix, np.ndarray, np.ndarray, np.ndarray]:
     """Simulate a dataset with ambient background RNA counts.
 

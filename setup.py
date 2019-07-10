@@ -7,9 +7,9 @@ def readme():
 
 
 setup(name='cellbender',
-      version='1.0.0',
-      description='Principled scRNA-seq data analysis using variational '
-                  'inference within a probabilistic model',
+      version='0.1',
+      description='A software package for pre-processing and denoising '
+                  'scRNA-seq data',
       long_description=readme(),
       classifiers=[
         'Development Status :: 3 - Alpha',
@@ -32,8 +32,6 @@ setup(name='cellbender',
           'scikit-learn',
           'matplotlib',
       ],
-      test_suite='nose.collector',
-      tests_require=['nose'],
       entry_points={
           'console_scripts': ['cellbender=cellbender.command_line:main'],
       },

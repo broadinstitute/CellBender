@@ -7,11 +7,11 @@ from pyro.infer import SVI, JitTraceEnum_ELBO, JitTrace_ELBO, \
 from pyro.optim import ClippedAdam
 from pyro.util import ignore_jit_warnings
 
-from cellbender.remove_background.model import VariationalInferenceModel
+from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.vae.decoder import Decoder
 from cellbender.remove_background.vae.encoder \
-    import EncodeZ, EncodeD, EncodePAmbient, CompositeEncoder
-from cellbender.remove_background.data.dataset import Dataset
+    import EncodeZ, EncodeD, EncodeNonEmptyDropletLogitProb, CompositeEncoder
+from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
 from cellbender.remove_background.data.dataprep import \
     prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataprep import DataLoader
@@ -88,7 +88,7 @@ def evaluate_epoch(svi: pyro.infer.SVI,
 
 
 @ignore_jit_warnings()
-def run_training(model: VariationalInferenceModel,
+def run_training(model: RemoveBackgroundPyroModel,
                  svi: pyro.infer.SVI,
                  train_loader: DataLoader,
                  test_loader: DataLoader,
@@ -153,16 +153,17 @@ def run_training(model: VariationalInferenceModel,
     return train_elbo, test_elbo
 
 
-def run_inference(dataset_obj: Dataset,
-                  args) -> VariationalInferenceModel:
+def run_inference(dataset_obj: SingleCellRNACountsDataset,
+                  args) -> RemoveBackgroundPyroModel:
     """Run a full inference procedure, training a latent variable model.
 
     Args:
-        dataset_obj: Input data in the form of a Dataset object.
+        dataset_obj: Input data in the form of a SingleCellRNACountsDataset
+            object.
         args: Input command line parsed arguments.
 
     Returns:
-         model: cellbender.model.VariationalInferenceModel that has had
+         model: cellbender.model.RemoveBackgroundPyroModel that has had
             inference run.
 
     """
@@ -198,12 +199,12 @@ def run_inference(dataset_obj: Dataset,
     else:
 
         # Models that include empty droplets.
-        encoder_p = EncodePAmbient(input_dim=count_matrix.shape[1],
-                                   hidden_dims=args.p_hidden_dims,
-                                   output_dim=1,
-                                   input_transform='normalize',
-                                   log_count_crossover=
-                                   dataset_obj.priors['log_counts_crossover'])
+        encoder_p = EncodeNonEmptyDropletLogitProb(
+            input_dim=count_matrix.shape[1],
+            hidden_dims=args.p_hidden_dims,
+            output_dim=1,
+            input_transform='normalize',
+            log_count_crossover=dataset_obj.priors['log_counts_crossover'])
         encoder = CompositeEncoder({'z': encoder_z,
                                     'd_loc': encoder_d,
                                     'p_y': encoder_p})
@@ -214,7 +215,7 @@ def run_inference(dataset_obj: Dataset,
                       output_dim=count_matrix.shape[1])
 
     # Set up the pyro model for variational inference.
-    model = VariationalInferenceModel(model_type=args.model,
+    model = RemoveBackgroundPyroModel(model_type=args.model,
                                       encoder=encoder,
                                       decoder=decoder,
                                       dataset_obj=dataset_obj,
@@ -249,6 +250,7 @@ def run_inference(dataset_obj: Dataset,
         prep_data_for_training(dataset=count_matrix,
                                empty_drop_dataset=
                                dataset_obj.get_count_matrix_empties(),
+                               random_state=dataset_obj.random,
                                batch_size=batch_size,
                                training_fraction=frac,
                                fraction_empties=args.fraction_empties,
