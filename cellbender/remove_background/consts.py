@@ -2,7 +2,7 @@
 
 # Factor by which the mode UMI count of the empty droplet plateau is
 # multiplied to come up with a UMI cutoff below which no barcodes are used.
-EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD = 0.8
+EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD = 0.1
 
 # Default prior for the standard deviation of the LogNormal distribution for
 # cell size, used only in the case of the 'simple' model.
