@@ -50,7 +50,7 @@ Clone this repository and install CellBender:
 
 ### Using The Official Docker Image
 
-A GPU-enabled docker image is available from the Google Container Registry as:
+A GPU-enabled docker image is available from the Google Container Registry (GCR) as:
 
 ```
 us.gcr.io/broad-dsde-methods/cellbender:latest
@@ -58,8 +58,8 @@ us.gcr.io/broad-dsde-methods/cellbender:latest
 
 ### Terra Users
 
-For `Terra <https://app.terra.bio/>`_ users, a `workflow <https://portal.firecloud.org/#methods/
-broad-dsde-methods/cellbender/10/wdl>`_ is available as:
+For [Terra](https://app.terra.bio) users, a [workflow](https://portal.firecloud.org/#methods/broad-dsde-methods/cellbender/10/wdl)
+is available as:
 
 ```
 broad-dsde-methods/cellbender
