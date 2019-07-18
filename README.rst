@@ -1,5 +1,5 @@
 .. figure:: https://github.com/broadinstitute/CellBender/blob/master/docs/source/_static/design/logo_1024_759.png
-  :figwidth: 50 %
+  :wdith: 200 px
   :align: left
   :alt: CellBender logo
 
