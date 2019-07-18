@@ -65,7 +65,8 @@ is available as:
 broad-dsde-methods/cellbender
 ```
 
-### Citing CellBender
+
+## Citing CellBender
 
 If you use CellBender in your research (and we hope you will), please consider
 citing our paper on bioRxiv (the link will appear hear soon).
