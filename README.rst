@@ -1,3 +1,7 @@
+.. figure:: https://github.com/broadinstitute/CellBender/blob/master/docs/source/_static/design/logo_250_185.png
+  :align: left
+  :alt: CellBender logo
+
 CellBender
 ==========
 
