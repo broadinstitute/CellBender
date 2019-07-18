@@ -18,8 +18,7 @@ The current release contains the following modules. More modules will be added i
 
 Please refer to the documentation for a quick start tutorial on using CellBender.
 
-
-## Installation and usage
+## Installation and Usage
 
 ### Manual installation
 
@@ -42,7 +41,7 @@ Clone this repository and install CellBender:
 
     ``(cellbender) $ pip install -e CellBender``
 
-### Using Docker
+### Using The Official Docker Image
 
 A GPU-enabled docker image is available from the Google Container Registry as:
 
