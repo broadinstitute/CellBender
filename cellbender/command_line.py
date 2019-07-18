@@ -53,17 +53,16 @@ def main():
     """
 
     # Set up argument parser.
-    parser = argparse.ArgumentParser(prog="cellbender",
-                                     description="CellBender command-line "
-                                                 "tools for scRNA-seq "
-                                                 "data analysis.")
-    parser.add_argument("cellbender", nargs=1, type=str,
-                        help="'cellbender', the name of the package")
+    parser = argparse.ArgumentParser(
+        prog="cellbender",
+        description="CellBender is a software package for eliminating technical artifacts from high-throughput "
+                    "single-cell RNA sequencing (scRNA-seq) data.")
 
     # Declare the existence of sub-parsers.
-    subparsers = parser.add_subparsers(title="sub-commands",
-                                       description="valid cellbender commands",
-                                       dest="tool")
+    subparsers = parser.add_subparsers(
+        title="sub-commands",
+        description="valid cellbender commands",
+        dest="tool")
 
     # Add the tool-specific arguments using sub-parsers.
     cli = dict(keys=TOOL_LIST)
@@ -83,12 +82,15 @@ def main():
         subparsers = cli[tool].add_subparser_args(subparsers)
 
     # Parse arguments.
-    args = parser.parse_args(sys.argv)
-
-    if args.tool is not None:
+    if len(sys.argv) > 1:
+        args = parser.parse_args(sys.argv[1:])
 
         # Validate arguments.
         args = cli[args.tool].validate_args(args)
 
         # Run the tool.
         cli[args.tool].run(args)
+
+    else:
+
+        parser.print_help()
