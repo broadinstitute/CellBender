@@ -17,7 +17,7 @@ python generate_tiny_10x_pbmc.py
 After successful completion of the script, you should have a new directory named `tiny_raw_gene_bc_matrices`
 containing `GRCh38/matrix.mtx`, `GRCh38/genes.tsv`, and `GRCh38/barcodes.tsv`.
 
-We proceed to run `remove-background` on the trimmed dataset using following command:
+We proceed to run `remove-background` on the trimmed dataset using the following command:
 ```
 cellbender remove-background \
     --input ./tiny_raw_gene_bc_matrices/GRCh38 \
@@ -28,8 +28,8 @@ cellbender remove-background \
 
 The computation will finish within a minute or two (after ~ 150 epochs). The tool outputs the following files:
 
-* `tiny_10x_pbmc.h5`: An HDF5 file containing a detailed summary of the inference procedure, including the
-normalized abundance of ambient transcripts, contamination fraction of every droplet, a low-dimensional
+* `tiny_10x_pbmc.h5`: An HDF5 file containing a detailed output of the inference procedure, including the
+normalized abundance of ambient transcripts, contamination fraction of each droplet, a low-dimensional
 embedding of the background-corrected gene expression, and the background-corrected counts matrix (in CSC sparse
 format). Please refer to the full documentation for a detailed description of these and other fields.
 
@@ -44,4 +44,4 @@ scatter plot of the latent embedding of the expressions in cell-containing dropl
 the cell probability after UMI rank ~ 500.
 
 Finally, try running the tool with `--expected-cells 100` and `--expected-cells 1000`. You should find that
-output remains virtually the same.
+the output remains virtually the same.
