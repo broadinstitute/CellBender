@@ -24,9 +24,10 @@ Please refer to the documentation for a quick start tutorial on using CellBender
 
 The recommended installation is as follows. Create a conda environment and activate it:
 
-``$ conda create -n cellbender python=3.6``
-
-``$ source activate cellbender``
+```bash
+$ conda create -n cellbender python=3.6
+$ source activate cellbender
+```
 
 Install the `pytables <https://www.pytables.org/>`_ module:
 
