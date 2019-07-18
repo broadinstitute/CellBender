@@ -29,31 +29,41 @@ $ conda create -n cellbender python=3.6
 $ source activate cellbender
 ```
 
-Install the `pytables <https://www.pytables.org/>`_ module:
+Install the [pytables](https://www.pytables.org) module:
 
-``(cellbender) $ conda install -c anaconda pytables``
+```bash
+(cellbender) $ conda install -c anaconda pytables
+```
 
-Install `pytorch <https://pytorch.org>`_ (shown below for CPU; if you have a CUDA-ready GPU, please skip
-this part and follow `these <https://pytorch.org/get-started/locally/>`_ instructions instead):
+Install [pytorch](https://pytorch.org) (shown below for CPU; if you have a CUDA-ready GPU, please skip
+this part and follow [these](https://pytorch.org/get-started/locally/) instructions instead):
 
-``(cellbender) $ conda install pytorch torchvision -c pytorch``
+```bash
+(cellbender) $ conda install pytorch torchvision -c pytorch
+```
 
 Clone this repository and install CellBender:
 
-``(cellbender) $ pip install -e CellBender``
+```bash
+(cellbender) $ pip install -e CellBender
+```
 
 ### Using The Official Docker Image
 
 A GPU-enabled docker image is available from the Google Container Registry as:
 
-``us.gcr.io/broad-dsde-methods/cellbender:latest``
+```
+us.gcr.io/broad-dsde-methods/cellbender:latest
+```
 
 ### Terra Users
 
 For `Terra <https://app.terra.bio/>`_ users, a `workflow <https://portal.firecloud.org/#methods/
 broad-dsde-methods/cellbender/10/wdl>`_ is available as:
 
-``broad-dsde-methods/cellbender``
+```
+broad-dsde-methods/cellbender
+```
 
 ### Citing CellBender
 
