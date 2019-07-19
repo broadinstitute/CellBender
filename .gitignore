@@ -1,0 +1,13 @@
+.DS_Store
+*.pyc
+cellbender.egg-info/
+*.ipynb_checkpoints
+.coverage
+.coverage.*
+.mypy_cache/
+.pytest_cache/
+build/
+dist/
+.venv/
+.eggs/
+.idea/
