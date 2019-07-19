@@ -1,0 +1,7 @@
+.. _contributing:
+
+Contributing
+============
+
+TBW.
+
