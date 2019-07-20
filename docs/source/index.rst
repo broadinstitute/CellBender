@@ -14,6 +14,7 @@ and quick-start tutorials, see the :ref:`Getting Started <getting started>` sect
    :maxdepth: 1
    
    introduction/index
+   installation/index
    getting_started/index
    help_and_reference/index
    contributing/index

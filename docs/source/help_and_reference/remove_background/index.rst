@@ -1,7 +1,7 @@
-.. _remove background:
+.. _remove background reference:
 
-remove-background
-=================
+``remove-background``
+=====================
 
 TBW.
 
