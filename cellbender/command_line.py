@@ -7,11 +7,12 @@ Parses arguments and determines which tool should be called.
 import sys
 import argparse
 from abc import ABC, abstractmethod
+from typing import Dict
 import importlib
 
 
 # New tools should be added to this list.
-TOOL_LIST = ['remove-background']
+TOOL_NAME_LIST = ['remove-background']
 
 
 class AbstractCLI(ABC):
@@ -29,12 +30,12 @@ class AbstractCLI(ABC):
         pass
 
     @abstractmethod
-    def add_subparser_args(self, parser: argparse) -> argparse:
+    def add_subparser_args(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Add tool-specific arguments, returning a parser."""
         pass
 
     @abstractmethod
-    def validate_args(self, parser: argparse):
+    def validate_args(self, parser: argparse.ArgumentParser):
         """Do tool-specific argument validation, returning args."""
         pass
 
@@ -44,14 +45,25 @@ class AbstractCLI(ABC):
         pass
 
 
-def main():
-    """Parse command-line arguments and run specified tool.
+def generate_cli_dictionary() -> Dict[str, AbstractCLI]:
+    # Add the tool-specific arguments using sub-parsers.
+    cli_dict = dict(keys=TOOL_NAME_LIST)
+    for tool_name in TOOL_NAME_LIST:
+        # Note: tool name contains a dash, while folder name uses an underscore.
+        # Generate the name of the module that contains the tool.
+        module_str_list = ["cellbender", tool_name.replace("-", "_"), "command_line"]
 
-    Note: Does not take explicit input arguments, but uses sys.argv inputs
-    from the command line.
+        # Import the module.
+        module = importlib.import_module('.'.join(module_str_list))
 
-    """
+        # Note: the module must have a file named command_line.py in the main
+        # directory, containing a class named CLI, which implements AbstractCLI.
+        cli_dict[tool_name] = module.CLI()
 
+    return cli_dict
+
+
+def get_populated_argparser() -> argparse.ArgumentParser:
     # Set up argument parser.
     parser = argparse.ArgumentParser(
         prog="cellbender",
@@ -64,32 +76,33 @@ def main():
         description="valid cellbender commands",
         dest="tool")
 
-    # Add the tool-specific arguments using sub-parsers.
-    cli = dict(keys=TOOL_LIST)
-    for tool in TOOL_LIST:
+    cli_dict = generate_cli_dictionary()
+    for tool_name in TOOL_NAME_LIST:
+        subparsers = cli_dict[tool_name].add_subparser_args(subparsers)
 
-        # Note: tool name contains a dash, while folder name uses an underscore.
+    return parser
 
-        # Generate the name of the module that contains the tool.
-        module_str_list = ["cellbender", tool.replace("-", "_"), "command_line"]
 
-        # Import the module.
-        module = importlib.import_module('.'.join(module_str_list))
+def main():
+    """Parse command-line arguments and run specified tool.
 
-        # Note: the module must have a file named command_line.py in the main
-        # directory, containing a class named CLI, which implements AbstractCLI.
-        cli[tool] = module.CLI()
-        subparsers = cli[tool].add_subparser_args(subparsers)
+    Note: Does not take explicit input arguments, but uses sys.argv inputs
+    from the command line.
+
+    """
+
+    parser = get_populated_argparser()
+    cli_dict = generate_cli_dictionary()
 
     # Parse arguments.
     if len(sys.argv) > 1:
         args = parser.parse_args(sys.argv[1:])
 
         # Validate arguments.
-        args = cli[args.tool].validate_args(args)
+        args = cli_dict[args.tool].validate_args(args)
 
         # Run the tool.
-        cli[args.tool].run(args)
+        cli_dict[args.tool].run(args)
 
     else:
 

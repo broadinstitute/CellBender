@@ -19,9 +19,8 @@ Install the `pytables <https://www.pytables.org>`_ module:
 
   (CellBender) $ conda install -c anaconda pytables
 
-
 Install `pytorch <https://pytorch.org>`_ (shown below for CPU; if you have a CUDA-ready GPU, please skip
-this part and follow `these <https://pytorch.org/get-started/locally/>`_ instructions instead):
+this part and follow `these instructions <https://pytorch.org/get-started/locally/>`_ instead):
 
 .. code-block:: console
 
@@ -35,16 +34,16 @@ Clone this repository and install CellBender:
    (CellBender) $ pip install -e CellBender
 
 
-Using The Official Docker Image
--------------------------------
+Docker Image
+------------
 
 A GPU-enabled docker image is available from the Google Container Registry (GCR) as:
 
   ``us.gcr.io/broad-dsde-methods/cellbender:latest``
 
 
-Terra Users
------------
+Terra Workflow
+--------------
 
 For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/broad-dsde-methods/cellbender/10/wdl>`_
 is available as:

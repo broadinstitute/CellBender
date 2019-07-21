@@ -1,16 +1,13 @@
 .. _remove background reference:
 
-``remove-background``
-=====================
+remove-background
+=================
 
-TBW.
+Command Line Options
+--------------------
 
-Inputs
-------
-
-TBW.
-
-Outputs
--------
-
-TBW.
+.. argparse::
+   :module: cellbender.command_line
+   :func: get_populated_argparser
+   :prog: cellbender
+   :path: remove-background

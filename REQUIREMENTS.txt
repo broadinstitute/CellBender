@@ -7,4 +7,5 @@ scikit-learn
 matplotlib
 sphinx-rtd-theme
 sphinx-autodoc-typehints
+sphinx-argparse
 sphinxcontrib-programoutput

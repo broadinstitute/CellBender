@@ -12,8 +12,9 @@
 #
 import os
 import sys
-sys.path.insert(0, os.path.abspath('..'))
-
+dir_, _ = os.path.split(__file__)
+root_dir = os.path.abspath(os.path.join(dir_, '..', '..'))
+sys.path.insert(0, root_dir)
 
 # -- Project information -----------------------------------------------------
 
@@ -35,6 +36,7 @@ extensions = [
     'sphinx.ext.napoleon',
     'sphinx.ext.mathjax',
     'sphinx.ext.viewcode',
+    'sphinxarg.ext',
     'sphinx_autodoc_typehints',
     'sphinxcontrib.programoutput',
     'sphinx.ext.intersphinx'
