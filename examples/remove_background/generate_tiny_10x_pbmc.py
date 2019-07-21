@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import urllib.request
 import sys
 import tarfile
