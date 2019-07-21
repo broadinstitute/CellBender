@@ -1,8 +1,9 @@
+# CellBender
+[![Documentation Status](https://readthedocs.org/projects/cellbender/badge/?version=latest)](https://cellbender.readthedocs.io/en/latest/?badge=latest)
+
 <img src="https://github.com/broadinstitute/CellBender/blob/master/docs/source/_static/design/logo_250_185.png"
      alt="CellBender logo"
      style="float: left; margin-right: 10px;" />
-
-# CellBender
 
 CellBender is a software package for eliminating technical artifacts from
 high-throughput single-cell RNA sequencing (scRNA-seq) data.
