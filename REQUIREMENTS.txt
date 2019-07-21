@@ -7,5 +7,6 @@ scikit-learn
 matplotlib
 sphinx-rtd-theme
 sphinx-autodoc-typehints
-sphinx-argparse
 sphinxcontrib-programoutput
+sphinx-argparse==0.2.1
+CommonMark==0.7.5
