@@ -3,8 +3,6 @@
 Help & Reference
 ================
 
-TBW.
-
 .. toctree::
    :maxdepth: 1
 
