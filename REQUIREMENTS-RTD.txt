@@ -1,11 +1,3 @@
-numpy
-scipy
-tables
-pandas
-torch
-pyro-ppl>=0.3.2
-scikit-learn
-matplotlib
 sphinx-rtd-theme
 sphinx-autodoc-typehints
 sphinxcontrib-programoutput

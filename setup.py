@@ -33,7 +33,7 @@ setuptools.setup(
     packages=['cellbender'],
     install_requires=install_requires,
     entry_points={
-        'console_scripts': ['cellbender=cellbender.command_line:main'],
+        'console_scripts': ['cellbender=cellbender.base_cli:main'],
     },
     include_package_data=True,
     zip_safe=False

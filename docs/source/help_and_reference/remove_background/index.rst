@@ -7,7 +7,7 @@ Command Line Options
 --------------------
 
 .. argparse::
-   :module: cellbender.command_line
+   :module: cellbender.base_cli
    :func: get_populated_argparser
    :prog: cellbender
    :path: remove-background

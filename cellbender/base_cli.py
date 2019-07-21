@@ -30,12 +30,7 @@ class AbstractCLI(ABC):
         pass
 
     @abstractmethod
-    def add_subparser_args(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        """Add tool-specific arguments, returning a parser."""
-        pass
-
-    @abstractmethod
-    def validate_args(self, parser: argparse.ArgumentParser):
+    def validate_args(self, parser: argparse):
         """Do tool-specific argument validation, returning args."""
         pass
 
@@ -51,14 +46,14 @@ def generate_cli_dictionary() -> Dict[str, AbstractCLI]:
     for tool_name in TOOL_NAME_LIST:
         # Note: tool name contains a dash, while folder name uses an underscore.
         # Generate the name of the module that contains the tool.
-        module_str_list = ["cellbender", tool_name.replace("-", "_"), "command_line"]
+        module_cli_str_list = ["cellbender", tool_name.replace("-", "_"), "cli"]
 
         # Import the module.
-        module = importlib.import_module('.'.join(module_str_list))
+        module_cli = importlib.import_module('.'.join(module_cli_str_list))
 
-        # Note: the module must have a file named command_line.py in the main
+        # Note: the module must have a file named cli.py in the main
         # directory, containing a class named CLI, which implements AbstractCLI.
-        cli_dict[tool_name] = module.CLI()
+        cli_dict[tool_name] = module_cli.CLI()
 
     return cli_dict
 
@@ -76,9 +71,10 @@ def get_populated_argparser() -> argparse.ArgumentParser:
         description="valid cellbender commands",
         dest="tool")
 
-    cli_dict = generate_cli_dictionary()
     for tool_name in TOOL_NAME_LIST:
-        subparsers = cli_dict[tool_name].add_subparser_args(subparsers)
+        module_argparse_str_list = ["cellbender", tool_name.replace("-", "_"), "argparse"]
+        module_argparse = importlib.import_module('.'.join(module_argparse_str_list))
+        subparsers = module_argparse.add_subparser_args(subparsers)
 
     return parser
 
