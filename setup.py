@@ -8,8 +8,16 @@ def readme():
     with open('README.md') as f:
         return f.read()
 
+
+def get_requirements_filename():
+    if 'READTHEDOCS' in os.environ:
+        return "REQUIREMENTS-RTD.txt"
+    else:
+        return "REQUIREMENTS.txt"
+
+
 install_requires = [
-    line.rstrip() for line in open(os.path.join(os.path.dirname(__file__), "REQUIREMENTS.txt"))
+    line.rstrip() for line in open(os.path.join(os.path.dirname(__file__), get_requirements_filename()))
 ]
 
 setuptools.setup(
