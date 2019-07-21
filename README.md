@@ -17,7 +17,7 @@ The current release contains the following modules. More modules will be added i
   CellRanger ``count`` pipeline is supported. Support for additional tools and protocols will be
   added in the future. A quick start tutorial can be found [here](https://github.com/broadinstitute/CellBender/tree/master/examples/remove_background).
 
-Please refer to the documentation for a quick start tutorial on using CellBender.
+Please refer to the [documentation](https://cellbender.readthedocs.io/en/latest/) for a quick start tutorial on using CellBender.
 
 ## Installation and Usage
 
