@@ -48,7 +48,8 @@ class FamilySizeDistributionCodec(torch.nn.Module):
     @abstractmethod
     def get_fsd_components(self,
                            fsd_params_dict: Dict[str, torch.Tensor],
-                           downsampling_rate_tensor: Union[None, torch.Tensor]) -> Tuple[TorchDistribution]:
+                           downsampling_rate_tensor: Union[None, torch.Tensor]) \
+            -> Tuple[TorchDistribution, TorchDistribution]:
         raise NotImplementedError
 
     @property
@@ -177,7 +178,8 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
 
     def get_fsd_components(self,
                            fsd_params_dict: Dict[str, torch.Tensor],
-                           downsampling_rate_tensor: Union[None, torch.Tensor]) -> Tuple[TorchDistribution]:
+                           downsampling_rate_tensor: Union[None, torch.Tensor]) \
+            -> Tuple[TorchDistribution, TorchDistribution]:
         # instantiate the "chimeric" (lo) distribution
         log_w_nb_lo_tuple = tuple(fsd_params_dict['w_lo'][..., j].log().unsqueeze(-1) for j in range(self.n_fsd_lo_comps))
         if downsampling_rate_tensor is None:
@@ -188,7 +190,6 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
             nb_lo_components_tuple = tuple(NegativeBinomial(
                 downsampling_rate_tensor.unsqueeze(-1) * fsd_params_dict['mu_lo'][..., j].unsqueeze(-1),
                 fsd_params_dict['phi_lo'][..., j].unsqueeze(-1)) for j in range(self.n_fsd_lo_comps))
-            
 
         # instantiate the "real" (hi) distribution
         log_w_nb_hi_tuple = tuple(fsd_params_dict['w_hi'][..., j].log().unsqueeze(-1) for j in range(self.n_fsd_hi_comps))
@@ -689,15 +690,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                     (data['fingerprint_tensor'] * fingerprint_log_rate_obs).sum(-1)
                     - fingerprint_log_rate_obs.exp().sum(-1))
 #                     - (data['fingerprint_tensor'] + 1).lgamma().sum(-1))
-                
-#                 # observing the unobserved (poisson)
-#                 e_total = e_lo + e_hi
-#                 e_unobs = e_total - e_obs
-#                 log_prob_e_obs = (
-#                     e_unobs * fingerprint_log_rate_unobs
-#                     - fingerprint_log_rate_unobs.exp()
-#                     - (e_unobs + 1).lgamma())
-                
+
                 # total observation log prob
                 log_prob_total_obs = (
                     data['e_lo_log_prob_prefactor'] * e_lo_log_prob +
