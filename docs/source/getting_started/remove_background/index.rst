@@ -6,9 +6,6 @@ remove-background
 In this tutorial, we will run ``remove-background`` on a small dataset derived from the 10x Genomics
 ``pbmc4k`` scRNA-seq dataset (v2 Chemistry, CellRanger 2.1.0).
 
-Trim PBMC dataset
------------------
-
 As a first step, we download the full dataset and generate a smaller `trimmed` copy by selecting 500 barcodes
 with high UMI count (likely non-empty) and an additional 50'000 barcodes with small UMI count (likely empty). Note
 that the trimming step is performed in order to allow us go through this tutorial in a matter of minutes on a
@@ -25,8 +22,8 @@ under your CellBender installation root directory and run the following command 
 After successful completion of the script, you should have a new directory named ``tiny_raw_gene_bc_matrices``
 containing ``GRCh38/matrix.mtx``, ``GRCh38/genes.tsv``, and ``GRCh38/barcodes.tsv``.
 
-Run ``remove-background``
--------------------------
+Run remove-background
+---------------------
 
 We proceed to run ``remove-background`` on the trimmed dataset using the following command:
 
@@ -37,9 +34,6 @@ We proceed to run ``remove-background`` on the trimmed dataset using the followi
         --output ./tiny_10x_pbmc.h5 \
         --expected-cells 500 \
         --total-droplets-included 5000
-
-Outputs
--------
 
 The computation will finish within a minute or two (after ~ 150 epochs). The tool outputs the following files:
 
@@ -94,7 +88,7 @@ To load the filtered count matrix (containing only cells) into Seurat:
 Use latent gene expression in downstream analyses
 -------------------------------------------------
 
-To load the latent representation of gene expression ``z`` computed by ``remove-background`` in python:
+To load the latent representation of gene expression `z` computed by ``remove-background`` using a python script:
 
 .. code-block:: python
 
