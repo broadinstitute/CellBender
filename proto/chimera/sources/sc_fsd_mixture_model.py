@@ -3,21 +3,17 @@ from typing import Tuple, List, Dict, Union
 
 import pyro
 from pyro import poutine
-from pyro.infer import Trace_ELBO
 import pyro.distributions as dist
 from pyro.distributions.torch_distribution import TorchDistribution
 
 import torch
 from torch.distributions import constraints, transforms
-from torch.distributions.utils import broadcast_all
 from torch.distributions.transforms import Transform
 from torch.nn.parameter import Parameter
 
 from pyro_extras import CustomLogProbTerm, NegativeBinomial, ZeroInflatedNegativeBinomial, \
-    MixtureDistribution, get_hellinger_distance, logit, logaddexp, get_log_prob_compl, \
-    get_confidence_interval
-from sc_fingerprint import SingleCellFingerprintDataStore, \
-    generate_downsampled_minibatch
+    MixtureDistribution, logit, logaddexp, get_log_prob_compl
+from sc_fingerprint import SingleCellFingerprintDataStore
 
 import logging
 from abc import abstractmethod
@@ -303,7 +299,6 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                  fsd_codec: FamilySizeDistributionCodec,
                  e_lo_prior_dist: str = 'poisson',
                  e_hi_prior_dist: str = 'negbinom',
-                 model_type: str = 'approx_multinomial',
                  guide_type: str = 'map',
                  device=torch.device('cuda'),
                  dtype=torch.float):
@@ -320,7 +315,6 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         self.e_hi_prior_dist = e_hi_prior_dist
 
         self.guide_type = guide_type
-        self.model_type = model_type
 
         self.device = device
         self.dtype = dtype
@@ -566,143 +560,38 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             e_lo_log_prob = e_lo_prior_dist_per_cell.log_prob(e_lo)
             e_hi_log_prob = e_hi_prior_dist_per_cell.log_prob(e_hi)
             
-            if self.model_type == 'approx_multinomial':
-                # mixture weights
-                log_w_lo = (e_lo / (e_lo + e_hi + self.EPS)).log()
-                log_w_hi = get_log_prob_compl(log_w_lo)
+            log_prob_p_lo_full = fsd_lo_dist.log_prob(family_size_vector_full)
+            log_prob_p_hi_full = fsd_hi_dist.log_prob(family_size_vector_full)
 
-                # calculate the fit log prob
-                dist_mixture = MixtureDistribution(
-                    (log_w_lo.unsqueeze(-1), log_w_hi.unsqueeze(-1)),
-                    (fsd_lo_dist, fsd_hi_dist), normalize_weights=False)
-                fit_log_prob = dist_mixture.log_prob(family_size_vector_observable)
+            fingerprint_log_rate_full = logaddexp(
+                (e_lo.unsqueeze(-1) + self.EPS).log() + log_prob_p_lo_full,
+                (e_hi.unsqueeze(-1) + self.EPS).log() + log_prob_p_hi_full)
+            fingerprint_log_rate_obs = fingerprint_log_rate_full[..., 1:]
+            fingerprint_log_rate_unobs = fingerprint_log_rate_full[..., 0]
 
-                # observing the fingerprint (multinomial)
-                normalized_fit_log_prob = fit_log_prob - torch.logsumexp(fit_log_prob, -1, keepdim=True)
-                log_prob_fingerprint_obs = (
-                    (e_obs + 1).lgamma()
-                    - (data['fingerprint_tensor'] + 1).lgamma().sum(-1)
-                    + (data['fingerprint_tensor'] * normalized_fit_log_prob).sum(-1))
-
-                # observing total expression (binomial)
-                log_p_unobs = dist_mixture.log_prob(zero).squeeze(-1)
-                log_p_obs = get_log_prob_compl(log_p_unobs)
-                e_total = e_lo + e_hi
-                log_prob_e_obs = (
-                    (e_total + 1).lgamma() - (e_obs + 1).lgamma() - (e_total - e_obs + 1).lgamma()
-                    + e_obs * log_p_obs + (e_total - e_obs) * log_p_unobs)            
-
-                # total observation log prob
-                log_prob_total_obs = (
-                    data['e_lo_log_prob_prefactor'] * e_lo_log_prob +
-                    data['e_hi_log_prob_prefactor'] * e_hi_log_prob +
-                    data['e_obs_log_prob_prefactor'] * log_prob_e_obs +
-                    data['fingerprint_obs_log_prob_prefactor'] * log_prob_fingerprint_obs)
-                
-            # todo: get rid of EPS properly ...
-            elif self.model_type == 'poisson':
-                log_prob_p_lo_full = fsd_lo_dist.log_prob(family_size_vector_full)
-                log_prob_p_hi_full = fsd_hi_dist.log_prob(family_size_vector_full)
-                
-                fingerprint_log_rate_full = logaddexp(
-                    (e_lo.unsqueeze(-1) + self.EPS).log() + log_prob_p_lo_full,
-                    (e_hi.unsqueeze(-1) + self.EPS).log() + log_prob_p_hi_full)
-                fingerprint_log_rate_obs = fingerprint_log_rate_full[..., 1:]
-                fingerprint_log_rate_unobs = fingerprint_log_rate_full[..., 0]
-                
-                # observing the fingerprint (poisson)
-                log_prob_fingerprint_obs = (
-                    (data['fingerprint_tensor'] * fingerprint_log_rate_obs).sum(-1)
-                    - fingerprint_log_rate_obs.exp().sum(-1))
+            # observing the fingerprint (poisson)
+            log_prob_fingerprint_obs = (
+                (data['fingerprint_tensor'] * fingerprint_log_rate_obs).sum(-1)
+                - fingerprint_log_rate_obs.exp().sum(-1))
 #                     - (data['fingerprint_tensor'] + 1).lgamma().sum(-1))
 
-                # total observation log prob
-                log_prob_total_obs = (
-                    data['e_lo_log_prob_prefactor'] * e_lo_log_prob +
-                    data['e_hi_log_prob_prefactor'] * e_hi_log_prob +
-                    # data['e_obs_log_prob_prefactor'] * log_prob_e_obs +
-                    data['fingerprint_obs_log_prob_prefactor'] * log_prob_fingerprint_obs)
+            # total observation log prob
+            log_prob_total_obs = (
+                data['e_lo_log_prob_prefactor'] * e_lo_log_prob +
+                data['e_hi_log_prob_prefactor'] * e_hi_log_prob +
+                # data['e_obs_log_prob_prefactor'] * log_prob_e_obs +
+                data['fingerprint_obs_log_prob_prefactor'] * log_prob_fingerprint_obs)
 
-                # normalized fit log prob (auxiliary quantity)
-                normalized_fit_log_prob = (
-                    fingerprint_log_rate_obs
-                    - torch.logsumexp(fingerprint_log_rate_obs, -1, keepdim=True))
-
-            else:
-                raise ValueError(f'Unknown model type "{self.model_type}"!')
+            # normalized fit log prob (auxiliary quantity)
+            normalized_fit_log_prob = (
+                fingerprint_log_rate_obs
+                - torch.logsumexp(fingerprint_log_rate_obs, -1, keepdim=True))
 
             # kill unphysical paths (... which may have been made available due to approximations)
             log_prob_total_obs[(e_lo + e_hi) < e_obs] = - float("inf")
 
             # marginalize
             marginalized_log_prob_total_obs = torch.logsumexp(torch.logsumexp(log_prob_total_obs, 0), 0)
-
-            # expression MAP inference
-            if calculate_expression_map:
-                with torch.no_grad():    
-                    # calculating MAP
-                    e_lo_bc, e_hi_bc, _ = broadcast_all(e_lo, e_hi, log_prob_total_obs)
-                    e_lo_flat = e_lo_bc.long().contiguous().view(-1, mb_size)
-                    e_hi_flat = e_hi_bc.long().contiguous().view(-1, mb_size)
-                    argmax_res = torch.argmax(log_prob_total_obs.contiguous().view(-1, mb_size), dim=0)
-                    e_lo_map = e_lo_flat[argmax_res, np.arange(mb_size)]
-                    e_hi_map = e_hi_flat[argmax_res, np.arange(mb_size)]
-                    fit_log_prob_map = normalized_fit_log_prob.view(-1, mb_size, max_family_size)[argmax_res, np.arange(mb_size), :]
-
-                    # calculating posterior confidence intervals
-                    log_prob_normalized_posterior = log_prob_total_obs - marginalized_log_prob_total_obs
-                    
-                    e_lo_log_posterior = torch.logsumexp(log_prob_normalized_posterior, 0)
-                    e_lo_log_posterior = e_lo_log_posterior - torch.logsumexp(e_lo_log_posterior, 0)
-                    e_lo_posterior_pdf = e_lo_log_posterior.exp()
-                    e_lo_posterior_cdf = torch.cumsum(e_lo_posterior_pdf, 0)
-
-                    e_hi_log_posterior = torch.logsumexp(log_prob_normalized_posterior, 1)
-                    e_hi_log_posterior = e_hi_log_posterior - torch.logsumexp(e_hi_log_posterior, 0)
-                    e_hi_posterior_pdf = e_hi_log_posterior.exp()
-                    e_hi_posterior_cdf = torch.cumsum(e_hi_posterior_pdf, 0)
-                    
-                    e_lo_ci_lower, e_lo_ci_upper = get_confidence_interval(
-                        e_lo_posterior_cdf, self.DEFAULT_CONFIDENCE_INTERVAL_LOWER, self.DEFAULT_CONFIDENCE_INTERVAL_UPPER)
-                    e_lo_ci_lower += e_lo_min.long()
-                    e_lo_ci_upper += e_lo_min.long()
-                    
-                    e_hi_ci_lower, e_hi_ci_upper = get_confidence_interval(
-                        e_hi_posterior_cdf, self.DEFAULT_CONFIDENCE_INTERVAL_LOWER, self.DEFAULT_CONFIDENCE_INTERVAL_UPPER)
-                    e_hi_ci_lower += e_hi_min.long()
-                    e_hi_ci_upper += e_hi_min.long()
-                    
-                    # calculating posterior mean and variance
-                    e_lo_mean = (e_lo_posterior_pdf * e_lo_range.unsqueeze(-1)).sum(0)
-                    e_lo_var = (e_lo_posterior_pdf * e_lo_range.unsqueeze(-1).pow(2)).sum(0) - e_lo_mean.pow(2)
-                    e_lo_mean += e_lo_min
-                    
-                    e_hi_mean = (e_hi_posterior_pdf * e_hi_range.unsqueeze(-1)).sum(0)
-                    e_hi_var = (e_hi_posterior_pdf * e_hi_range.unsqueeze(-1).pow(2)).sum(0) - e_hi_mean.pow(2)
-                    e_hi_mean += e_hi_min
-                    
-                    return {'e_lo_min': e_lo_min.long(),
-                            'e_hi_min': e_hi_min.long(),
-                            'e_lo_map': e_lo_map.long(),
-                            'e_hi_map': e_hi_map.long(),
-                            'e_lo_ci_lower': e_lo_ci_lower,
-                            'e_lo_ci_upper': e_lo_ci_upper,
-                            'e_hi_ci_lower': e_hi_ci_lower,
-                            'e_hi_ci_upper': e_hi_ci_upper,
-                            'e_lo_mean': e_lo_mean,
-                            'e_lo_var': e_lo_var,
-                            'e_hi_mean': e_hi_mean,
-                            'e_hi_var': e_hi_var,                            
-                            'fit_log_prob_map': fit_log_prob_map,
-                            'mu_e_lo': mu_e_lo}
-            
-            # expression PM inference
-            if calculate_joint_expression_log_posterior:
-                # normalize the posterior
-                log_prob_normalized_posterior = log_prob_total_obs - marginalized_log_prob_total_obs
-                return {'e_lo_min': e_lo_min,
-                        'e_hi_min': e_hi_min,
-                        'log_prob_normalized_posterior': log_prob_normalized_posterior}
 
             # observe
             with poutine.scale(scale=data['cell_sampling_site_scale_factor_tensor']):
@@ -809,10 +698,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                                 self.w_hi_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_hi'])),
                             obs=fsd_params_dict['w_hi'])
 
-    def guide(self,
-              data,
-              calculate_expression_map=False,
-              calculate_joint_expression_log_posterior=False):
+    def guide(self, data):
         if self.fsd_gmm_num_components > 1:
             # MAP estimate of GMM fsd prior weights
             fsd_xi_prior_weights_map = pyro.param(
@@ -830,7 +716,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             self.fsd_codec.get_sorted_fsd_xi(self.fsd_codec.init_fsd_xi_loc_posterior))
         
         # base posterior distribution for xi
-        if self.guide_type == 'map' or calculate_expression_map:
+        if self.guide_type == 'map':
             fsd_xi_posterior_base_dist = dist.Delta(
                 v=fsd_xi_posterior_loc[data['gene_index_tensor'], :]).to_event(1)
         elif self.guide_type == 'gaussian':
@@ -853,7 +739,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         mb_size = data['fingerprint_tensor'].shape[0]
         with pyro.plate("collapsed_gene_cell", size=mb_size):
             with poutine.scale(scale=data['gene_sampling_site_scale_factor_tensor']):
-                fsd_xi = pyro.sample("fsd_xi", fsd_xi_posterior_dist)
+                pyro.sample("fsd_xi", fsd_xi_posterior_dist)
 
     def get_active_constraints_on_genes(self) -> Dict:
         empirical_fsd_mu_hi_tensor = torch.tensor(
@@ -933,183 +819,3 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                         active_constraints_dict[var_name]['upper_bound'] = set(nnz_activity.tolist())
 
         return dict(active_constraints_dict)
-        
-
-class DownsamplingRegularizedELBOLoss:
-    def __init__(self,
-                 downsampling_regularization_strength: float,
-                 min_downsampling_rate: float,
-                 max_downsampling_rate: float,
-                 keep_history=False,
-                 disable_downsampling_regularization=False):
-        self.downsampling_regularization_strength = downsampling_regularization_strength
-        self.min_downsampling_rate = min_downsampling_rate
-        self.max_downsampling_rate = max_downsampling_rate
-        self.elbo = Trace_ELBO()
-        self.keep_history = keep_history
-        self.disable_downsampling_regularization = disable_downsampling_regularization
-        
-        self.elbo_loss_history = []
-        self.downsampling_loss_history = []
-        
-    def differentiable_loss(self,
-                            model,
-                            guide,
-                            mb_data_elbo: Dict[str, torch.Tensor],
-                            mb_data_reg: Dict[str, torch.Tensor]):
-        # - ELBO calculated on mb_data_elbo
-        elbo_loss = self.elbo.differentiable_loss(model, guide, mb_data_elbo)
-        total_loss = elbo_loss
-        
-        if self.keep_history:
-            self.elbo_loss_history.append(elbo_loss.item())
-            
-        # downsampling regularization calculated on mb_data_reg
-        if not self.disable_downsampling_regularization:
-            # step 1. obtain the joint posterior (e_lo, e_hi) from mb_data_reg
-            guide_trace_on_mb_data_reg = poutine.trace(guide).get_trace(mb_data_reg)
-            trained_model_on_mb_data_reg = poutine.replay(model, trace=guide_trace_on_mb_data_reg)
-            inference_on_mb_data_reg = poutine.trace(trained_model_on_mb_data_reg).get_trace(
-                mb_data_reg, calculate_joint_expression_log_posterior=True).nodes["_RETURN"]["value"]
-
-            # step 2. downsample mb_data_reg
-            ds_mb_data_reg = generate_downsampled_minibatch(
-                mb_data_reg,
-                self.min_downsampling_rate,
-                self.max_downsampling_rate)
-
-            # step 3. insert e_lo_min and e_hi_min on ds_mb_data_reg so that both the
-            # model uses the same marginalization bounds on the original and downsampled minibatch
-            ds_mb_data_reg['e_lo_min'] = inference_on_mb_data_reg['e_lo_min']
-            ds_mb_data_reg['e_hi_min'] = inference_on_mb_data_reg['e_hi_min']
-
-            # step 4. obtain the joint posterior (e_lo, e_hi) from ds_mb_data_reg
-            guide_trace_on_ds_mb_data_reg = poutine.trace(guide).get_trace(ds_mb_data_reg)
-            trained_model_on_ds_mb_data_reg = poutine.replay(model, trace=guide_trace_on_ds_mb_data_reg)
-            inference_on_ds_mb_data_reg = poutine.trace(trained_model_on_ds_mb_data_reg).get_trace(
-                ds_mb_data_reg, calculate_joint_expression_log_posterior=True).nodes["_RETURN"]["value"]
-
-            # step 5. calculate the distance between original and downsampled posteriors
-            joint_expression_posterior_ds_divergence = get_hellinger_distance(
-                inference_on_mb_data_reg['log_prob_normalized_posterior'],
-                inference_on_ds_mb_data_reg['log_prob_normalized_posterior'],
-                reduce=lambda x: x.sum(0).sum(0))
-            downsampling_loss = self.downsampling_regularization_strength * (
-                mb_data_reg['cell_sampling_site_scale_factor_tensor'] *
-                joint_expression_posterior_ds_divergence).sum()
-        
-            total_loss += downsampling_loss
-            
-            if self.keep_history:
-                self.downsampling_loss_history.append(downsampling_loss.item())
-        
-        return total_loss
-    
-    def reset_history(self):
-        self.elbo_loss_history = []
-        self.downsampling_loss_history = []
-
-        
-def get_expression_map(gene_index,
-                       model,
-                       sc_fingerprint_datastore,
-                       e_lo_sum_width,
-                       e_hi_sum_width,
-                       cell_shard_size,
-                       device=torch.device('cuda'),
-                       dtype=torch.float,
-                       **model_args_override):
-    e_lo_min_shard_list = []
-    e_hi_min_shard_list = []
-    e_lo_map_shard_list = []
-    e_hi_map_shard_list = []
-    e_lo_ci_lower_shard_list = []
-    e_hi_ci_lower_shard_list = []
-    e_lo_ci_upper_shard_list = []
-    e_hi_ci_upper_shard_list = []
-    e_lo_mean_shard_list = []
-    e_hi_mean_shard_list = []
-    e_lo_var_shard_list = []
-    e_hi_var_shard_list = []
-    fit_log_prob_map_shard_list = []
-    mu_e_lo_shard_list = []
-    
-    def _fix_scalar(arr):
-        if arr.ndim == 0:
-            arr = arr[None]
-        return arr
-    
-    n_cells = sc_fingerprint_datastore.n_cells
-    for cell_shard in range(n_cells // cell_shard_size + 1):
-        i_cell_begin = min(cell_shard * cell_shard_size, n_cells)
-        i_cell_end = min((cell_shard + 1) * cell_shard_size, n_cells)
-        if i_cell_begin == i_cell_end:
-            break
-
-        # generate shard data
-        cell_index_array = np.arange(i_cell_begin, i_cell_end)
-        gene_index_array = gene_index * np.ones_like(cell_index_array)
-        cell_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
-        gene_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
-        shard_data = sc_fingerprint_datastore.generate_torch_minibatch_data(
-            cell_index_array,
-            gene_index_array,
-            cell_sampling_site_scale_factor_array,
-            gene_sampling_site_scale_factor_array,
-            device,
-            dtype)
-        shard_data['e_lo_sum_width'] = e_lo_sum_width
-        shard_data['e_hi_sum_width'] = e_hi_sum_width
-        
-        for k, v in model_args_override.items():
-            shard_data[k] = v
-
-        guide_trace = poutine.trace(model.guide).get_trace(shard_data, calculate_expression_map=True)
-        trained_model = poutine.replay(model.model, trace=guide_trace)
-        trace = poutine.trace(trained_model).get_trace(shard_data, calculate_expression_map=True)
-
-        # download MAP estimates to numpy
-        e_lo_map = trace.nodes["_RETURN"]["value"]["e_lo_map"].cpu().numpy().squeeze()
-        e_hi_map = trace.nodes["_RETURN"]["value"]["e_hi_map"].cpu().numpy().squeeze()
-        e_lo_min = trace.nodes["_RETURN"]["value"]["e_lo_min"].cpu().numpy().squeeze()
-        e_hi_min = trace.nodes["_RETURN"]["value"]["e_hi_min"].cpu().numpy().squeeze()
-        e_lo_ci_lower = trace.nodes["_RETURN"]["value"]["e_lo_ci_lower"].cpu().numpy().squeeze()
-        e_hi_ci_lower = trace.nodes["_RETURN"]["value"]["e_hi_ci_lower"].cpu().numpy().squeeze()
-        e_lo_ci_upper = trace.nodes["_RETURN"]["value"]["e_lo_ci_upper"].cpu().numpy().squeeze()
-        e_hi_ci_upper = trace.nodes["_RETURN"]["value"]["e_hi_ci_upper"].cpu().numpy().squeeze()
-        e_lo_mean = trace.nodes["_RETURN"]["value"]["e_lo_mean"].cpu().numpy().squeeze()
-        e_hi_mean = trace.nodes["_RETURN"]["value"]["e_hi_mean"].cpu().numpy().squeeze()
-        e_lo_var = trace.nodes["_RETURN"]["value"]["e_lo_var"].cpu().numpy().squeeze()
-        e_hi_var = trace.nodes["_RETURN"]["value"]["e_hi_var"].cpu().numpy().squeeze()
-        fit_log_prob_map = trace.nodes["_RETURN"]["value"]["fit_log_prob_map"].detach().cpu().numpy()
-        mu_e_lo = trace.nodes["_RETURN"]["value"]["mu_e_lo"].detach().cpu().numpy()
-        
-        e_lo_map_shard_list.append(_fix_scalar(e_lo_map))
-        e_hi_map_shard_list.append(_fix_scalar(e_hi_map))
-        e_lo_min_shard_list.append(_fix_scalar(e_lo_min))
-        e_hi_min_shard_list.append(_fix_scalar(e_hi_min))
-        e_lo_ci_lower_shard_list.append(_fix_scalar(e_lo_ci_lower))
-        e_hi_ci_lower_shard_list.append(_fix_scalar(e_hi_ci_lower))
-        e_lo_ci_upper_shard_list.append(_fix_scalar(e_lo_ci_upper))
-        e_hi_ci_upper_shard_list.append(_fix_scalar(e_hi_ci_upper))
-        e_lo_mean_shard_list.append(_fix_scalar(e_lo_mean))
-        e_hi_mean_shard_list.append(_fix_scalar(e_hi_mean))
-        e_lo_var_shard_list.append(_fix_scalar(e_lo_var))
-        e_hi_var_shard_list.append(_fix_scalar(e_hi_var))
-        fit_log_prob_map_shard_list.append(_fix_scalar(fit_log_prob_map))
-        mu_e_lo_shard_list.append(_fix_scalar(mu_e_lo))
-                    
-    return {'e_lo_map': np.concatenate(e_lo_map_shard_list),
-            'e_hi_map': np.concatenate(e_hi_map_shard_list),
-            'e_lo_min': np.concatenate(e_lo_min_shard_list),
-            'e_hi_min': np.concatenate(e_hi_min_shard_list),
-            'e_lo_ci_lower': np.concatenate(e_lo_ci_lower_shard_list),
-            'e_hi_ci_lower': np.concatenate(e_hi_ci_lower_shard_list),
-            'e_lo_ci_upper': np.concatenate(e_lo_ci_upper_shard_list),
-            'e_hi_ci_upper': np.concatenate(e_hi_ci_upper_shard_list),
-            'e_lo_mean': np.concatenate(e_lo_mean_shard_list),
-            'e_hi_mean': np.concatenate(e_hi_mean_shard_list),
-            'e_lo_var': np.concatenate(e_lo_var_shard_list),
-            'e_hi_var': np.concatenate(e_hi_var_shard_list),
-            'fit_log_prob_map': np.concatenate(fit_log_prob_map_shard_list),
-            'mu_e_lo': np.concatenate(mu_e_lo_shard_list)}
