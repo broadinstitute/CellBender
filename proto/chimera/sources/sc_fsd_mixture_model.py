@@ -178,7 +178,7 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
 
     def get_fsd_components(self,
                            fsd_params_dict: Dict[str, torch.Tensor],
-                           downsampling_rate_tensor: Union[None, torch.Tensor]) \
+                           downsampling_rate_tensor: Union[None, torch.Tensor] = None) \
             -> Tuple[TorchDistribution, TorchDistribution]:
         # instantiate the "chimeric" (lo) distribution
         log_w_nb_lo_tuple = tuple(fsd_params_dict['w_lo'][..., j].log().unsqueeze(-1) for j in range(self.n_fsd_lo_comps))
@@ -261,8 +261,6 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
         return self._init_fsd_xi_loc_posterior
 
 
-
-                    
 class SortByComponentWeights(Transform):
     def __init__(self, fsd_codec: FamilySizeDistributionCodec):
         super(SortByComponentWeights, self).__init__()
@@ -409,6 +407,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
 
         # sizes
         mb_size = data['fingerprint_tensor'].shape[0]
+        batch_shape = torch.Size([mb_size])
         max_family_size = data['fingerprint_tensor'].shape[1]
         
         # useful auxiliary quantities
@@ -420,13 +419,15 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         if 'e_lo_sum_width' in data:
             e_lo_sum_width = data['e_lo_sum_width']
         else:
-            self._logger.warning(f"'e_lo_sum_width' is not given -- fallback to default value {self.DEFAULT_E_LO_SUM_WIDTH}.")
+            self._logger.warning(f"'e_lo_sum_width' is not given -- fallback to default value "
+                                 f"{self.DEFAULT_E_LO_SUM_WIDTH}.")
             e_lo_sum_width = self.DEFAULT_E_LO_SUM_WIDTH
             
         if 'e_hi_sum_width' in data:
             e_hi_sum_width = data['e_hi_sum_width']
         else:
-            self._logger.warning(f"'e_hi_sum_width' is not given -- fallback to default value {self.DEFAULT_E_HI_SUM_WIDTH}.")
+            self._logger.warning(f"'e_hi_sum_width' is not given -- fallback to default value "
+                                 f"{self.DEFAULT_E_HI_SUM_WIDTH}.")
             e_hi_sum_width = self.DEFAULT_E_HI_SUM_WIDTH
 
         e_lo_range = torch.arange(0, e_lo_sum_width, device=self.device).type(self.dtype)
@@ -440,25 +441,8 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         if not self.enable_fsd_gmm_scale_optimization:
             fsd_xi_prior_scales = fsd_xi_prior_scales.clone().detach()
             
-        # global latent variables
-        if self.fsd_gmm_num_components > 1:
-            # generate the marginalized GMM distribution
-            fsd_xi_prior_weights = pyro.sample(
-                "fsd_xi_prior_weights",
-                dist.Dirichlet(
-                    self.fsd_gmm_dirichlet_concentration *
-                    torch.ones((self.fsd_gmm_num_components,), dtype=self.dtype, device=self.device)))
-            fsd_xi_prior_log_weights = fsd_xi_prior_weights.log()
-            fsd_xi_prior_log_weights_tuple = tuple(
-                fsd_xi_prior_log_weights[j]
-                for j in range(self.fsd_gmm_num_components))        
-            fsd_xi_prior_components_tuple = tuple(
-                dist.Normal(fsd_xi_prior_locs[j, :], fsd_xi_prior_scales[j, :]).to_event(1)
-                for j in range(self.fsd_gmm_num_components))
-            fsd_xi_prior_dist = MixtureDistribution(
-                fsd_xi_prior_log_weights_tuple, fsd_xi_prior_components_tuple)
-        else:
-            fsd_xi_prior_dist = dist.Normal(fsd_xi_prior_locs[0, :], fsd_xi_prior_scales[0, :]).to_event(1)
+        #  FSD xi prior distribution
+        fsd_xi_prior_dist = self.get_fsd_xi_prior_dist(fsd_xi_prior_locs, fsd_xi_prior_scales)
         
         with pyro.plate("collapsed_gene_cell", size=mb_size):
             with poutine.scale(scale=data['gene_sampling_site_scale_factor_tensor']):
@@ -515,78 +499,19 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             # total observed molecules
             e_obs = torch.sum(data['fingerprint_tensor'], -1)
 
-            # if running the model in posterior mode or map mode, skip regularizations
-            if not (calculate_joint_expression_log_posterior or calculate_expression_map):
-                
-                # regularizations (on gene-plate quantities)
-                with poutine.scale(scale=data['gene_sampling_site_scale_factor_tensor']):
-                    
-                    # family size distribution sparsity regularization
-                    if self.enable_fsd_w_dirichlet_reg:
-                        if self.fsd_codec.n_fsd_lo_comps > 1:
-                            with poutine.scale(scale=self.w_lo_dirichlet_reg_strength):
-                                pyro.sample(
-                                    "w_lo_dirichlet_reg",
-                                    dist.Dirichlet(self.w_lo_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_lo'])),
-                                    obs=fsd_params_dict['w_lo'])
-                        if self.fsd_codec.n_fsd_hi_comps > 1:
-                            with poutine.scale(scale=self.w_hi_dirichlet_reg_strength):
-                                pyro.sample(
-                                    "w_hi_dirichlet_reg",
-                                    dist.Dirichlet(self.w_hi_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_hi'])),
-                                    obs=fsd_params_dict['w_hi'])
+            # add FSD sparsity regularization to log likelihood
+            self.sample_fsd_weight_sparsity_regularization(
+                fsd_params_dict,
+                data['gene_sampling_site_scale_factor_tensor'])
 
-                    # (soft) constraints
-                    model_vars_dict = locals()
-                    for var_name, var_constraint_params in self.model_constraint_params_dict.items():
-                        var = model_vars_dict[var_name]
-                        if 'lower_bound_value' in var_constraint_params:
-                            value = var_constraint_params['lower_bound_value']
-                            width = var_constraint_params['lower_bound_width']
-                            exponent = var_constraint_params['lower_bound_exponent']
-                            strength = var_constraint_params['lower_bound_strength']
-                            if isinstance(value, str):
-                                value = model_vars_dict[value]
-                            activity = torch.clamp(value + width - var, min=0.) / width
-                            constraint_log_prob = - strength * activity.pow(exponent)
-                            for _ in range(len(var.shape) - 1):
-                                constraint_log_prob = constraint_log_prob.sum(-1)
-                            pyro.sample(
-                                var_name + "_lower_bound_consraint",
-                                CustomLogProbTerm(constraint_log_prob, batch_shape=torch.Size([mb_size]), event_shape=torch.Size([])),
-                                obs=torch.zeros_like(constraint_log_prob))
+            # add (soft) constraints to log likelihood
+            model_vars_dict = locals()
+            self.sample_gene_plate_soft_constraints(
+                model_vars_dict,
+                data['gene_sampling_site_scale_factor_tensor'],
+                batch_shape)
 
-                        if 'upper_bound_value' in var_constraint_params:
-                            value = var_constraint_params['upper_bound_value']
-                            width = var_constraint_params['upper_bound_width']
-                            exponent = var_constraint_params['upper_bound_exponent']
-                            strength = var_constraint_params['upper_bound_strength']
-                            if isinstance(value, str):
-                                value = model_vars_dict[value]
-                            activity = torch.clamp(var - value + width, min=0.) / width
-                            constraint_log_prob = - strength * activity.pow(exponent)
-                            for _ in range(len(var.shape) - 1):
-                                constraint_log_prob = constraint_log_prob.sum(-1)
-                            pyro.sample(
-                                var_name + "_upper_bound_consraint",
-                                CustomLogProbTerm(constraint_log_prob, batch_shape=torch.Size([mb_size]), event_shape=torch.Size([])),
-                                obs=torch.zeros_like(constraint_log_prob))
-
-                        if 'pin_value' in var_constraint_params:
-                            value = var_constraint_params['pin_value']
-                            exponent = var_constraint_params['pin_exponent']
-                            strength = var_constraint_params['pin_strength']
-                            if isinstance(value, str):
-                                value = model_vars_dict[value]
-                            activity = (var - value).abs()
-                            constraint_log_prob = - strength * activity.pow(exponent)
-                            for _ in range(len(var.shape) - 1):
-                                constraint_log_prob = constraint_log_prob.sum(-1)
-                            pyro.sample(
-                                var_name + "_pin_value_consraint",
-                                CustomLogProbTerm(constraint_log_prob, batch_shape=torch.Size([mb_size]), event_shape=torch.Size([])),
-                                obs=torch.zeros_like(constraint_log_prob))
-
+            # empirical "cell size" scale estimate
             cell_size_scale = data['total_obs_reads_per_cell_tensor'] / (
                 self.median_total_reads_per_cell * data['downsampling_rate_tensor'])
 
@@ -787,7 +712,103 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                                 batch_shape=marginalized_log_prob_total_obs.shape,
                                 event_shape=torch.Size([])),
                             obs=torch.zeros_like(marginalized_log_prob_total_obs))
-                            
+
+    def get_fsd_xi_prior_dist(self, fsd_xi_prior_locs, fsd_xi_prior_scales):
+        if self.fsd_gmm_num_components > 1:
+            # generate the marginalized GMM distribution
+            fsd_xi_prior_weights = pyro.sample(
+                "fsd_xi_prior_weights",
+                dist.Dirichlet(
+                    self.fsd_gmm_dirichlet_concentration *
+                    torch.ones((self.fsd_gmm_num_components,), dtype=self.dtype, device=self.device)))
+            fsd_xi_prior_log_weights = fsd_xi_prior_weights.log()
+            fsd_xi_prior_log_weights_tuple = tuple(
+                fsd_xi_prior_log_weights[j]
+                for j in range(self.fsd_gmm_num_components))
+            fsd_xi_prior_components_tuple = tuple(
+                dist.Normal(fsd_xi_prior_locs[j, :], fsd_xi_prior_scales[j, :]).to_event(1)
+                for j in range(self.fsd_gmm_num_components))
+            fsd_xi_prior_dist = MixtureDistribution(
+                fsd_xi_prior_log_weights_tuple, fsd_xi_prior_components_tuple)
+        else:
+            fsd_xi_prior_dist = dist.Normal(fsd_xi_prior_locs[0, :], fsd_xi_prior_scales[0, :]).to_event(1)
+        return fsd_xi_prior_dist
+
+    def sample_gene_plate_soft_constraints(self, model_vars_dict, scale_factor_tensor, batch_shape):
+        with poutine.scale(scale=scale_factor_tensor):
+            for var_name, var_constraint_params in self.model_constraint_params_dict.items():
+                var = model_vars_dict[var_name]
+                if 'lower_bound_value' in var_constraint_params:
+                    value = var_constraint_params['lower_bound_value']
+                    width = var_constraint_params['lower_bound_width']
+                    exponent = var_constraint_params['lower_bound_exponent']
+                    strength = var_constraint_params['lower_bound_strength']
+                    if isinstance(value, str):
+                        value = model_vars_dict[value]
+                    activity = torch.clamp(value + width - var, min=0.) / width
+                    constraint_log_prob = - strength * activity.pow(exponent)
+                    for _ in range(len(var.shape) - 1):
+                        constraint_log_prob = constraint_log_prob.sum(-1)
+                    pyro.sample(
+                        var_name + "_lower_bound_constraint",
+                        CustomLogProbTerm(constraint_log_prob,
+                                          batch_shape=batch_shape,
+                                          event_shape=torch.Size([])),
+                        obs=torch.zeros_like(constraint_log_prob))
+
+                if 'upper_bound_value' in var_constraint_params:
+                    value = var_constraint_params['upper_bound_value']
+                    width = var_constraint_params['upper_bound_width']
+                    exponent = var_constraint_params['upper_bound_exponent']
+                    strength = var_constraint_params['upper_bound_strength']
+                    if isinstance(value, str):
+                        value = model_vars_dict[value]
+                    activity = torch.clamp(var - value + width, min=0.) / width
+                    constraint_log_prob = - strength * activity.pow(exponent)
+                    for _ in range(len(var.shape) - 1):
+                        constraint_log_prob = constraint_log_prob.sum(-1)
+                    pyro.sample(
+                        var_name + "_upper_bound_constraint",
+                        CustomLogProbTerm(constraint_log_prob,
+                                          batch_shape=batch_shape,
+                                          event_shape=torch.Size([])),
+                        obs=torch.zeros_like(constraint_log_prob))
+
+                if 'pin_value' in var_constraint_params:
+                    value = var_constraint_params['pin_value']
+                    exponent = var_constraint_params['pin_exponent']
+                    strength = var_constraint_params['pin_strength']
+                    if isinstance(value, str):
+                        value = model_vars_dict[value]
+                    activity = (var - value).abs()
+                    constraint_log_prob = - strength * activity.pow(exponent)
+                    for _ in range(len(var.shape) - 1):
+                        constraint_log_prob = constraint_log_prob.sum(-1)
+                    pyro.sample(
+                        var_name + "_pin_value_constraint",
+                        CustomLogProbTerm(constraint_log_prob,
+                                          batch_shape=batch_shape,
+                                          event_shape=torch.Size([])),
+                        obs=torch.zeros_like(constraint_log_prob))
+
+    def sample_fsd_weight_sparsity_regularization(self, fsd_params_dict, scale_factor_tensor):
+        with poutine.scale(scale=scale_factor_tensor):
+            if self.enable_fsd_w_dirichlet_reg:
+                if self.fsd_codec.n_fsd_lo_comps > 1:
+                    with poutine.scale(scale=self.w_lo_dirichlet_reg_strength):
+                        pyro.sample(
+                            "w_lo_dirichlet_reg",
+                            dist.Dirichlet(
+                                self.w_lo_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_lo'])),
+                            obs=fsd_params_dict['w_lo'])
+                if self.fsd_codec.n_fsd_hi_comps > 1:
+                    with poutine.scale(scale=self.w_hi_dirichlet_reg_strength):
+                        pyro.sample(
+                            "w_hi_dirichlet_reg",
+                            dist.Dirichlet(
+                                self.w_hi_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_hi'])),
+                            obs=fsd_params_dict['w_hi'])
+
     def guide(self,
               data,
               calculate_expression_map=False,
