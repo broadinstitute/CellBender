@@ -81,6 +81,9 @@ tiny_matrix_mtx = matrix_mtx.tocsr()[genes_to_keep_indices, :].tocsc()[:, barcod
 tiny_genes_df = genes_df.loc[genes_to_keep_indices]
 tiny_barcodes_df = barcodes_df.loc[barcodes_to_keep_indices]
 
+# compensate for lost counts (due to the reduced number of genes)
+tiny_matrix_mtx = tiny_matrix_mtx * int((num_raw_genes / num_genes_to_keep) ** 0.25)
+
 print(f"Number of genes in the trimmed dataset: {len(genes_to_keep_indices)}")
 print(f"Number of barcodes in the trimmed dataset: {len(barcodes_to_keep_indices)}")
 print(f"Expected number of cells in the trimmed dataset: {num_cell_barcodes_to_keep}")
