@@ -61,7 +61,8 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         self.w_hi_dirichlet_concentration = init_params_dict['fsd.w_hi_dirichlet_concentration']
         self.train_chimera_rate_params = init_params_dict['chimera.enable_hyperparameter_optimization']
         self.fsd_xi_posterior_min_scale = init_params_dict['fsd.xi_posterior_min_scale']
-        
+        self.fingerprint_log_likelihood_n_particles = init_params_dict['model.fingerprint_log_likelihood_n_particles']
+
         # empirical normalization factors
         self.median_total_reads_per_cell = np.median(sc_fingerprint_datastore.total_obs_reads_per_cell)
         self.median_fsd_mu_hi = np.median(sc_fingerprint_datastore.empirical_fsd_mu_hi)
@@ -223,8 +224,12 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             fingerprint_log_likelihood = self.get_fingerprint_log_likelihood_monte_carlo(
                 data['fingerprint_tensor'],
                 log_prob_p_lo_obs,
-                log_prob_p_hi_obs
-            )
+                log_prob_p_hi_obs,
+                mu_e_lo,
+                mu_e_hi_batch * cell_size_scale,
+                phi_e_hi_batch,
+                logit_p_zero_e_hi_batch,
+                self.fingerprint_log_likelihood_n_particles)
 
             # observe
             with poutine.scale(scale=data['cell_sampling_site_scale_factor_tensor']):
@@ -243,8 +248,15 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                                                    mu_e_hi: torch.Tensor,
                                                    phi_e_hi: torch.Tensor,
                                                    logit_p_zero_e_hi: torch.Tensor,
-
-                                                   ) -> torch.Tensor:
+                                                   n_particles: int) -> torch.Tensor:
+        print(fingerprint_tensor.shape)
+        print(log_prob_p_lo_obs.shape)
+        print(log_prob_p_hi_obs.shape)
+        print(mu_e_lo.shape)
+        print(mu_e_hi.shape)
+        print(phi_e_hi.shape)
+        print(logit_p_zero_e_hi.shape)
+        return None
 
 
     def get_fsd_xi_prior_dist(self, fsd_xi_prior_locs, fsd_xi_prior_scales):
