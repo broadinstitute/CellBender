@@ -30,8 +30,6 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                  model_constraint_params_dict: dict,
                  sc_fingerprint_datastore: SingleCellFingerprintDataStore,
                  fsd_codec: FamilySizeDistributionCodec,
-                 e_lo_prior_dist: str = 'poisson',
-                 e_hi_prior_dist: str = 'negbinom',
                  guide_type: str = 'map',
                  device=torch.device('cuda'),
                  dtype=torch.float):
@@ -43,9 +41,6 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         
         self.n_total_cells = sc_fingerprint_datastore.n_cells
         self.n_total_genes = sc_fingerprint_datastore.n_genes
-        
-        self.e_lo_prior_dist = e_lo_prior_dist
-        self.e_hi_prior_dist = e_hi_prior_dist
 
         self.guide_type = guide_type
 
@@ -60,7 +55,6 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         self.fsd_gmm_init_components_perplexity = init_params_dict['fsd.gmm_init_components_perplexity']
         self.fsd_gmm_min_weight_per_component = init_params_dict['fsd.gmm_min_weight_per_component']
         self.enable_fsd_w_dirichlet_reg = init_params_dict['fsd.enable_fsd_w_dirichlet_reg']
-        self.enable_fsd_gmm_scale_optimization = init_params_dict['fsd.enable_gmm_scale_optimization']
         self.w_lo_dirichlet_reg_strength = init_params_dict['fsd.w_lo_dirichlet_reg_strength']
         self.w_hi_dirichlet_reg_strength = init_params_dict['fsd.w_hi_dirichlet_reg_strength']
         self.w_lo_dirichlet_concentration = init_params_dict['fsd.w_lo_dirichlet_concentration']
@@ -68,25 +62,23 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         self.train_chimera_rate_params = init_params_dict['chimera.enable_hyperparameter_optimization']
         self.fsd_xi_posterior_min_scale = init_params_dict['fsd.xi_posterior_min_scale']
         
-        # some useful auxiliary quantities and handles
+        # empirical normalization factors
         self.median_total_reads_per_cell = np.median(sc_fingerprint_datastore.total_obs_reads_per_cell)
         self.median_fsd_mu_hi = np.median(sc_fingerprint_datastore.empirical_fsd_mu_hi)
-        
+
+        # initial parameters for e_lo
+        self.init_alpha_c = init_params_dict['chimera.alpha_c']
+        self.init_beta_c = init_params_dict['chimera.beta_c']
+
+        # initial parameters for e_hi
         self.init_mu_e_hi = sc_fingerprint_datastore.empirical_mu_e_hi
         self.init_phi_e_hi = sc_fingerprint_datastore.empirical_phi_e_hi
         self.init_logit_p_zero_e_hi = logit(torch.tensor(sc_fingerprint_datastore.empirical_p_zero_e_hi)).numpy()
-        
-        self.init_phi_e_lo = init_params_dict['expr.phi_e_lo'] * np.ones_like(self.init_phi_e_hi)
-        self.init_alpha_c = init_params_dict['chimera.alpha_c']
-        self.init_beta_c = init_params_dict['chimera.beta_c']
-        
+
         # logging
         self._logger = logging.getLogger()
                 
-    def model(self,
-              data,
-              calculate_expression_map=False,
-              calculate_joint_expression_log_posterior=False):
+    def model(self, data):
         # register the parameters of the family size distribution codec
         pyro.module("fsd_codec", self.fsd_codec)
         
@@ -114,11 +106,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             "beta_c",
             torch.tensor(self.init_beta_c, device=self.device, dtype=self.dtype),
             constraint=constraints.positive)
-        phi_e_lo = pyro.param(
-            "phi_e_lo",
-            torch.tensor(self.init_phi_e_lo, device=self.device, dtype=self.dtype),
-            constraint=constraints.positive)
-            
+
         # gene expression parameters
         mu_e_hi = pyro.param(
             "mu_e_hi",
@@ -141,43 +129,22 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         family_size_vector_observable = torch.arange(1, max_family_size + 1, device=self.device).type(self.dtype)
         family_size_vector_full = torch.arange(0, max_family_size + 1, device=self.device).type(self.dtype)
         zero = torch.tensor(0, device=self.device, dtype=self.dtype)
-        
-        # expression marginalization window width around the guessed point
-        if 'e_lo_sum_width' in data:
-            e_lo_sum_width = data['e_lo_sum_width']
-        else:
-            self._logger.warning(f"'e_lo_sum_width' is not given -- fallback to default value "
-                                 f"{self.DEFAULT_E_LO_SUM_WIDTH}.")
-            e_lo_sum_width = self.DEFAULT_E_LO_SUM_WIDTH
-            
-        if 'e_hi_sum_width' in data:
-            e_hi_sum_width = data['e_hi_sum_width']
-        else:
-            self._logger.warning(f"'e_hi_sum_width' is not given -- fallback to default value "
-                                 f"{self.DEFAULT_E_HI_SUM_WIDTH}.")
-            e_hi_sum_width = self.DEFAULT_E_HI_SUM_WIDTH
 
-        e_lo_range = torch.arange(0, e_lo_sum_width, device=self.device).type(self.dtype)
-        e_hi_range = torch.arange(0, e_hi_sum_width, device=self.device).type(self.dtype)
-        
         if not self.train_chimera_rate_params:
             alpha_c = alpha_c.clone().detach()
             beta_c = beta_c.clone().detach()
-            phi_e_lo = phi_e_lo.clone().detach()
-            
-        if not self.enable_fsd_gmm_scale_optimization:
-            fsd_xi_prior_scales = fsd_xi_prior_scales.clone().detach()
-            
-        #  FSD xi prior distribution
+
+        #  fsd xi prior distribution
         fsd_xi_prior_dist = self.get_fsd_xi_prior_dist(fsd_xi_prior_locs, fsd_xi_prior_scales)
         
         with pyro.plate("collapsed_gene_cell", size=mb_size):
+
             with poutine.scale(scale=data['gene_sampling_site_scale_factor_tensor']):
                 # sample gene family size distribution parameters
                 fsd_xi = pyro.sample("fsd_xi", fsd_xi_prior_dist)
 
-                # transform to the constrained space
-                fsd_params_dict = self.fsd_codec.decode(fsd_xi)
+            # transform to the constrained space
+            fsd_params_dict = self.fsd_codec.decode(fsd_xi)
 
             # get chimeric and real family size distributions
             fsd_lo_dist, fsd_hi_dist = self.fsd_codec.get_fsd_components(
@@ -194,8 +161,6 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             p_obs_lo = log_p_obs_lo.exp()
             p_obs_hi = log_p_obs_hi.exp()
 
-            # soft constraints on family size distribution parameters
-            
             # localization and/or calculation of required variables for pickup by locals() -- see below
             p_obs_lo_to_p_obs_hi_ratio = p_obs_lo / p_obs_hi
             phi_lo_comps = fsd_params_dict['phi_lo']
@@ -218,18 +183,15 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             p_obs_hi_comps = get_log_prob_compl(log_p_unobs_hi_comps).exp()
             
             # slicing expression mu and phi by gene_index_tensor -- we only need these slices later on
-            phi_e_lo_batch = phi_e_lo[data['gene_index_tensor']]
             phi_e_hi_batch = phi_e_hi[data['gene_index_tensor']]
             mu_e_hi_batch = mu_e_hi[data['gene_index_tensor']]
             logit_p_zero_e_hi_batch = logit_p_zero_e_hi[data['gene_index_tensor']]
-            
-            # total observed molecules
-            e_obs = torch.sum(data['fingerprint_tensor'], -1)
 
             # add FSD sparsity regularization to log likelihood
-            self.sample_fsd_weight_sparsity_regularization(
-                fsd_params_dict,
-                data['gene_sampling_site_scale_factor_tensor'])
+            if self.enable_fsd_w_dirichlet_reg:
+                self.sample_fsd_weight_sparsity_regularization(
+                    fsd_params_dict,
+                    data['gene_sampling_site_scale_factor_tensor'])
 
             # add (soft) constraints to log likelihood
             model_vars_dict = locals()
@@ -242,98 +204,48 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             cell_size_scale = data['total_obs_reads_per_cell_tensor'] / (
                 self.median_total_reads_per_cell * data['downsampling_rate_tensor'])
 
-            # e_hi prior distribution
-            mu_e_hi_per_cell = cell_size_scale * mu_e_hi_batch
-            if self.e_hi_prior_dist == 'zinb':
-                e_hi_prior_dist_per_cell = ZeroInflatedNegativeBinomial(
-                    logit_zero=logit_p_zero_e_hi_batch,
-                    mu=mu_e_hi_per_cell,
-                    phi=phi_e_hi_batch)
-                e_hi_prior_dist_global = ZeroInflatedNegativeBinomial(
-                    logit_zero=logit_p_zero_e_hi_batch,
-                    mu=mu_e_hi_batch,
-                    phi=phi_e_hi_batch)
-            elif self.e_hi_prior_dist == 'negbinom':
-                e_hi_prior_dist_per_cell = NegativeBinomial(mu=mu_e_hi_per_cell, phi=phi_e_hi_batch)
-                e_hi_prior_dist_global = NegativeBinomial(mu=mu_e_hi_batch, phi=phi_e_hi_batch)
-            elif self.e_hi_prior_dist == 'poisson':
-                e_hi_prior_dist_per_cell = dist.Poisson(mu_e_hi_per_cell)
-                e_hi_prior_dist_global = dist.Poisson(mu_e_hi_batch)
-            else:
-                raise Exception('Bad value for e_hi_prior_dist!')
-
-            # calculating mean chimeric counts per cell
-            normalized_total_fragments = e_hi_prior_dist_global.mean * mu_hi / (
+            # calculate the (poisson) rate of chimeric molecule formation
+            e_hi_prior_dist_global = ZeroInflatedNegativeBinomial(
+                logit_zero=logit_p_zero_e_hi_batch,
+                mu=mu_e_hi_batch,
+                phi=phi_e_hi_batch)
+            mean_e_hi = e_hi_prior_dist_global.mean
+            normalized_total_fragments = mean_e_hi * mu_hi / (
                 self.median_fsd_mu_hi * data['downsampling_rate_tensor'])
             mu_e_lo = (alpha_c + beta_c * cell_size_scale) * normalized_total_fragments
-            
-            # e_lo prior distribution
-            if self.e_lo_prior_dist == 'negbinom':
-                e_lo_prior_dist_per_cell = NegativeBinomial(mu=mu_e_lo, phi=phi_e_lo_batch)
-            elif self.e_lo_prior_dist == 'poisson':
-                e_lo_prior_dist_per_cell = dist.Poisson(mu_e_lo)
-            else:
-                raise Exception('Bad value for e_lo_prior_dist!')
 
-            # e_lo and e_hi marginalization range
-            if 'e_lo_min' in data.keys() and 'e_hi_min' in data.keys():
-                e_lo_min = data['e_lo_min']
-                e_hi_min = data['e_hi_min']
-            else:
-                # estimate chimera and real expression ranges
-                with torch.no_grad():
-                    e_lo_min = torch.ceil(torch.clamp(mu_e_lo - 0.5 * e_lo_sum_width, 0.))
-                    e_hi_min = torch.ceil(torch.clamp(
-                        (e_obs - p_obs_lo * mu_e_lo) / p_obs_hi - 0.5 * e_hi_sum_width, 0.))
-
-            e_lo = e_lo_min + e_lo_range.view(-1, 1)
-            e_hi = e_hi_min + e_hi_range.view(-1, 1, 1)
-            
-            # e_lo and e_hi prior log probs
-            e_lo_log_prob = e_lo_prior_dist_per_cell.log_prob(e_lo)
-            e_hi_log_prob = e_hi_prior_dist_per_cell.log_prob(e_hi)
-            
+            # calculate p_lo and p_hi on all observable family sizes
             log_prob_p_lo_full = fsd_lo_dist.log_prob(family_size_vector_full)
             log_prob_p_hi_full = fsd_hi_dist.log_prob(family_size_vector_full)
+            log_prob_p_lo_obs = log_prob_p_lo_full[..., 1:]
+            log_prob_p_hi_obs = log_prob_p_hi_full[..., 1:]
 
-            fingerprint_log_rate_full = logaddexp(
-                (e_lo.unsqueeze(-1) + self.EPS).log() + log_prob_p_lo_full,
-                (e_hi.unsqueeze(-1) + self.EPS).log() + log_prob_p_hi_full)
-            fingerprint_log_rate_obs = fingerprint_log_rate_full[..., 1:]
-            fingerprint_log_rate_unobs = fingerprint_log_rate_full[..., 0]
-
-            # observing the fingerprint (poisson)
-            log_prob_fingerprint_obs = (
-                (data['fingerprint_tensor'] * fingerprint_log_rate_obs).sum(-1)
-                - fingerprint_log_rate_obs.exp().sum(-1))
-#                     - (data['fingerprint_tensor'] + 1).lgamma().sum(-1))
-
-            # total observation log prob
-            log_prob_total_obs = (
-                data['e_lo_log_prob_prefactor'] * e_lo_log_prob +
-                data['e_hi_log_prob_prefactor'] * e_hi_log_prob +
-                # data['e_obs_log_prob_prefactor'] * log_prob_e_obs +
-                data['fingerprint_obs_log_prob_prefactor'] * log_prob_fingerprint_obs)
-
-            # normalized fit log prob (auxiliary quantity)
-            normalized_fit_log_prob = (
-                fingerprint_log_rate_obs
-                - torch.logsumexp(fingerprint_log_rate_obs, -1, keepdim=True))
-
-            # kill unphysical paths (... which may have been made available due to approximations)
-            log_prob_total_obs[(e_lo + e_hi) < e_obs] = - float("inf")
-
-            # marginalize
-            marginalized_log_prob_total_obs = torch.logsumexp(torch.logsumexp(log_prob_total_obs, 0), 0)
+            fingerprint_log_likelihood = self.get_fingerprint_log_likelihood_monte_carlo(
+                data['fingerprint_tensor'],
+                log_prob_p_lo_obs,
+                log_prob_p_hi_obs
+            )
 
             # observe
             with poutine.scale(scale=data['cell_sampling_site_scale_factor_tensor']):
                 pyro.sample("fingerprint_and_expression_observation",
                             CustomLogProbTerm(
-                                custom_log_prob=marginalized_log_prob_total_obs,
-                                batch_shape=marginalized_log_prob_total_obs.shape,
+                                custom_log_prob=fingerprint_log_likelihood,
+                                batch_shape=batch_shape,
                                 event_shape=torch.Size([])),
-                            obs=torch.zeros_like(marginalized_log_prob_total_obs))
+                            obs=torch.zeros_like(fingerprint_log_likelihood))
+
+    @staticmethod
+    def get_fingerprint_log_likelihood_monte_carlo(fingerprint_tensor: torch.Tensor,
+                                                   log_prob_p_lo_obs: torch.Tensor,
+                                                   log_prob_p_hi_obs: torch.Tensor,
+                                                   mu_e_lo: torch.Tensor,
+                                                   mu_e_hi: torch.Tensor,
+                                                   phi_e_hi: torch.Tensor,
+                                                   logit_p_zero_e_hi: torch.Tensor,
+
+                                                   ) -> torch.Tensor:
+
 
     def get_fsd_xi_prior_dist(self, fsd_xi_prior_locs, fsd_xi_prior_scales):
         if self.fsd_gmm_num_components > 1:
@@ -415,21 +327,20 @@ class SingleCellFamilySizeModel(torch.nn.Module):
 
     def sample_fsd_weight_sparsity_regularization(self, fsd_params_dict, scale_factor_tensor):
         with poutine.scale(scale=scale_factor_tensor):
-            if self.enable_fsd_w_dirichlet_reg:
-                if self.fsd_codec.n_fsd_lo_comps > 1:
-                    with poutine.scale(scale=self.w_lo_dirichlet_reg_strength):
-                        pyro.sample(
-                            "w_lo_dirichlet_reg",
-                            dist.Dirichlet(
-                                self.w_lo_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_lo'])),
-                            obs=fsd_params_dict['w_lo'])
-                if self.fsd_codec.n_fsd_hi_comps > 1:
-                    with poutine.scale(scale=self.w_hi_dirichlet_reg_strength):
-                        pyro.sample(
-                            "w_hi_dirichlet_reg",
-                            dist.Dirichlet(
-                                self.w_hi_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_hi'])),
-                            obs=fsd_params_dict['w_hi'])
+            if self.fsd_codec.n_fsd_lo_comps > 1:
+                with poutine.scale(scale=self.w_lo_dirichlet_reg_strength):
+                    pyro.sample(
+                        "w_lo_dirichlet_reg",
+                        dist.Dirichlet(
+                            self.w_lo_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_lo'])),
+                        obs=fsd_params_dict['w_lo'])
+            if self.fsd_codec.n_fsd_hi_comps > 1:
+                with poutine.scale(scale=self.w_hi_dirichlet_reg_strength):
+                    pyro.sample(
+                        "w_hi_dirichlet_reg",
+                        dist.Dirichlet(
+                            self.w_hi_dirichlet_concentration * torch.ones_like(fsd_params_dict['w_hi'])),
+                        obs=fsd_params_dict['w_hi'])
 
     def guide(self, data):
         if self.fsd_gmm_num_components > 1:

@@ -14,8 +14,8 @@ class SingleCellFingerprint:
     def __init__(self,
                  gene_idx_list: List[int],
                  max_family_size: int,
-                 barcode_list: List[int]=list(),
-                 csr_fingerprint_list: List[sp.csr_matrix]=list()):
+                 barcode_list: List[int] = [],
+                 csr_fingerprint_list: List[sp.csr_matrix] = []):
         assert len(gene_idx_list) > 0, \
             "The fingerprint must have at least one gene!"
         assert len(barcode_list) == len(csr_fingerprint_list), \
@@ -491,11 +491,8 @@ class SingleCellFingerprintDataStore:
             'gene_sampling_site_scale_factor_tensor': torch.tensor(
                 gene_sampling_site_scale_factor_array, device=device, dtype=dtype),
             'downsampling_rate_tensor': torch.ones(mb_size, device=device, dtype=dtype),
-            'e_lo_log_prob_prefactor': 1.0,
-            'e_hi_log_prob_prefactor': 1.0,
-            'e_obs_log_prob_prefactor': 1.0,
             'fingerprint_obs_log_prob_prefactor': 1.0}
-    
+
     def generate_stratified_sample_torch(self,
                                          mb_genes_per_gene_group,
                                          mb_expressing_cells_per_gene,
@@ -548,15 +545,6 @@ def generate_downsampled_minibatch(original_data_dict: Dict[str, torch.Tensor],
     downsampled_data_dict['gene_index_tensor'] = original_data_dict['gene_index_tensor']
     downsampled_data_dict['cell_sampling_site_scale_factor_tensor'] = original_data_dict['cell_sampling_site_scale_factor_tensor']
     downsampled_data_dict['gene_sampling_site_scale_factor_tensor'] = original_data_dict['gene_sampling_site_scale_factor_tensor']
-    downsampled_data_dict['e_lo_sum_width'] = original_data_dict['e_lo_sum_width']
-    downsampled_data_dict['e_hi_sum_width'] = original_data_dict['e_hi_sum_width']
-    downsampled_data_dict['e_lo_log_prob_prefactor'] = original_data_dict['e_lo_log_prob_prefactor']
-    downsampled_data_dict['e_hi_log_prob_prefactor'] = original_data_dict['e_hi_log_prob_prefactor']
-    downsampled_data_dict['e_obs_log_prob_prefactor'] = original_data_dict['e_obs_log_prob_prefactor']
-    downsampled_data_dict['fingerprint_obs_log_prob_prefactor'] = original_data_dict['fingerprint_obs_log_prob_prefactor']
-    
-    # generate downsample data
-    data_size = original_data_dict['cell_index_tensor'].shape[0]
 
     # downsampling rate tensor
     downsampled_data_dict['downsampling_rate_tensor'] = min_downsampling_rate + (
