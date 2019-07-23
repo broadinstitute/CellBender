@@ -23,21 +23,20 @@ install_requires = [
 setuptools.setup(
     name='cellbender',
     version='0.1',
-    description='A software package for pre-processing and denoising '
-                'scRNA-seq data',
+    description='A software package for eliminating technical artifacts from '
+                'high-throughput single-cell RNA sequencing (scRNA-seq) data',
     long_description=readme(),
     classifiers=[
       'Development Status :: 3 - Alpha',
       'Intended Audience :: Science/Research'
-      'License :: OSI Approved :: MIT License',
-      'Programming Language :: Python :: 3.6',
+      'License :: OSI Approved :: BSD License',
+      'Programming Language :: Python :: 3.7',
       'Topic :: Scientific/Engineering :: Bio-Informatics',
     ],
     keywords='scRNA-seq bioinformatics',
     url='http://github.com/broadinstitute/CellBender',
-    author='Stephen Fleming',
-    author_email='sfleming@broadinstitute.org',
-    license='MIT',
+    author='Stephen Fleming, Mehrtash Babadi',
+    license='BSD (3-Clause)',
     packages=['cellbender'],
     install_requires=install_requires,
     entry_points={
