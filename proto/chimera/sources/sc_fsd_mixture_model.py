@@ -241,23 +241,56 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                             obs=torch.zeros_like(fingerprint_log_likelihood))
 
     @staticmethod
-    def get_fingerprint_log_likelihood_monte_carlo(fingerprint_tensor: torch.Tensor,
-                                                   log_prob_p_lo_obs: torch.Tensor,
-                                                   log_prob_p_hi_obs: torch.Tensor,
-                                                   mu_e_lo: torch.Tensor,
-                                                   mu_e_hi: torch.Tensor,
-                                                   phi_e_hi: torch.Tensor,
-                                                   logit_p_zero_e_hi: torch.Tensor,
+    def get_fingerprint_log_likelihood_monte_carlo(fingerprint_tensor_nr: torch.Tensor,
+                                                   log_prob_p_lo_obs_nr: torch.Tensor,
+                                                   log_prob_p_hi_obs_nr: torch.Tensor,
+                                                   mu_e_lo_n: torch.Tensor,
+                                                   mu_e_hi_n: torch.Tensor,
+                                                   phi_e_hi_n: torch.Tensor,
+                                                   logit_p_zero_e_hi_n: torch.Tensor,
                                                    n_particles: int) -> torch.Tensor:
-        print(fingerprint_tensor.shape)
-        print(log_prob_p_lo_obs.shape)
-        print(log_prob_p_hi_obs.shape)
-        print(mu_e_lo.shape)
-        print(mu_e_hi.shape)
-        print(phi_e_hi.shape)
-        print(logit_p_zero_e_hi.shape)
-        return None
+        # pre-compute useful tensors
+        p_lo_obs_nr = log_prob_p_lo_obs_nr.exp()
+        total_obs_rate_lo_n = mu_e_lo_n * p_lo_obs_nr.sum(-1)
+        log_rate_e_lo_nr = mu_e_lo_n.log().unsqueeze(-1) + log_prob_p_lo_obs_nr
 
+        p_hi_obs_nr = log_prob_p_hi_obs_nr.exp()
+        total_obs_rate_hi_n = mu_e_hi_n * p_hi_obs_nr.sum(-1)
+        log_rate_e_hi_nr = mu_e_hi_n.log().unsqueeze(-1) + log_prob_p_hi_obs_nr
+
+        fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
+
+        log_p_zero_e_hi_n = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
+        log_p_nonzero_e_hi_n = get_log_prob_compl(log_p_zero_e_hi_n)
+
+        # reparameterized Monte-Carlo samples from Gamma(alpha, alpha) for e_hi marginalization
+        alpha_e_hi_n = phi_e_hi_n.reciprocal()
+        omega_mn = dist.Gamma(concentration=alpha_e_hi_n, rate=alpha_e_hi_n).rsample((n_particles,))
+
+        # contribution of chimeric molecules alone alone
+        log_poisson_e_hi_zero_contrib_n = (
+                log_p_zero_e_hi_n
+                + (fingerprint_tensor_nr * log_rate_e_lo_nr).sum(-1)
+                - total_obs_rate_lo_n
+                - fingerprint_log_norm_factor_n)
+
+        log_rate_combined_mnr = logaddexp(
+            log_rate_e_lo_nr,
+            log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1))
+        log_poisson_e_hi_nonzero_contrib_mn = (
+            (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
+            - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn)
+            - fingerprint_log_norm_factor_n)
+        log_poisson_e_hi_nonzero_contrib_n = (
+            log_poisson_e_hi_nonzero_contrib_mn.logsumexp(0)
+            - np.log(n_particles)
+            + log_p_nonzero_e_hi_n)
+
+        log_like_n = logaddexp(
+            log_poisson_e_hi_zero_contrib_n,
+            log_poisson_e_hi_nonzero_contrib_n)
+
+        return log_like_n
 
     def get_fsd_xi_prior_dist(self, fsd_xi_prior_locs, fsd_xi_prior_scales):
         if self.fsd_gmm_num_components > 1:
