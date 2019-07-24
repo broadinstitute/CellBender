@@ -78,6 +78,9 @@ class CLI(AbstractCLI):
         # (The same dimensions are used in reverse order for the decoder.)
         args.z_hidden_dims = sorted(args.z_hidden_dims, reverse=True)
 
+        # Set use_jit to False.
+        args.use_jit = False
+
         self.args = args
 
         return args
