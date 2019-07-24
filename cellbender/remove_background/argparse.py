@@ -122,10 +122,5 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            help="Training detail: learning rate for "
                                 "inference (probably "
                                 "do not exceed 1e-3).")
-    subparser.add_argument("--no-jit",
-                           dest="use_jit", action="store_false",
-                           help="Including the flag --no_jit will opt not "
-                                "to use a JIT compiler.  The JIT compiler "
-                                "provides a speed-up.")
 
     return subparsers
