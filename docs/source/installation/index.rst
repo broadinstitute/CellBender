@@ -39,13 +39,13 @@ Docker Image
 
 A GPU-enabled docker image is available from the Google Container Registry (GCR) as:
 
-  ``us.gcr.io/broad-dsde-methods/cellbender:latest``
+``us.gcr.io/broad-dsde-methods/cellbender:latest``
 
 
 Terra Workflow
 --------------
 
-For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/broad-dsde-methods/cellbender/10/wdl>`_
+For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/cellbender/remove-background/>`_
 is available as:
 
-  ``broad-dsde-methods/cellbender``
+``cellbender/remove-background``
