@@ -67,7 +67,7 @@ class PosteriorImportanceSampler(object):
         if self.validate_callable_return_shapes:
             assert proposals_mb.shape == self._proposal_shape
             assert proposal_log_prob_mb.shape == self._proposal_shape
-            assert prior_log_prob_mb == self._proposal_shape
+            assert prior_log_prob_mb.shape == self._proposal_shape
             assert model_log_like_mb.shape == self._proposal_shape
             assert log_obj_kmb.shape == self._obj_shape
 
