@@ -59,10 +59,10 @@ class PosteriorImportanceSampler(object):
         self._obj_shape = torch.Size((n_outputs,) + self._proposal_shape)
 
         proposals_mb = self.proposal_generator(n_particles)
-        proposal_log_prob_mb = self.proposal_log_prob_function(self._proposals_mb)
-        prior_log_prob_mb = self.prior_log_prob_function(self._proposals_mb)
-        model_log_like_mb = self.model_log_like_function(self._proposals_mb)
-        log_obj_kmb = self.log_objective_function(self._proposals_mb)
+        proposal_log_prob_mb = self.proposal_log_prob_function(proposals_mb)
+        prior_log_prob_mb = self.prior_log_prob_function(proposals_mb)
+        model_log_like_mb = self.model_log_like_function(proposals_mb)
+        log_obj_kmb = self.log_objective_function(proposals_mb)
 
         if self.validate_callable_return_shapes:
             assert proposals_mb.shape == self._proposal_shape
