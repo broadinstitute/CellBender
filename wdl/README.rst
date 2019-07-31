@@ -112,7 +112,7 @@ included as an output of the workflow.
   determined to have a > 50% posterior probability of containing cells.
 * ``csv``: CSV file containing all the droplet barcodes which were determined to have
   a > 50% posterior probability of containing cells.  Barcodes are written in plain text.
-  This information is also contained in each of the above outputs, but is included for
-  convenience of usage in certain downstream applications.
+  This information is also contained in each of the above outputs, but is included as a separate
+  output for convenient use in certain downstream applications.
 * ``pdf``: PDF file that provides a standard graphical summary of the inference procedure.
 * ``log``: Log file produced by the ``cellbender remove-background`` run.
