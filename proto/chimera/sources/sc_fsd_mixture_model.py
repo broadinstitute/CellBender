@@ -19,6 +19,7 @@ from collections import defaultdict
 
 
 class SingleCellFamilySizeModel(torch.nn.Module):
+
     DEFAULT_E_LO_SUM_WIDTH = 10
     DEFAULT_E_HI_SUM_WIDTH = 20
     DEFAULT_CONFIDENCE_INTERVAL_LOWER = 0.05 
@@ -79,6 +80,9 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         # logging
         self._logger = logging.getLogger()
                 
+    def forward(self, _):
+        raise NotImplementedError
+
     def model(self,
               data,
               posterior_sampling_mode: bool = False):
@@ -233,41 +237,69 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                 mu_fsd_hi_n,
                 phi_e_hi_n)
 
-            if not posterior_sampling_mode:
+            if posterior_sampling_mode:
 
-                fingerprint_log_likelihood = self._get_fingerprint_log_likelihood_monte_carlo(
+                # just return the calculated auxiliary tensors
+                return locals()
+
+            else:
+
+                # sample the fingerprint
+                self._sample_fingerprint(
+                    batch_shape,
+                    cell_sampling_site_scale_factor_tensor_n,
                     fingerprint_tensor_nr,
                     log_prob_fsd_lo_obs_r,
                     log_prob_fsd_hi_obs_r,
                     mu_e_lo_n,
-                    mu_e_hi_n * cell_size_scale_n,
+                    mu_e_hi_n,
                     phi_e_hi_n,
                     logit_p_zero_e_hi_n,
-                    self.fingerprint_log_likelihood_n_particles)
+                    cell_size_scale_n)
 
-                # observe
-                with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
-                    pyro.sample("fingerprint_and_expression_observation",
-                                CustomLogProbTerm(
-                                    custom_log_prob=fingerprint_log_likelihood,
-                                    batch_shape=batch_shape,
-                                    event_shape=torch.Size([])),
-                                obs=torch.zeros_like(fingerprint_log_likelihood))
-
-                # add FSD sparsity regularization to log likelihood
+                # sample fsd sparsity regularization
                 if self.enable_fsd_w_dirichlet_reg:
                     self._sample_fsd_weight_sparsity_regularization(
                         fsd_params_dict,
-                        data['gene_sampling_site_scale_factor_tensor'])
+                        gene_sampling_site_scale_factor_tensor_n)
 
-                # add (soft) constraints to log likelihood
+                # sample (soft) constraints
                 self._sample_gene_plate_soft_constraints(
                     locals(),
                     gene_sampling_site_scale_factor_tensor_n,
                     batch_shape)
 
-            else:
-                raise NotImplementedError
+    def _sample_fingerprint(self,
+                            batch_shape: torch.Size,
+                            cell_sampling_site_scale_factor_tensor_n: torch.Tensor,
+                            fingerprint_tensor_nr: torch.Tensor,
+                            log_prob_fsd_lo_obs_r: torch.Tensor,
+                            log_prob_fsd_hi_obs_r: torch.Tensor,
+                            mu_e_lo_n: torch.Tensor,
+                            mu_e_hi_n: torch.Tensor,
+                            phi_e_hi_n: torch.Tensor,
+                            logit_p_zero_e_hi_n: torch.Tensor,
+                            cell_size_scale_n: torch.Tensor):
+
+        # calculate the fingerprint log likelihood
+        fingerprint_log_likelihood_n = self._get_fingerprint_log_likelihood_monte_carlo(
+            fingerprint_tensor_nr,
+            log_prob_fsd_lo_obs_r,
+            log_prob_fsd_hi_obs_r,
+            mu_e_lo_n,
+            mu_e_hi_n * cell_size_scale_n,
+            phi_e_hi_n,
+            logit_p_zero_e_hi_n,
+            self.fingerprint_log_likelihood_n_particles)
+
+        # sample
+        with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
+            pyro.sample("fingerprint_and_expression_observation",
+                        CustomLogProbTerm(
+                            custom_log_prob=fingerprint_log_likelihood_n,
+                            batch_shape=batch_shape,
+                            event_shape=torch.Size([])),
+                        obs=torch.zeros_like(fingerprint_log_likelihood_n))
 
     def _get_mu_e_lo_n(self,
                        alpha_c: torch.Tensor,
@@ -500,44 +532,39 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                 pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
 
     # TODO: rewrite using poutine and avoid code repetition
+    @torch.no_grad()
     def get_active_constraints_on_genes(self) -> Dict:
-        empirical_fsd_mu_hi_tensor = torch.tensor(
-            self.sc_fingerprint_datastore.empirical_fsd_mu_hi, device=self.device, dtype=self.dtype)
-        zero = torch.tensor(0, device=self.device, dtype=self.dtype)
+        # TODO grab variables from the model
+        raise NotImplementedError
+
+        # model_vars_dict = ...
         active_constraints_dict = defaultdict(dict)
+        for var_name, var_constraint_params in self.model_constraint_params_dict.items():
+            var = model_vars_dict[var_name]
+            if 'lower_bound_value' in var_constraint_params:
+                value = var_constraint_params['lower_bound_value']
+                width = var_constraint_params['lower_bound_width']
+                if isinstance(value, str):
+                    value = model_vars_dict[value]
+                activity = torch.clamp(value + width - var, min=0.)
+                for _ in range(len(var.shape) - 1):
+                    activity = activity.sum(-1)
+                nnz_activity = torch.nonzero(activity).cpu().numpy().flatten()
+                if nnz_activity.size > 0:
+                    active_constraints_dict[var_name]['lower_bound'] = set(nnz_activity.tolist())
 
-        with torch.no_grad():
-
-            # TODO grab variables from the model
-            raise NotImplementedError
-
-            model_vars_dict = locals()
-            for var_name, var_constraint_params in self.model_constraint_params_dict.items():
-                var = model_vars_dict[var_name]
-                if 'lower_bound_value' in var_constraint_params:
-                    value = var_constraint_params['lower_bound_value']
-                    width = var_constraint_params['lower_bound_width']
-                    if isinstance(value, str):
-                        value = model_vars_dict[value]
-                    activity = torch.clamp(value + width - var, min=0.)
-                    for _ in range(len(var.shape) - 1):
-                        activity = activity.sum(-1)
-                    nnz_activity = torch.nonzero(activity).cpu().numpy().flatten()
-                    if nnz_activity.size > 0:
-                        active_constraints_dict[var_name]['lower_bound'] = set(nnz_activity.tolist())
-
-                if 'upper_bound_value' in var_constraint_params:
-                    value = var_constraint_params['upper_bound_value']
-                    width = var_constraint_params['upper_bound_width']
-                    exponent = var_constraint_params['upper_bound_exponent']
-                    strength = var_constraint_params['upper_bound_strength']
-                    if isinstance(value, str):
-                        value = model_vars_dict[value]
-                    activity = torch.clamp(var - value + width, min=0.)
-                    for _ in range(len(var.shape) - 1):
-                        activity = activity.sum(-1)
-                    nnz_activity = torch.nonzero(activity).cpu().numpy().flatten()
-                    if nnz_activity.size > 0:
-                        active_constraints_dict[var_name]['upper_bound'] = set(nnz_activity.tolist())
+            if 'upper_bound_value' in var_constraint_params:
+                value = var_constraint_params['upper_bound_value']
+                width = var_constraint_params['upper_bound_width']
+                exponent = var_constraint_params['upper_bound_exponent']
+                strength = var_constraint_params['upper_bound_strength']
+                if isinstance(value, str):
+                    value = model_vars_dict[value]
+                activity = torch.clamp(var - value + width, min=0.)
+                for _ in range(len(var.shape) - 1):
+                    activity = activity.sum(-1)
+                nnz_activity = torch.nonzero(activity).cpu().numpy().flatten()
+                if nnz_activity.size > 0:
+                    active_constraints_dict[var_name]['upper_bound'] = set(nnz_activity.tolist())
 
         return dict(active_constraints_dict)
