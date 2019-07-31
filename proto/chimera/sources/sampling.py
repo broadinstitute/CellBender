@@ -104,7 +104,7 @@ class PosteriorImportanceSampler(object):
         return torch.logsumexp(
             self._prior_log_prob_mb
             + self._model_log_like_mb
-            - self._proposal_log_prob_mb, 1)
+            - self._proposal_log_prob_mb, 0)
 
     @property
     def log_objective_posterior_expectation(self) -> torch.Tensor:
