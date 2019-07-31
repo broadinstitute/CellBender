@@ -1,38 +1,38 @@
 from typing import Callable
 import torch
+from pyro.distributions import TorchDistribution
 
 
 class PosteriorImportanceSampler(object):
     def __init__(self,
-                 proposal_generator: Callable[[int], torch.Tensor],
-                 proposal_log_prob_function: Callable[[torch.Tensor], torch.Tensor],
-                 prior_log_prob_function: Callable[[torch.Tensor], torch.Tensor],
+                 proposal_dist: TorchDistribution,
+                 prior_dist: TorchDistribution,
                  model_log_like_function: Callable[[torch.Tensor], torch.Tensor],
                  log_objective_function: Callable[[torch.Tensor], torch.Tensor],
                  validate_callable_return_shapes: bool = True):
         """Initializer
 
-        :param proposal_generator: a callable that generates proposals
-        :param proposal_log_prob_function: a callable that returns the log likelihood of proposals
-        :param prior_log_prob_function: a callable that returns the prior log probability on the proposals
+        :param proposal_dist: proposal distribution
+        :param prior_dist: prior distribution
         :param model_log_like_function: a callable the returns the molde log likelihood on the proposals
         :param log_objective_function: log of the objective function
         :param validate_callable_return_shapes: validate the returned tensor shape of callables
 
-        .. note:: ``proposal_generator`` takes an integer ``M`` (number of proposals) and returns a tensor
-            with shape ``(M,) + batch_shape`` where ``batch_shape`` is the batch shape.
+        .. note:: ``proposal_dist`` mand ``prior_dist`` must have the same shape; both must have
+            empty ``event_shape`` and the same ``batch_shape``.
 
-        .. note:: ``proposal_log_prob_function``,  ``prior_log_prob_function``, ``model_log_like_function``
-            each take a tensor with shape ``(M,) + batch_shape`` (proposals) and return a tensor with shape
-        ``(M,) + batch_shape``.
+        .. note:: ``model_log_like_function`` is a callable that takes the proposal tensor with shape
+            ``(n_particles,) + batch_shape`` and returns a tensor with the same shape. Here, ``n_particles``
+            is the number of proposals per batch dimension.
 
-        .. note:: ``log_objective_function`` takes a tensor with shape ``(M,) + batch_shape`` (proposals) and
-            return a tensor with shape `(K, M) + batch_shape``, where ``K`` is the number of outputs.
+        .. note:: ``log_objective_function`` takes a tensor with shape ``(n_particles,) + batch_shape``
+            (proposals) and return a tensor with shape `(n_outputs, n_particles) + batch_shape``, where
+            ``n_outputs``. If the user wishes to calculate the posterior expectation of just a single
+            quantity, then ``n_outputs`` must be set to ``1``.
         """
 
-        self.proposal_generator = proposal_generator
-        self.proposal_log_prob_function = proposal_log_prob_function
-        self.prior_log_prob_function = prior_log_prob_function
+        self.proposal_dist = proposal_dist
+        self.prior_dist = prior_dist
         self.model_log_like_function = model_log_like_function
         self.log_objective_function = log_objective_function
         self.validate_callable_return_shapes = validate_callable_return_shapes
@@ -58,9 +58,9 @@ class PosteriorImportanceSampler(object):
         self._proposal_shape = torch.Size((n_particles,) + self._batch_shape)
         self._obj_shape = torch.Size((n_outputs,) + self._proposal_shape)
 
-        proposals_mb = self.proposal_generator(n_particles)
-        proposal_log_prob_mb = self.proposal_log_prob_function(proposals_mb)
-        prior_log_prob_mb = self.prior_log_prob_function(proposals_mb)
+        proposals_mb = self.proposal_dist.sample(torch.Size((n_particles,)))
+        proposal_log_prob_mb = self.proposal_dist.log_prob(proposals_mb)
+        prior_log_prob_mb = self.prior_dist.log_prob(proposals_mb)
         model_log_like_mb = self.model_log_like_function(proposals_mb)
         log_obj_kmb = self.log_objective_function(proposals_mb)
 

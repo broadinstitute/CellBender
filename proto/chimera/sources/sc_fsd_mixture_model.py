@@ -670,15 +670,6 @@ class PosteriorGeneExpressionSampler(object):
         omega_proposal_dist = dist.Gamma(proposal_concentration_n, proposal_rate_n)
         omega_prior_dist = dist.Gamma(prior_concentration_n, prior_rate_n)
 
-        def omega_proposal_generator(n_particles: int) -> torch.Tensor:
-            return omega_proposal_dist.sample(torch.Size([n_particles]))
-
-        def omega_proposal_log_prob_function(omega_mn: torch.Tensor) -> torch.Tensor:
-            return omega_proposal_dist.log_prob(omega_mn)
-
-        def omega_prior_log_prob_function(omega_mn: torch.Tensor) -> torch.Tensor:
-            return omega_prior_dist.log_prob(omega_mn)
-
         def fingerprint_log_like_function(omega_mn: torch.Tensor) -> torch.Tensor:
             log_omega_mn = omega_mn.log()
             log_rate_combined_mnr = logaddexp(
@@ -716,8 +707,7 @@ class PosteriorGeneExpressionSampler(object):
                 e_hi_conditional_mean_mn,
                 e_hi_conditional_var_mn), dim=0)
 
-        return (omega_proposal_generator,
-                omega_proposal_log_prob_function,
-                omega_prior_log_prob_function,
+        return (omega_proposal_dist,
+                omega_prior_dist,
                 fingerprint_log_like_function,
                 log_e_hi_conditional_mean_and_var_function)
