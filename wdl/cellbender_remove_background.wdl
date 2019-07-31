@@ -8,7 +8,7 @@ task run_cellbender_remove_background_gpu {
 
   # File-related inputs
   String sample_name
-  File gcloud_bucket_10x_h5_file_or_mtx_directory
+  File input_10x_h5_file_or_mtx_directory
 
   # Docker image for cellbender remove-background version
   String? docker_image = "us.gcr.io/broad-dsde-methods/cellbender:latest"
@@ -30,13 +30,11 @@ task run_cellbender_remove_background_gpu {
   # Hardware-related inputs
   String? hardware_zones = "us-east1-d us-east1-c us-central1-a us-central1-c us-west1-b"
   Int? hardware_disk_size_GB = 50
-  Int? hardware_preemptible_tries = 0
-
-  # https://software.broadinstitute.org/wdl/documentation/spec#prepending-a-string-to-an-optional-parameter
+  Int? hardware_preemptible_tries = 2
 
   command {
     cellbender remove-background \
-      --input "${gcloud_bucket_10x_h5_file_or_mtx_directory}" \
+      --input "${input_10x_h5_file_or_mtx_directory}" \
       --output "${sample_name}_out.h5" \
       --cuda \
       ${"--expected-cells " + expected_cells} \
