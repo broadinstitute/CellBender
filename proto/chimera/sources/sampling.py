@@ -89,7 +89,9 @@ class PosteriorImportanceSampler(object):
     def ess(self) -> torch.Tensor:
         """Calculate the effective sample size (ESS)"""
         assert self._intermediates_available
-        raise NotImplementedError
+        log_w_mb = self._prior_log_prob_mb + self._model_log_like_mb - self._proposal_log_prob_mb
+        log_ess_b = 2 * torch.logsumexp(log_w_mb, 0) - torch.logsumexp(2 * log_w_mb, 0)
+        return log_ess_b.exp()
 
     @property
     def log_numerator(self) -> torch.Tensor:
