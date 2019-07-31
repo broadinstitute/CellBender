@@ -221,10 +221,10 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                 self.median_total_reads_per_cell * downsampling_rate_tensor_n)
 
             # calculate p_lo and p_hi on all observable family sizes
-            log_prob_fsd_lo_full_r = fsd_lo_dist.log_prob(family_size_vector_full_r)
-            log_prob_fsd_hi_full_r = fsd_hi_dist.log_prob(family_size_vector_full_r)
-            log_prob_fsd_lo_obs_r = log_prob_fsd_lo_full_r[..., 1:]
-            log_prob_fsd_hi_obs_r = log_prob_fsd_hi_full_r[..., 1:]
+            log_prob_fsd_lo_full_nr = fsd_lo_dist.log_prob(family_size_vector_full_r)
+            log_prob_fsd_hi_full_nr = fsd_hi_dist.log_prob(family_size_vector_full_r)
+            log_prob_fsd_lo_obs_nr = log_prob_fsd_lo_full_nr[..., 1:]
+            log_prob_fsd_hi_obs_nr = log_prob_fsd_hi_full_nr[..., 1:]
 
             # calculate the (poisson) rate of chimeric molecule formation
             mu_e_lo_n = self._get_mu_e_lo_n(
@@ -249,8 +249,8 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                     batch_shape,
                     cell_sampling_site_scale_factor_tensor_n,
                     fingerprint_tensor_nr,
-                    log_prob_fsd_lo_obs_r,
-                    log_prob_fsd_hi_obs_r,
+                    log_prob_fsd_lo_obs_nr,
+                    log_prob_fsd_hi_obs_nr,
                     mu_e_lo_n,
                     mu_e_hi_n,
                     phi_e_hi_n,
@@ -568,3 +568,138 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                     active_constraints_dict[var_name]['upper_bound'] = set(nnz_activity.tolist())
 
         return dict(active_constraints_dict)
+
+
+class PosteriorGeneExpressionSampler(object):
+    def __init__(self,
+                 sc_family_size_model: SingleCellFamilySizeModel,
+                 n_particles: int,
+                 device: torch.device,
+                 dtype: torch.dtype,
+                 drop_fingerprint_log_norm_factor: bool = False):
+        self.sc_family_size_model = sc_family_size_model
+        self.n_particles = n_particles
+        self.device = device
+        self.dtype = dtype
+        self.drop_fingerprint_log_norm_factor = drop_fingerprint_log_norm_factor
+
+    def _generate_single_gene_minibatch_data(self,
+                                             gene_index: int,
+                                             i_cell_begin: int,
+                                             i_cell_end: int) -> Dict[str, torch.Tensor]:
+        """Generate model input tensors for a given gene index and the cell index range
+
+        .. note: The generated minibatch has scale-factor set to 1.0 for all gene and cell sampling
+            sites (because they are not necessary for our purposes here). As such, the minibatches
+            produced by this method should not be used for training.
+        """
+        cell_index_array = np.arange(i_cell_begin, i_cell_end)
+        gene_index_array = gene_index * np.ones_like(cell_index_array)
+        cell_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
+        gene_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
+
+        return self.sc_family_size_model.sc_fingerprint_datastore.generate_torch_minibatch_data(
+            cell_index_array,
+            gene_index_array,
+            cell_sampling_site_scale_factor_array,
+            gene_sampling_site_scale_factor_array,
+            self.device,
+            self.dtype)
+
+    @torch.no_grad()
+    def _get_trained_model_context(self, minibatch_data: Dict[str, torch.Tensor]) \
+            -> Dict[str, torch.Tensor]:
+        """TBW."""
+        guide_trace = poutine.trace(self.sc_family_size_model.guide).get_trace(
+            minibatch_data, posterior_sampling_mode=True)
+        trained_model = poutine.replay(self.sc_family_size_model.model, trace=guide_trace)
+        trained_model_trace = poutine.trace(trained_model).get_trace(
+            minibatch_data, posterior_sampling_mode=True)
+        return trained_model_trace.nodes["_RETURN"]["value"]
+
+    @torch.no_grad()
+    def generate_importance_sampler_inputs(self,
+                                           gene_index: int,
+                                           i_cell_begin: int,
+                                           i_cell_end: int):
+        minibatch_data = self._generate_single_gene_minibatch_data(
+            gene_index, i_cell_begin, i_cell_end)
+        trained_model_context = self._get_trained_model_context(minibatch_data)
+
+        # generate handle to or calculate the required auxiliary quantities from the trained model
+        # context and the minibatch data
+        fingerprint_tensor_nr = minibatch_data["fingerprint_tensor"]
+
+        mu_e_hi_n = trained_model_context["mu_e_hi_n"]
+        phi_e_hi_n = trained_model_context["phi_e_hi_n"]
+        logit_p_zero_e_hi_n = trained_model_context["logit_p_zero_e_hi_n"]
+
+        mu_e_lo_n = trained_model_context["mu_e_lo_n"]
+
+        log_prob_fsd_lo_full_nr = trained_model_context["log_prob_fsd_lo_full_nr"]
+        log_prob_fsd_hi_full_nr = trained_model_context["log_prob_fsd_hi_full_nr"]
+        log_prob_fsd_lo_obs_nr = trained_model_context["log_prob_fsd_lo_obs_nr"]
+        log_prob_fsd_hi_obs_nr = trained_model_context["log_prob_fsd_hi_obs_nr"]
+
+        alpha_e_hi_n = phi_e_hi_n.reciprocal()
+        p_nnz_e_hi_n = get_log_prob_compl(torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)).exp()
+        e_obs_n = fingerprint_tensor_nr.sum(-1)
+        log_fingerprint_tensor_nr = fingerprint_tensor_nr.log()
+
+        # gamma concentration and rates
+        prior_concentration_n = alpha_e_hi_n
+        prior_rate_n = alpha_e_hi_n
+        proposal_concentration_n = alpha_e_hi_n + e_obs_n
+        proposal_rate_n = alpha_e_hi_n + mu_e_hi_n * p_nnz_e_hi_n
+
+        omega_prior_dist = dist.Gamma(prior_concentration_n, prior_rate_n)
+        omega_proposal_dist = dist.Gamma(proposal_concentration_n, proposal_rate_n)
+
+        total_p_obs_lo_n = log_prob_fsd_lo_obs_nr.exp().sum(-1)
+        total_p_obs_hi_n = log_prob_fsd_hi_obs_nr.exp().sum(-1)
+
+        total_obs_rate_lo_n = mu_e_lo_n * total_p_obs_lo_n
+        total_obs_rate_hi_n = mu_e_lo_n * total_p_obs_hi_n
+
+        log_rate_e_lo_nr = mu_e_lo_n.log().unsqueeze(-1) + log_prob_fsd_lo_obs_nr
+        log_rate_e_hi_nr = mu_e_hi_n.log().unsqueeze(-1) + log_prob_fsd_hi_obs_nr
+
+        if self.drop_fingerprint_log_norm_factor:
+            fingerprint_log_norm_factor_n = torch.ones_like(total_obs_rate_lo_n)
+        else:
+            fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
+
+        def omega_proposal_generator(n_particles: int) -> torch.Tensor:
+            return omega_proposal_dist.sample(torch.Size([n_particles]))
+
+        def omega_proposal_log_prob_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            return omega_proposal_dist.log_prob(omega_mn)
+
+        def omega_prior_log_prob_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            return omega_prior_dist.log_prob(omega_mn)
+
+        def fingerprint_log_like_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            log_rate_combined_mnr = logaddexp(
+                log_rate_e_lo_nr,
+                log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1))
+            return (
+                    (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
+                    - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn)
+                    - fingerprint_log_norm_factor_n)
+
+        def log_e_hi_conditional_mean_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            log_rate_e_hi_mnr = log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1)
+            log_rate_combined_mnr = logaddexp(log_rate_e_lo_nr, log_rate_e_hi_mnr)
+            log_e_hi_obs_mn = torch.logsumexp(
+                log_fingerprint_tensor_nr
+                + log_rate_e_hi_mnr
+                - log_rate_combined_mnr, -1)
+            log_e_hi_unobs_mn = mu_e_hi_n + omega_mn + log_prob_fsd_hi_full_nr[..., 0]
+            return logaddexp(log_e_hi_unobs_mn, log_e_hi_obs_mn)
+
+        return (omega_proposal_generator,
+                omega_proposal_log_prob_function,
+                omega_prior_log_prob_function,
+                fingerprint_log_like_function,
+                log_e_hi_conditional_mean_function)
+
