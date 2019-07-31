@@ -62,7 +62,10 @@ Optional:
   but some barcode error artifacts that are not useful for inference.
 * ``empty_drop_training_fraction``: Specifies what fraction of the data in each
   minibatch should come from surely empty droplets, as a Float (e.g. 0.3).
-* ``blacklist_genes``:   # in quotes: integers separated by whitespace
+* ``blacklist_genes``: A whitespace-delimited String of integers
+  (e.g. "523 10021 10022 33693 33694") that specifies genes that should be completely
+  excluded from analysis.  Counts of these genes are set to zero in the output count matrix.
+  Genes are specified by the integer that indexes them in the count matrix.
 
 Optional but discouraged:
 
