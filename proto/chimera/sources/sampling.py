@@ -86,6 +86,7 @@ class PosteriorImportanceSampler(object):
                 (self._model_log_like_mb is not None) and
                 (self._log_obj_kmb is not None))
 
+    @property
     def ess(self) -> torch.Tensor:
         """Calculate the effective sample size (ESS)"""
         assert self._intermediates_available
