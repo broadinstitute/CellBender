@@ -573,12 +573,10 @@ class SingleCellFamilySizeModel(torch.nn.Module):
 class PosteriorGeneExpressionSampler(object):
     def __init__(self,
                  sc_family_size_model: SingleCellFamilySizeModel,
-                 n_particles: int,
                  device: torch.device,
                  dtype: torch.dtype,
                  drop_fingerprint_log_norm_factor: bool = False):
         self.sc_family_size_model = sc_family_size_model
-        self.n_particles = n_particles
         self.device = device
         self.dtype = dtype
         self.drop_fingerprint_log_norm_factor = drop_fingerprint_log_norm_factor
@@ -626,48 +624,51 @@ class PosteriorGeneExpressionSampler(object):
             gene_index, i_cell_begin, i_cell_end)
         trained_model_context = self._get_trained_model_context(minibatch_data)
 
-        # generate handle to or calculate the required auxiliary quantities from the trained model
-        # context and the minibatch data
+        # localize required auxiliary quantities from the trained model context
         fingerprint_tensor_nr = minibatch_data["fingerprint_tensor"]
 
         mu_e_hi_n = trained_model_context["mu_e_hi_n"]
         phi_e_hi_n = trained_model_context["phi_e_hi_n"]
         logit_p_zero_e_hi_n = trained_model_context["logit_p_zero_e_hi_n"]
-
         mu_e_lo_n = trained_model_context["mu_e_lo_n"]
-
         log_prob_fsd_lo_full_nr = trained_model_context["log_prob_fsd_lo_full_nr"]
         log_prob_fsd_hi_full_nr = trained_model_context["log_prob_fsd_hi_full_nr"]
         log_prob_fsd_lo_obs_nr = trained_model_context["log_prob_fsd_lo_obs_nr"]
         log_prob_fsd_hi_obs_nr = trained_model_context["log_prob_fsd_hi_obs_nr"]
 
+        # calculate additional auxiliary quantities
+        batch_shape = torch.Size([fingerprint_tensor_nr.shape[0]])
         alpha_e_hi_n = phi_e_hi_n.reciprocal()
         p_nnz_e_hi_n = get_log_prob_compl(torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)).exp()
         e_obs_n = fingerprint_tensor_nr.sum(-1)
         log_fingerprint_tensor_nr = fingerprint_tensor_nr.log()
 
-        # gamma concentration and rates
+        # Gamma concentration and rates for prior and proposal distributions of :math:`\omega`
         prior_concentration_n = alpha_e_hi_n
         prior_rate_n = alpha_e_hi_n
         proposal_concentration_n = alpha_e_hi_n + e_obs_n
         proposal_rate_n = alpha_e_hi_n + mu_e_hi_n * p_nnz_e_hi_n
 
-        omega_prior_dist = dist.Gamma(prior_concentration_n, prior_rate_n)
-        omega_proposal_dist = dist.Gamma(proposal_concentration_n, proposal_rate_n)
+        log_prob_unobs_lo_n = log_prob_fsd_lo_full_nr[..., 0]
+        log_prob_unobs_hi_n = log_prob_fsd_hi_full_nr[..., 0]
+        log_prob_obs_lo_n = get_log_prob_compl(log_prob_unobs_lo_n)
+        log_prob_obs_hi_n = get_log_prob_compl(log_prob_unobs_hi_n)
+        prob_obs_lo_n = log_prob_obs_lo_n.exp()
+        prob_obs_hi_n = log_prob_obs_hi_n.exp()
 
-        total_p_obs_lo_n = log_prob_fsd_lo_obs_nr.exp().sum(-1)
-        total_p_obs_hi_n = log_prob_fsd_hi_obs_nr.exp().sum(-1)
+        log_mu_e_lo_n = mu_e_lo_n.log()
+        log_mu_e_hi_n = mu_e_hi_n.log()
 
-        total_obs_rate_lo_n = mu_e_lo_n * total_p_obs_lo_n
-        total_obs_rate_hi_n = mu_e_lo_n * total_p_obs_hi_n
-
-        log_rate_e_lo_nr = mu_e_lo_n.log().unsqueeze(-1) + log_prob_fsd_lo_obs_nr
-        log_rate_e_hi_nr = mu_e_hi_n.log().unsqueeze(-1) + log_prob_fsd_hi_obs_nr
+        log_rate_e_lo_nr = log_mu_e_lo_n.unsqueeze(-1) + log_prob_fsd_lo_obs_nr
+        log_rate_e_hi_nr = log_mu_e_hi_n.unsqueeze(-1) + log_prob_fsd_hi_obs_nr
 
         if self.drop_fingerprint_log_norm_factor:
-            fingerprint_log_norm_factor_n = torch.ones_like(total_obs_rate_lo_n)
+            fingerprint_log_norm_factor_n = torch.ones(batch_shape, device=self.device, dtype=self.dtype)
         else:
             fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
+
+        omega_proposal_dist = dist.Gamma(proposal_concentration_n, proposal_rate_n)
+        omega_prior_dist = dist.Gamma(prior_concentration_n, prior_rate_n)
 
         def omega_proposal_generator(n_particles: int) -> torch.Tensor:
             return omega_proposal_dist.sample(torch.Size([n_particles]))
@@ -679,27 +680,44 @@ class PosteriorGeneExpressionSampler(object):
             return omega_prior_dist.log_prob(omega_mn)
 
         def fingerprint_log_like_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            log_omega_mn = omega_mn.log()
             log_rate_combined_mnr = logaddexp(
                 log_rate_e_lo_nr,
-                log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1))
-            return (
-                    (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
-                    - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn)
+                log_rate_e_hi_nr + log_omega_mn.unsqueeze(-1))
+            fingerprint_log_rate_prod_mn = (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
+            return (fingerprint_log_rate_prod_mn
+                    - mu_e_lo_n * prob_obs_lo_n
+                    - omega_mn * mu_e_hi_n * prob_obs_hi_n
                     - fingerprint_log_norm_factor_n)
 
-        def log_e_hi_conditional_mean_function(omega_mn: torch.Tensor) -> torch.Tensor:
-            log_rate_e_hi_mnr = log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1)
+        def log_e_hi_conditional_mean_and_var_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            log_omega_mn = omega_mn.log()
+            log_rate_e_hi_mnr = log_rate_e_hi_nr + log_omega_mn.unsqueeze(-1)
             log_rate_combined_mnr = logaddexp(log_rate_e_lo_nr, log_rate_e_hi_mnr)
-            log_e_hi_obs_mn = torch.logsumexp(
+
+            log_e_hi_obs_mean_mn = torch.logsumexp(
                 log_fingerprint_tensor_nr
                 + log_rate_e_hi_mnr
                 - log_rate_combined_mnr, -1)
-            log_e_hi_unobs_mn = mu_e_hi_n + omega_mn + log_prob_fsd_hi_full_nr[..., 0]
-            return logaddexp(log_e_hi_unobs_mn, log_e_hi_obs_mn)
+
+            log_e_hi_obs_var_mn = torch.logsumexp(
+                log_fingerprint_tensor_nr
+                + log_rate_e_hi_mnr
+                + log_rate_e_lo_nr
+                - 2 * log_rate_combined_mnr, -1)
+
+            log_e_hi_unobs_mean_mn = log_mu_e_hi_n + log_omega_mn + log_prob_unobs_hi_n
+            log_e_hi_unobs_var_mn = log_e_hi_unobs_mean_mn
+
+            e_hi_conditional_mean_mn = logaddexp(log_e_hi_unobs_mean_mn, log_e_hi_obs_mean_mn)
+            e_hi_conditional_var_mn = logaddexp(log_e_hi_unobs_var_mn, log_e_hi_obs_var_mn)
+
+            return torch.stack((
+                e_hi_conditional_mean_mn,
+                e_hi_conditional_var_mn), dim=0)
 
         return (omega_proposal_generator,
                 omega_proposal_log_prob_function,
                 omega_prior_log_prob_function,
                 fingerprint_log_like_function,
-                log_e_hi_conditional_mean_function)
-
+                log_e_hi_conditional_mean_and_var_function)
