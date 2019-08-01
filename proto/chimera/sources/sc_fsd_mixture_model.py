@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, List, Dict, Union
+from typing import Tuple, List, Dict, Union, Any
 
 import pyro
 from pyro import poutine
@@ -13,6 +13,7 @@ from pyro_extras import CustomLogProbTerm, ZeroInflatedNegativeBinomial, \
     MixtureDistribution, logit, logaddexp, get_log_prob_compl
 from sc_fingerprint import SingleCellFingerprintDataStore
 from sc_fsd_codec import FamilySizeDistributionCodec, SortByComponentWeights
+from sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 
 import logging
 from collections import defaultdict
@@ -20,10 +21,6 @@ from collections import defaultdict
 
 class SingleCellFamilySizeModel(torch.nn.Module):
 
-    DEFAULT_E_LO_SUM_WIDTH = 10
-    DEFAULT_E_HI_SUM_WIDTH = 20
-    DEFAULT_CONFIDENCE_INTERVAL_LOWER = 0.05 
-    DEFAULT_CONFIDENCE_INTERVAL_UPPER = 0.95
     EPS = 1e-6
     
     def __init__(self,
@@ -571,15 +568,22 @@ class SingleCellFamilySizeModel(torch.nn.Module):
 
 
 class PosteriorGeneExpressionSampler(object):
+    """Calculates the real gene expression from a trained model using importance sampling"""
     def __init__(self,
                  sc_family_size_model: SingleCellFamilySizeModel,
+                 run_mode: str,
                  device: torch.device,
-                 dtype: torch.dtype,
-                 drop_fingerprint_log_norm_factor: bool = False):
+                 dtype: torch.dtype):
+        """Initializer.
+
+        :param sc_family_size_model: an instance of ``SingleCellFamilySizeModel``
+        :param device: torch device
+        :param dtype: torch dtype
+        """
+        assert run_mode in {"only_observed", "full"}
         self.sc_family_size_model = sc_family_size_model
         self.device = device
         self.dtype = dtype
-        self.drop_fingerprint_log_norm_factor = drop_fingerprint_log_norm_factor
 
     def _generate_single_gene_minibatch_data(self,
                                              gene_index: int,
@@ -606,8 +610,10 @@ class PosteriorGeneExpressionSampler(object):
 
     @torch.no_grad()
     def _get_trained_model_context(self, minibatch_data: Dict[str, torch.Tensor]) \
-            -> Dict[str, torch.Tensor]:
-        """TBW."""
+            -> Dict[str, Any]:
+        """Samples the posterior on a given minibatch, replays it on the model, and returns a
+        dictionary of intermediate tensors that appear in the model evaluated at the posterior
+        samples."""
         guide_trace = poutine.trace(self.sc_family_size_model.guide).get_trace(
             minibatch_data, posterior_sampling_mode=True)
         trained_model = poutine.replay(self.sc_family_size_model.model, trace=guide_trace)
@@ -616,38 +622,69 @@ class PosteriorGeneExpressionSampler(object):
         return trained_model_trace.nodes["_RETURN"]["value"]
 
     @torch.no_grad()
-    def generate_importance_sampler_inputs(self,
-                                           gene_index: int,
-                                           i_cell_begin: int,
-                                           i_cell_end: int):
+    def _generate_omega_importance_sampler_inputs(
+            self,
+            gene_index: int,
+            i_cell_begin: int,
+            i_cell_end: int,
+            run_mode: str) -> Tuple[PosteriorImportanceSamplerInputs, Dict[str, Any]]:
+        """Generates the required inputs for ``PosteriorImportanceSampler`` to calculate the mean
+        and variance of gene expression, assuming no zero-inflation of the prior for :math:`\mu^>`.
+
+        .. note:: According to the model, the prior for :math:`\mu^<`, the Poisson rate for chimeric
+            molecules, is deterministic; as such, it is directly picked up from the trained model
+            context ``trained_model_context["mu_e_lo_n"]`` and no marginalization is necessary.
+
+            The prior :math:`\mu^>`, the Poisson rate for real molecules, however, is a zero-inflated
+            Gamma and must be marginalized. This method generates importance sampling inputs for
+            marginalizing :math:`\mu^>` and calculing the mean and variance of of gene expression,
+            for a non-zero-inflated Gamma. We parametrize :math:`\mu^>` as follows:
+
+            .. math::
+
+                \mu^> | no-zero-inflation = \mathbb{E}[\mu^>] \omega^>,
+
+                \omega^> \sim \Gamma(\alpha^>, \alpha^>),
+
+                \alpha^> = 1 / \phi^>,
+
+            where :math:`\phi^>` is the prior over-dipersion of expression and :math:`\mathbb{E}[\mu^>]`
+            is the prior mean of the expression.
+
+        :param gene_index: index of the gene in the datastore
+        :param run_mode: choices include ``only_observed`` and ``full``. In the only_observed mode,
+            we only calculate how many of the observed molecules are real (as opposed to background/chimeric).
+            In the ``full`` mode, we also include currently unobserved molecules; that is, we estimate
+            how many real molecules we expect to observe in the limit of infinite sequencing depth.
+        :param i_cell_begin: begin cell index (inclusive)
+        :param i_cell_end: end cell index (exclusive)
+        :return: a tuple that matches the *args signature of ``PosteriorImportanceSampler.__init__``, and
+            the trained model context.
+        """
         minibatch_data = self._generate_single_gene_minibatch_data(
             gene_index, i_cell_begin, i_cell_end)
         trained_model_context = self._get_trained_model_context(minibatch_data)
 
         # localize required auxiliary quantities from the trained model context
         fingerprint_tensor_nr = minibatch_data["fingerprint_tensor"]
-
-        mu_e_hi_n = trained_model_context["mu_e_hi_n"]
-        phi_e_hi_n = trained_model_context["phi_e_hi_n"]
-        logit_p_zero_e_hi_n = trained_model_context["logit_p_zero_e_hi_n"]
-        mu_e_lo_n = trained_model_context["mu_e_lo_n"]
-        log_prob_fsd_lo_full_nr = trained_model_context["log_prob_fsd_lo_full_nr"]
-        log_prob_fsd_hi_full_nr = trained_model_context["log_prob_fsd_hi_full_nr"]
-        log_prob_fsd_lo_obs_nr = trained_model_context["log_prob_fsd_lo_obs_nr"]
-        log_prob_fsd_hi_obs_nr = trained_model_context["log_prob_fsd_hi_obs_nr"]
+        mu_e_hi_n: torch.Tensor = trained_model_context["mu_e_hi_n"]
+        phi_e_hi_n: torch.Tensor = trained_model_context["phi_e_hi_n"]
+        logit_p_zero_e_hi_n: torch.Tensor = trained_model_context["logit_p_zero_e_hi_n"]
+        mu_e_lo_n: torch.Tensor = trained_model_context["mu_e_lo_n"]
+        log_prob_fsd_lo_full_nr: torch.Tensor = trained_model_context["log_prob_fsd_lo_full_nr"]
+        log_prob_fsd_hi_full_nr: torch.Tensor = trained_model_context["log_prob_fsd_hi_full_nr"]
+        log_prob_fsd_lo_obs_nr: torch.Tensor = trained_model_context["log_prob_fsd_lo_obs_nr"]
+        log_prob_fsd_hi_obs_nr: torch.Tensor = trained_model_context["log_prob_fsd_hi_obs_nr"]
 
         # calculate additional auxiliary quantities
-        batch_shape = torch.Size([fingerprint_tensor_nr.shape[0]])
         alpha_e_hi_n = phi_e_hi_n.reciprocal()
-        p_nnz_e_hi_n = get_log_prob_compl(torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)).exp()
+        log_p_zero_e_hi_n = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
+        log_p_nonzero_e_hi_n = get_log_prob_compl(log_p_zero_e_hi_n)
+        p_nonzero_e_hi_n = log_p_nonzero_e_hi_n.exp()
+
         e_obs_n = fingerprint_tensor_nr.sum(-1)
         log_fingerprint_tensor_nr = fingerprint_tensor_nr.log()
-
-        # Gamma concentration and rates for prior and proposal distributions of :math:`\omega`
-        prior_concentration_n = alpha_e_hi_n
-        prior_rate_n = alpha_e_hi_n
-        proposal_concentration_n = alpha_e_hi_n + e_obs_n
-        proposal_rate_n = alpha_e_hi_n + mu_e_hi_n * p_nnz_e_hi_n
+        fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
 
         log_prob_unobs_lo_n = log_prob_fsd_lo_full_nr[..., 0]
         log_prob_unobs_hi_n = log_prob_fsd_hi_full_nr[..., 0]
@@ -655,22 +692,17 @@ class PosteriorGeneExpressionSampler(object):
         log_prob_obs_hi_n = get_log_prob_compl(log_prob_unobs_hi_n)
         prob_obs_lo_n = log_prob_obs_lo_n.exp()
         prob_obs_hi_n = log_prob_obs_hi_n.exp()
-
         log_mu_e_lo_n = mu_e_lo_n.log()
         log_mu_e_hi_n = mu_e_hi_n.log()
-
         log_rate_e_lo_nr = log_mu_e_lo_n.unsqueeze(-1) + log_prob_fsd_lo_obs_nr
         log_rate_e_hi_nr = log_mu_e_hi_n.unsqueeze(-1) + log_prob_fsd_hi_obs_nr
 
-        if self.drop_fingerprint_log_norm_factor:
-            fingerprint_log_norm_factor_n = torch.ones(batch_shape, device=self.device, dtype=self.dtype)
-        else:
-            fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
-
-        omega_proposal_dist = dist.Gamma(proposal_concentration_n, proposal_rate_n)
-        omega_prior_dist = dist.Gamma(prior_concentration_n, prior_rate_n)
-
         def fingerprint_log_like_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            """Calculates the log likelihood of the fingerprint for given :math:`\omega^>` proposals.
+
+            :param omega_mn: proposals; shape = (n_particles, batch_size)
+            :return: log likelihood; shape = (n_particles, batch_size)
+            """
             log_omega_mn = omega_mn.log()
             log_rate_combined_mnr = logaddexp(
                 log_rate_e_lo_nr,
@@ -682,6 +714,13 @@ class PosteriorGeneExpressionSampler(object):
                     - fingerprint_log_norm_factor_n)
 
         def log_e_hi_conditional_mean_and_var_function(omega_mn: torch.Tensor) -> torch.Tensor:
+            """Calculates the mean and the variance of gene expression over the :math:`\omega^>` proposals
+            conditional on not being zero-inflated.
+
+            :param omega_mn: proposals; shape = (n_particles, batch_size)
+            :return: a tensor of shape shape = (2, n_particles, batch_size); the leftmost dimension
+                correspond to the mean and variance, in order.
+            """
             log_omega_mn = omega_mn.log()
             log_rate_e_hi_mnr = log_rate_e_hi_nr + log_omega_mn.unsqueeze(-1)
             log_rate_combined_mnr = logaddexp(log_rate_e_lo_nr, log_rate_e_hi_mnr)
@@ -700,14 +739,103 @@ class PosteriorGeneExpressionSampler(object):
             log_e_hi_unobs_mean_mn = log_mu_e_hi_n + log_omega_mn + log_prob_unobs_hi_n
             log_e_hi_unobs_var_mn = log_e_hi_unobs_mean_mn
 
-            e_hi_conditional_mean_mn = logaddexp(log_e_hi_unobs_mean_mn, log_e_hi_obs_mean_mn)
-            e_hi_conditional_var_mn = logaddexp(log_e_hi_unobs_var_mn, log_e_hi_obs_var_mn)
+            if run_mode == "full":
+                e_hi_conditional_mean_mn = logaddexp(log_e_hi_unobs_mean_mn, log_e_hi_obs_mean_mn)
+                e_hi_conditional_var_mn = logaddexp(log_e_hi_unobs_var_mn, log_e_hi_obs_var_mn)
+            elif run_mode == "only_observed":
+                e_hi_conditional_mean_mn = log_e_hi_obs_mean_mn
+                e_hi_conditional_var_mn = log_e_hi_obs_var_mn
+            else:
+                raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
 
             return torch.stack((
                 e_hi_conditional_mean_mn,
                 e_hi_conditional_var_mn), dim=0)
 
-        return (omega_proposal_dist,
-                omega_prior_dist,
-                fingerprint_log_like_function,
-                log_e_hi_conditional_mean_and_var_function)
+        # Gamma concentration and rates for prior and proposal distributions of :math:`\omega`
+        prior_concentration_n = alpha_e_hi_n
+        prior_rate_n = alpha_e_hi_n
+        proposal_concentration_n = alpha_e_hi_n + e_obs_n
+        proposal_rate_n = alpha_e_hi_n + mu_e_hi_n * p_nonzero_e_hi_n
+        omega_proposal_dist = dist.Gamma(proposal_concentration_n, proposal_rate_n)
+        omega_prior_dist = dist.Gamma(prior_concentration_n, prior_rate_n)
+
+        omega_importance_sampler_inputs = PosteriorImportanceSamplerInputs(
+            proposal_distribution=omega_proposal_dist,
+            prior_distribution=omega_prior_dist,
+            log_likelihood_function=fingerprint_log_like_function,
+            log_objective_function=log_e_hi_conditional_mean_and_var_function)
+
+        return omega_importance_sampler_inputs, trained_model_context
+
+    def _estimate_log_gene_expression_with_fixed_n_particles(
+            self,
+            gene_index: int,
+            i_cell_begin: int,
+            i_cell_end: int,
+            n_particles: int,
+            output_ess: bool,
+            run_mode: str):
+        """
+
+        :param run_mode: see ``_generate_omega_importance_sampler_inputs``
+        :param gene_index: index of the gene in the datastore
+        :param i_cell_begin: begin cell index (inclusive)
+        :param i_cell_end: end cell index (exclusive)
+        :return: estimated mean and variance of gene expression; if output_ess == True, also the ESS of
+            mean and variance of gene expression, in order.
+        """
+
+        # generate inputs for importance sampling with no zero inflation and the posterior model context
+        omega_importance_sampler_inputs, trained_model_context = self._generate_omega_importance_sampler_inputs(
+            gene_index, i_cell_begin, i_cell_end, run_mode)
+
+        # perform importance sampling assuming no zero inflation
+        batch_size = i_cell_end - i_cell_begin
+        sampler = PosteriorImportanceSampler(omega_importance_sampler_inputs)
+        sampler.run(
+            n_particles=n_particles,
+            n_outputs=2,
+            batch_shape=torch.Size([batch_size]))
+
+        log_numerator_kn = sampler.log_numerator
+        log_denominator_n = sampler.log_denominator
+        log_mean_expression_numerator_n = log_numerator_kn[0, :]
+        log_var_expression_numerator_n = log_numerator_kn[1, :]
+
+        logit_p_zero_e_hi_n: torch.Tensor = trained_model_context["logit_p_zero_e_hi_n"]
+        log_p_zero_e_hi_n: torch.Tensor = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
+        log_p_nonzero_e_hi_n = get_log_prob_compl(log_p_zero_e_hi_n)
+        log_fingerprint_likelihood_zero_n = omega_importance_sampler_inputs.log_likelihood_function(
+            torch.zeros(1, batch_size)).squeeze(0)
+        log_n_particles = np.log(n_particles)
+        log_zero_inflated_denominator_n = logaddexp(
+            log_p_zero_e_hi_n + log_fingerprint_likelihood_zero_n,
+            log_p_nonzero_e_hi_n + log_denominator_n - log_n_particles)
+
+        log_zero_inflated_mean_expression_n = (
+                log_p_nonzero_e_hi_n
+                + log_mean_expression_numerator_n
+                - log_n_particles
+                - log_zero_inflated_denominator_n)
+        log_zero_inflated_var_expression_n = (
+                log_p_nonzero_e_hi_n
+                + log_var_expression_numerator_n
+                - log_n_particles
+                - log_zero_inflated_denominator_n)
+
+        if output_ess:
+            combined_expression_ess_kn = sampler.ess
+            log_mean_expression_ess_n = combined_expression_ess_kn[0, :]
+            log_var_expression_ess_n = combined_expression_ess_kn[0, :]
+
+            return (log_zero_inflated_mean_expression_n,
+                    log_zero_inflated_var_expression_n,
+                    log_mean_expression_ess_n,
+                    log_var_expression_ess_n)
+
+        else:
+
+            return (log_zero_inflated_mean_expression_n,
+                    log_zero_inflated_var_expression_n)
+

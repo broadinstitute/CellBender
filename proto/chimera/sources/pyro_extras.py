@@ -67,7 +67,7 @@ def logaddexp(a: torch.Tensor, b: torch.Tensor):
 LN_1_M_EXP_THRESHOLD = -np.log(2.)
 
 
-def get_log_prob_compl(log_prob):
+def get_log_prob_compl(log_prob: torch.Tensor):
     return torch.where(
         log_prob >= LN_1_M_EXP_THRESHOLD,
         torch.log(-torch.expm1(log_prob)),
