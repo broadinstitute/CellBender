@@ -15,6 +15,7 @@ and quick-start tutorials, see the :ref:`Getting Started <getting started>` sect
    
    introduction/index
    installation/index
+   usage/index
    getting_started/index
    help_and_reference/index
    contributing/index
