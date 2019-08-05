@@ -553,8 +553,6 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             if 'upper_bound_value' in var_constraint_params:
                 value = var_constraint_params['upper_bound_value']
                 width = var_constraint_params['upper_bound_width']
-                exponent = var_constraint_params['upper_bound_exponent']
-                strength = var_constraint_params['upper_bound_strength']
                 if isinstance(value, str):
                     value = model_vars_dict[value]
                 activity = torch.clamp(var - value + width, min=0.)
@@ -773,7 +771,7 @@ class PosteriorGeneExpressionSampler(object):
             gene_index: int,
             i_cell_begin: int,
             i_cell_end: int,
-            n_particles: int,
+            n_particles_omega: int,
             output_ess: bool,
             run_mode: str):
         """
@@ -782,7 +780,7 @@ class PosteriorGeneExpressionSampler(object):
         :param gene_index: index of the gene in the datastore
         :param i_cell_begin: begin cell index (inclusive)
         :param i_cell_end: end cell index (exclusive)
-        :param n_particles: number of random proposals used for importance sampling
+        :param n_particles_omega: number of random proposals used for importance sampling
         :return: estimated first and second moments of gene expression; if output_ess == True, also the ESS of
             the two estimators, in order.
         """
@@ -795,7 +793,7 @@ class PosteriorGeneExpressionSampler(object):
         batch_size = i_cell_end - i_cell_begin
         sampler = PosteriorImportanceSampler(omega_importance_sampler_inputs)
         sampler.run(
-            n_particles=n_particles,
+            n_particles=n_particles_omega,
             n_outputs=2,
             batch_shape=torch.Size([batch_size]))
 
@@ -810,7 +808,7 @@ class PosteriorGeneExpressionSampler(object):
         omega_zero_mn = torch.zeros((1, batch_size), device=self.device, dtype=self.dtype)
         log_fingerprint_likelihood_zero_n = omega_importance_sampler_inputs.log_likelihood_function(
             omega_zero_mn).squeeze(0)
-        log_n_particles = np.log(n_particles)
+        log_n_particles = np.log(n_particles_omega)
         log_zero_inflated_denominator_n = logaddexp(
             log_p_zero_e_hi_n + log_fingerprint_likelihood_zero_n,
             log_p_nonzero_e_hi_n + log_denominator_n - log_n_particles)
@@ -844,14 +842,16 @@ class PosteriorGeneExpressionSampler(object):
     def get_gene_expression_summary(
             self,
             gene_index: int,
-            n_particles: int,
+            n_particles_omega: int,
+            n_particles_xi: int,
             cell_shard_size: int,
             run_mode: str = 'full',
             mode_estimation_strategy: str = 'lower_bound') -> Dict[str, np.ndarray]:
         """Calculate posterior gene expression summary/
 
         :param gene_index: index of the gene in the datastore
-        :param n_particles: number of random proposals used for importance sampling
+        :param n_particles_omega: number of random proposals used for importance sampling of :math:`\omega^>`
+        :param n_particles_xi: number of posterior samples from the guide
         :param cell_shard_size: how many cells to include in every batch
         :param run_mode: see ``_generate_omega_importance_sampler_inputs``
         :param mode_estimation_strategy: choices include 'upper_bound' and 'lower_bound'
@@ -885,13 +885,20 @@ class PosteriorGeneExpressionSampler(object):
             if i_cell_begin == i_cell_end:
                 break
 
-            log_e_hi_mom_1_n, log_e_hi_mom_2_n = self._estimate_log_gene_expression_with_fixed_n_particles(
-                gene_index=gene_index,
-                i_cell_begin=i_cell_begin,
-                i_cell_end=i_cell_end,
-                n_particles=n_particles,
-                output_ess=False,
-                run_mode=run_mode)
+            log_e_hi_mom_1_n_list = []
+            log_e_hi_mom_2_n_list = []
+            for _ in range(n_particles_xi):
+                log_e_hi_mom_1_n, log_e_hi_mom_2_n = self._estimate_log_gene_expression_with_fixed_n_particles(
+                    gene_index=gene_index,
+                    i_cell_begin=i_cell_begin,
+                    i_cell_end=i_cell_end,
+                    n_particles_omega=n_particles_omega,
+                    output_ess=False,
+                    run_mode=run_mode)
+                log_e_hi_mom_1_n_list.append(log_e_hi_mom_1_n)
+                log_e_hi_mom_2_n_list.append(log_e_hi_mom_2_n)
+            log_e_hi_mom_1_n = torch.logsumexp(torch.stack(log_e_hi_mom_1_n_list), 0) - np.log(n_particles_xi)
+            log_e_hi_mom_2_n = torch.logsumexp(torch.stack(log_e_hi_mom_2_n_list), 0) - np.log(n_particles_xi)
 
             mean_e_hi_n = log_e_hi_mom_1_n.exp()
             std_e_hi_n = torch.clamp(log_e_hi_mom_2_n.exp() - mean_e_hi_n.pow(2), 0).sqrt()
