@@ -335,7 +335,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         total_obs_rate_hi_n = mu_e_hi_n * p_hi_obs_nr.sum(-1)
         log_rate_e_hi_nr = mu_e_hi_n.log().unsqueeze(-1) + log_prob_fsd_hi_full_nr
 
-        fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
+        # fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
 
         log_p_zero_e_hi_n = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
         log_p_nonzero_e_hi_n = get_log_prob_compl(log_p_zero_e_hi_n)
@@ -348,8 +348,8 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         log_poisson_zero_e_hi_contrib_n = (
                 log_p_zero_e_hi_n
                 + (fingerprint_tensor_nr * log_rate_e_lo_nr).sum(-1)
-                - total_obs_rate_lo_n
-                - fingerprint_log_norm_factor_n)
+                - total_obs_rate_lo_n)
+                # - fingerprint_log_norm_factor_n)
 
         # log combined (chimeric and real) Poisson rate for each Gamma particle
         log_rate_combined_mnr = logaddexp(
@@ -357,8 +357,8 @@ class SingleCellFamilySizeModel(torch.nn.Module):
             log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1))
         log_poisson_nonzero_e_hi_contrib_mn = (
             (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
-            - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn)
-            - fingerprint_log_norm_factor_n)
+            - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn))
+            #- fingerprint_log_norm_factor_n)
         log_poisson_nonzero_e_hi_contrib_n = (
             log_poisson_nonzero_e_hi_contrib_mn.logsumexp(0)
             - np.log(n_particles)
