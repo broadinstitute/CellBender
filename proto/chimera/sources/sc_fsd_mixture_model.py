@@ -806,8 +806,9 @@ class PosteriorGeneExpressionSampler(object):
         logit_p_zero_e_hi_n: torch.Tensor = trained_model_context["logit_p_zero_e_hi_n"]
         log_p_zero_e_hi_n: torch.Tensor = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
         log_p_nonzero_e_hi_n = get_log_prob_compl(log_p_zero_e_hi_n)
+        omega_zero_mn = torch.zeros((1, batch_size), device=self.device, dtype=self.dtype)
         log_fingerprint_likelihood_zero_n = omega_importance_sampler_inputs.log_likelihood_function(
-            torch.zeros(1, batch_size)).squeeze(0)
+            omega_zero_mn).squeeze(0)
         log_n_particles = np.log(n_particles)
         log_zero_inflated_denominator_n = logaddexp(
             log_p_zero_e_hi_n + log_fingerprint_likelihood_zero_n,
