@@ -782,6 +782,7 @@ class PosteriorGeneExpressionSampler(object):
         :param gene_index: index of the gene in the datastore
         :param i_cell_begin: begin cell index (inclusive)
         :param i_cell_end: end cell index (exclusive)
+        :param n_particles: number of random proposals used for importance sampling
         :return: estimated first and second moments of gene expression; if output_ess == True, also the ESS of
             the two estimators, in order.
         """
@@ -839,3 +840,67 @@ class PosteriorGeneExpressionSampler(object):
 
             return (log_zero_inflated_mom_1_expression_n,
                     log_zero_inflated_mom_2_expression_n)
+
+    def get_gene_expression_summary(
+            self,
+            gene_index: int,
+            n_particles: int,
+            cell_shard_size: int,
+            run_mode: str = 'full',
+            mode_estimation_strategy: str = 'lower_bound') -> Dict[str, np.ndarray]:
+        """Calculate posterior gene expression summary/
+
+        :param gene_index: index of the gene in the datastore
+        :param n_particles: number of random proposals used for importance sampling
+        :param cell_shard_size: how many cells to include in every batch
+        :param run_mode: see ``_generate_omega_importance_sampler_inputs``
+        :param mode_estimation_strategy: choices include 'upper_bound' and 'lower_bound'
+        :return: a dictionary of summary statistics
+        """
+
+        assert mode_estimation_strategy in {'lower_bound', 'upper_bound'}
+
+        def __fix_scalar(a: np.ndarray):
+            if a.ndim == 0:
+                a = a[None]
+            return a
+
+        if mode_estimation_strategy == 'lower_bound':
+            def __get_mode(mean: torch.Tensor, std: torch.Tensor):
+                return torch.clamp(torch.ceil(mean - np.sqrt(3) * std), 0)
+        elif mode_estimation_strategy == 'upper_bound':
+            def __get_mode(mean: torch.Tensor, std: torch.Tensor):
+                return torch.clamp(torch.floor(mean + np.sqrt(3) * std), 0)
+        else:
+            raise ValueError("Invalid mode_estimation_strategy; valid options are `lower_bound` and `upper_bound`")
+
+        e_hi_mean_shard_list = []
+        e_hi_std_shard_list = []
+        e_hi_mode_shard_list = []
+
+        n_cells = self.sc_family_size_model.sc_fingerprint_datastore.n_cells
+        for cell_shard in range(n_cells // cell_shard_size + 1):
+            i_cell_begin = min(cell_shard * cell_shard_size, n_cells)
+            i_cell_end = min((cell_shard + 1) * cell_shard_size, n_cells)
+            if i_cell_begin == i_cell_end:
+                break
+
+            log_e_hi_mom_1_n, log_e_hi_mom_2_n = self._estimate_log_gene_expression_with_fixed_n_particles(
+                gene_index=gene_index,
+                i_cell_begin=i_cell_begin,
+                i_cell_end=i_cell_end,
+                n_particles=n_particles,
+                output_ess=False,
+                run_mode=run_mode)
+
+            mean_e_hi_n = log_e_hi_mom_1_n.exp()
+            std_e_hi_n = torch.clamp(log_e_hi_mom_2_n.exp() - mean_e_hi_n.pow(2), 0).sqrt()
+            mode_e_hi_n = __get_mode(mean_e_hi_n, std_e_hi_n)
+
+            e_hi_mean_shard_list.append(__fix_scalar(mean_e_hi_n.cpu().numpy()))
+            e_hi_std_shard_list.append(__fix_scalar(std_e_hi_n.cpu().numpy()))
+            e_hi_mode_shard_list.append(__fix_scalar(mode_e_hi_n.cpu().numpy()))
+
+        return {'e_hi_map': np.concatenate(e_hi_mode_shard_list),
+                'e_hi_std': np.concatenate(e_hi_std_shard_list),
+                'e_hi_mean': np.concatenate(e_hi_mean_shard_list)}
