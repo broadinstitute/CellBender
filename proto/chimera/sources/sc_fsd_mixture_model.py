@@ -727,39 +727,30 @@ class PosteriorGeneExpressionSampler(object):
             log_p_binom_obs_hi_mnr = log_rate_e_hi_mnr - log_rate_combined_mnr
             log_p_binom_obs_lo_mnr = log_rate_e_lo_nr - log_rate_combined_mnr
 
-            # "n p"
             log_e_hi_obs_mom_1_mn = torch.logsumexp(
-                log_fingerprint_tensor_nr
-                + log_p_binom_obs_hi_mnr, -1)
+                log_fingerprint_tensor_nr + log_p_binom_obs_hi_mnr, -1)
+            log_e_hi_obs_var_mn = torch.logsumexp(
+                log_fingerprint_tensor_nr + log_p_binom_obs_hi_mnr + log_p_binom_obs_lo_mnr, -1)
 
-            # "n p (q + n p)"
-            log_e_hi_obs_mom_2_mn = torch.logsumexp(
-                log_fingerprint_tensor_nr
-                + log_p_binom_obs_hi_mnr
-                + logaddexp(
-                    log_p_binom_obs_lo_mnr,
-                    log_fingerprint_tensor_nr + log_p_binom_obs_hi_mnr),
-                -1)
-
-            # log "lambda" (poisson rate)
             log_e_hi_unobs_mom_1_mn = log_mu_e_hi_n + log_omega_mn + log_prob_unobs_hi_n
-
-            # log ("lambda + lambda^2")
-            log_e_hi_unobs_mom_2_mn = logaddexp(
-                log_e_hi_unobs_mom_1_mn, 2 * log_e_hi_unobs_mom_1_mn)
+            log_e_hi_unobs_var_mn = log_e_hi_unobs_mom_1_mn
 
             if run_mode == "full":
-                e_hi_conditional_mom_1_mn = logaddexp(log_e_hi_unobs_mom_1_mn, log_e_hi_obs_mom_1_mn)
-                e_hi_conditional_mom_2_mn = logaddexp(log_e_hi_unobs_mom_2_mn, log_e_hi_obs_mom_2_mn)
+                log_e_hi_conditional_mom_1_mn = logaddexp(log_e_hi_unobs_mom_1_mn, log_e_hi_obs_mom_1_mn)
+                log_e_hi_conditional_mom_2_mn = logaddexp(
+                    2 * log_e_hi_conditional_mom_1_mn,
+                    logaddexp(log_e_hi_unobs_var_mn, log_e_hi_obs_var_mn))
             elif run_mode == "only_observed":
-                e_hi_conditional_mom_1_mn = log_e_hi_obs_mom_1_mn
-                e_hi_conditional_mom_2_mn = log_e_hi_obs_mom_2_mn
+                log_e_hi_conditional_mom_1_mn = log_e_hi_obs_mom_1_mn
+                log_e_hi_conditional_mom_2_mn = logaddexp(
+                    2 * log_e_hi_conditional_mom_1_mn,
+                    log_e_hi_obs_var_mn)
             else:
                 raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
 
             return torch.stack((
-                e_hi_conditional_mom_1_mn,
-                e_hi_conditional_mom_2_mn), dim=0)
+                log_e_hi_conditional_mom_1_mn,
+                log_e_hi_conditional_mom_2_mn), dim=0)
 
         # Gamma concentration and rates for prior and proposal distributions of :math:`\omega`
         prior_concentration_n = alpha_e_hi_n
