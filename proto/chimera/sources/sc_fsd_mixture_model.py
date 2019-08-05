@@ -571,7 +571,6 @@ class PosteriorGeneExpressionSampler(object):
     """Calculates the real gene expression from a trained model using importance sampling"""
     def __init__(self,
                  sc_family_size_model: SingleCellFamilySizeModel,
-                 run_mode: str,
                  device: torch.device,
                  dtype: torch.dtype):
         """Initializer.
@@ -580,7 +579,6 @@ class PosteriorGeneExpressionSampler(object):
         :param device: torch device
         :param dtype: torch dtype
         """
-        assert run_mode in {"only_observed", "full"}
         self.sc_family_size_model = sc_family_size_model
         self.device = device
         self.dtype = dtype
@@ -637,7 +635,7 @@ class PosteriorGeneExpressionSampler(object):
 
             The prior :math:`\mu^>`, the Poisson rate for real molecules, however, is a zero-inflated
             Gamma and must be marginalized. This method generates importance sampling inputs for
-            marginalizing :math:`\mu^>` and calculing the mean and variance of of gene expression,
+            marginalizing :math:`\mu^>` and calculing the first and second moments of of gene expression,
             for a non-zero-inflated Gamma. We parametrize :math:`\mu^>` as follows:
 
             .. math::
@@ -661,6 +659,7 @@ class PosteriorGeneExpressionSampler(object):
         :return: a tuple that matches the *args signature of ``PosteriorImportanceSampler.__init__``, and
             the trained model context.
         """
+        assert run_mode in {"only_observed", "full"}
         minibatch_data = self._generate_single_gene_minibatch_data(
             gene_index, i_cell_begin, i_cell_end)
         trained_model_context = self._get_trained_model_context(minibatch_data)
@@ -713,44 +712,54 @@ class PosteriorGeneExpressionSampler(object):
                     - omega_mn * mu_e_hi_n * prob_obs_hi_n
                     - fingerprint_log_norm_factor_n)
 
-        def log_e_hi_conditional_mean_and_var_function(omega_mn: torch.Tensor) -> torch.Tensor:
+        def log_e_hi_conditional_moments_function(omega_mn: torch.Tensor) -> torch.Tensor:
             """Calculates the mean and the variance of gene expression over the :math:`\omega^>` proposals
             conditional on not being zero-inflated.
 
             :param omega_mn: proposals; shape = (n_particles, batch_size)
             :return: a tensor of shape shape = (2, n_particles, batch_size); the leftmost dimension
-                correspond to the mean and variance, in order.
+                correspond to the first and second moments of gene expresion, in order.
             """
             log_omega_mn = omega_mn.log()
             log_rate_e_hi_mnr = log_rate_e_hi_nr + log_omega_mn.unsqueeze(-1)
             log_rate_combined_mnr = logaddexp(log_rate_e_lo_nr, log_rate_e_hi_mnr)
 
-            log_e_hi_obs_mean_mn = torch.logsumexp(
-                log_fingerprint_tensor_nr
-                + log_rate_e_hi_mnr
-                - log_rate_combined_mnr, -1)
+            log_p_binom_obs_hi_mnr = log_rate_e_hi_mnr - log_rate_combined_mnr
+            log_p_binom_obs_lo_mnr = log_rate_e_lo_nr - log_rate_combined_mnr
 
-            log_e_hi_obs_var_mn = torch.logsumexp(
+            # "n p"
+            log_e_hi_obs_mom_1_mn = torch.logsumexp(
                 log_fingerprint_tensor_nr
-                + log_rate_e_hi_mnr
-                + log_rate_e_lo_nr
-                - 2 * log_rate_combined_mnr, -1)
+                + log_p_binom_obs_hi_mnr, -1)
 
-            log_e_hi_unobs_mean_mn = log_mu_e_hi_n + log_omega_mn + log_prob_unobs_hi_n
-            log_e_hi_unobs_var_mn = log_e_hi_unobs_mean_mn
+            # "n p (q + n p)"
+            log_e_hi_obs_mom_2_mn = torch.logsumexp(
+                log_fingerprint_tensor_nr
+                + log_p_binom_obs_hi_mnr
+                + logaddexp(
+                    log_p_binom_obs_lo_mnr,
+                    log_fingerprint_tensor_nr + log_p_binom_obs_hi_mnr),
+                -1)
+
+            # log "lambda" (poisson rate)
+            log_e_hi_unobs_mom_1_mn = log_mu_e_hi_n + log_omega_mn + log_prob_unobs_hi_n
+
+            # log ("lambda + lambda^2")
+            log_e_hi_unobs_mom_2_mn = logaddexp(
+                log_e_hi_unobs_mom_1_mn, 2 * log_e_hi_unobs_mom_1_mn)
 
             if run_mode == "full":
-                e_hi_conditional_mean_mn = logaddexp(log_e_hi_unobs_mean_mn, log_e_hi_obs_mean_mn)
-                e_hi_conditional_var_mn = logaddexp(log_e_hi_unobs_var_mn, log_e_hi_obs_var_mn)
+                e_hi_conditional_mom_1_mn = logaddexp(log_e_hi_unobs_mom_1_mn, log_e_hi_obs_mom_1_mn)
+                e_hi_conditional_mom_2_mn = logaddexp(log_e_hi_unobs_mom_2_mn, log_e_hi_obs_mom_2_mn)
             elif run_mode == "only_observed":
-                e_hi_conditional_mean_mn = log_e_hi_obs_mean_mn
-                e_hi_conditional_var_mn = log_e_hi_obs_var_mn
+                e_hi_conditional_mom_1_mn = log_e_hi_obs_mom_1_mn
+                e_hi_conditional_mom_2_mn = log_e_hi_obs_mom_2_mn
             else:
                 raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
 
             return torch.stack((
-                e_hi_conditional_mean_mn,
-                e_hi_conditional_var_mn), dim=0)
+                e_hi_conditional_mom_1_mn,
+                e_hi_conditional_mom_2_mn), dim=0)
 
         # Gamma concentration and rates for prior and proposal distributions of :math:`\omega`
         prior_concentration_n = alpha_e_hi_n
@@ -764,7 +773,7 @@ class PosteriorGeneExpressionSampler(object):
             proposal_distribution=omega_proposal_dist,
             prior_distribution=omega_prior_dist,
             log_likelihood_function=fingerprint_log_like_function,
-            log_objective_function=log_e_hi_conditional_mean_and_var_function)
+            log_objective_function=log_e_hi_conditional_moments_function)
 
         return omega_importance_sampler_inputs, trained_model_context
 
@@ -782,8 +791,8 @@ class PosteriorGeneExpressionSampler(object):
         :param gene_index: index of the gene in the datastore
         :param i_cell_begin: begin cell index (inclusive)
         :param i_cell_end: end cell index (exclusive)
-        :return: estimated mean and variance of gene expression; if output_ess == True, also the ESS of
-            mean and variance of gene expression, in order.
+        :return: estimated first and second moments of gene expression; if output_ess == True, also the ESS of
+            the two estimators, in order.
         """
 
         # generate inputs for importance sampling with no zero inflation and the posterior model context
@@ -800,8 +809,8 @@ class PosteriorGeneExpressionSampler(object):
 
         log_numerator_kn = sampler.log_numerator
         log_denominator_n = sampler.log_denominator
-        log_mean_expression_numerator_n = log_numerator_kn[0, :]
-        log_var_expression_numerator_n = log_numerator_kn[1, :]
+        log_mom_1_expression_numerator_n = log_numerator_kn[0, :]
+        log_mom_2_expression_numerator_n = log_numerator_kn[1, :]
 
         logit_p_zero_e_hi_n: torch.Tensor = trained_model_context["logit_p_zero_e_hi_n"]
         log_p_zero_e_hi_n: torch.Tensor = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
@@ -814,29 +823,28 @@ class PosteriorGeneExpressionSampler(object):
             log_p_zero_e_hi_n + log_fingerprint_likelihood_zero_n,
             log_p_nonzero_e_hi_n + log_denominator_n - log_n_particles)
 
-        log_zero_inflated_mean_expression_n = (
+        log_zero_inflated_mom_1_expression_n = (
                 log_p_nonzero_e_hi_n
-                + log_mean_expression_numerator_n
+                + log_mom_1_expression_numerator_n
                 - log_n_particles
                 - log_zero_inflated_denominator_n)
-        log_zero_inflated_var_expression_n = (
+        log_zero_inflated_mom_2_expression_n = (
                 log_p_nonzero_e_hi_n
-                + log_var_expression_numerator_n
+                + log_mom_2_expression_numerator_n
                 - log_n_particles
                 - log_zero_inflated_denominator_n)
 
         if output_ess:
             combined_expression_ess_kn = sampler.ess
-            log_mean_expression_ess_n = combined_expression_ess_kn[0, :]
-            log_var_expression_ess_n = combined_expression_ess_kn[0, :]
+            log_mom_1_expression_ess_n = combined_expression_ess_kn[0, :]
+            log_mom_2_expression_ess_n = combined_expression_ess_kn[0, :]
 
-            return (log_zero_inflated_mean_expression_n,
-                    log_zero_inflated_var_expression_n,
-                    log_mean_expression_ess_n,
-                    log_var_expression_ess_n)
+            return (log_zero_inflated_mom_1_expression_n,
+                    log_zero_inflated_mom_2_expression_n,
+                    log_mom_1_expression_ess_n,
+                    log_mom_2_expression_ess_n)
 
         else:
 
-            return (log_zero_inflated_mean_expression_n,
-                    log_zero_inflated_var_expression_n)
-
+            return (log_zero_inflated_mom_1_expression_n,
+                    log_zero_inflated_mom_2_expression_n)
