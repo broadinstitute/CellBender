@@ -584,14 +584,17 @@ class PosteriorGeneExpressionSampler(object):
     def _generate_single_gene_minibatch_data(self,
                                              gene_index: int,
                                              i_cell_begin: int,
-                                             i_cell_end: int) -> Dict[str, torch.Tensor]:
+                                             i_cell_end: int,
+                                             n_particles_cell: int) -> Dict[str, torch.Tensor]:
         """Generate model input tensors for a given gene index and the cell index range
+
+        :param n_particles_cell: repeat factor for every cell
 
         .. note: The generated minibatch has scale-factor set to 1.0 for all gene and cell sampling
             sites (because they are not necessary for our purposes here). As such, the minibatches
             produced by this method should not be used for training.
         """
-        cell_index_array = np.arange(i_cell_begin, i_cell_end)
+        cell_index_array = np.repeat(np.arange(i_cell_begin, i_cell_end, dtype=np.int), n_particles_cell)
         gene_index_array = gene_index * np.ones_like(cell_index_array)
         cell_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
         gene_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
@@ -623,6 +626,7 @@ class PosteriorGeneExpressionSampler(object):
             gene_index: int,
             i_cell_begin: int,
             i_cell_end: int,
+            n_particles_cell: int,
             run_mode: str) -> Tuple[PosteriorImportanceSamplerInputs, Dict[str, Any]]:
         """Generates the required inputs for ``PosteriorImportanceSampler`` to calculate the mean
         and variance of gene expression, assuming no zero-inflation of the prior for :math:`\mu^>`.
@@ -654,12 +658,13 @@ class PosteriorGeneExpressionSampler(object):
             how many real molecules we expect to observe in the limit of infinite sequencing depth.
         :param i_cell_begin: begin cell index (inclusive)
         :param i_cell_end: end cell index (exclusive)
+        :param n_particles_cell: how many repeats per cell
         :return: a tuple that matches the *args signature of ``PosteriorImportanceSampler.__init__``, and
             the trained model context.
         """
         assert run_mode in {"only_observed", "full"}
         minibatch_data = self._generate_single_gene_minibatch_data(
-            gene_index, i_cell_begin, i_cell_end)
+            gene_index, i_cell_begin, i_cell_end, n_particles_cell)
         trained_model_context = self._get_trained_model_context(minibatch_data)
 
         # localize required auxiliary quantities from the trained model context
@@ -787,7 +792,11 @@ class PosteriorGeneExpressionSampler(object):
 
         # generate inputs for importance sampling with no zero inflation and the posterior model context
         omega_importance_sampler_inputs, trained_model_context = self._generate_omega_importance_sampler_inputs(
-            gene_index, i_cell_begin, i_cell_end, run_mode)
+            gene_index=gene_index,
+            i_cell_begin=i_cell_begin,
+            i_cell_end=i_cell_end,
+            n_particles_cell=1,
+            run_mode=run_mode)
 
         # perform importance sampling assuming no zero inflation
         batch_size = i_cell_end - i_cell_begin
@@ -839,7 +848,7 @@ class PosteriorGeneExpressionSampler(object):
             return (log_zero_inflated_mom_1_expression_n,
                     log_zero_inflated_mom_2_expression_n)
 
-    def get_gene_expression_summary(
+    def get_gene_expression_moments_summary(
             self,
             gene_index: int,
             n_particles_omega: int,
@@ -911,3 +920,95 @@ class PosteriorGeneExpressionSampler(object):
         return {'e_hi_map': np.concatenate(e_hi_mode_shard_list),
                 'e_hi_std': np.concatenate(e_hi_std_shard_list),
                 'e_hi_mean': np.concatenate(e_hi_mean_shard_list)}
+
+    def _generate_gene_expression_posterior_samples(
+            self,
+            gene_index: int,
+            i_cell_begin: int,
+            i_cell_end: int,
+            n_proposals_omega: int,
+            n_particles_omega: int,
+            n_particles_cell: int,
+            run_mode: str):
+        """
+
+        .. note:: "proper" means non-zero-inflated part throughput.
+
+        :param gene_index:
+        :param i_cell_begin:
+        :param i_cell_end:
+        :param n_proposals_omega:
+        :param n_particles_omega:
+        :param n_particles_cell:
+        :param run_mode:
+        :return:
+        """
+
+        # draw posterior samples from all non-marginalized latent variables
+        omega_importance_sampler_inputs, trained_model_context = self._generate_omega_importance_sampler_inputs(
+            gene_index=gene_index,
+            i_cell_begin=i_cell_begin,
+            i_cell_end=i_cell_end,
+            n_particles_cell=n_particles_cell,
+            run_mode=run_mode)
+        batch_size = n_particles_cell * (i_cell_end - i_cell_begin)
+
+        # draw omega proposals
+        proposal_omega_mn = omega_importance_sampler_inputs.proposal_distribution.sample((n_proposals_omega,))
+
+        # calculate the log norm factor of the proper part of :math:`\omega` posterior
+        prior_omega_log_prob_mn = omega_importance_sampler_inputs.prior_distribution.log_prob(proposal_omega_mn)
+        proposal_omega_log_prob_mn = omega_importance_sampler_inputs.proposal_distribution.log_prob(proposal_omega_mn)
+        fingerprint_log_likelihood_mn = omega_importance_sampler_inputs.log_likelihood_function(proposal_omega_mn)
+        log_proper_omega_posterior_norm_n = torch.logsumexp(
+            prior_omega_log_prob_mn
+            + fingerprint_log_likelihood_mn
+            - proposal_omega_log_prob_mn, 0) - np.log(n_proposals_omega)
+
+        # prior zero-inflation log prob
+        logit_p_zero_e_hi_n: torch.Tensor = trained_model_context["logit_p_zero_e_hi_n"]
+        log_p_zero_e_hi_n: torch.Tensor = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
+        log_p_nonzero_e_hi_n = get_log_prob_compl(log_p_zero_e_hi_n)
+
+        # fingerprint log likelihood for :math:`\omega` = 0
+        log_fingerprint_likelihood_zero_n = omega_importance_sampler_inputs.log_likelihood_function(
+            torch.zeros((1, batch_size), device=self.device, dtype=self.dtype)).squeeze(0)
+
+        log_full_omega_posterior_norm_n = logaddexp(
+            log_p_zero_e_hi_n + log_fingerprint_likelihood_zero_n,
+            log_p_nonzero_e_hi_n + log_proper_omega_posterior_norm_n)
+
+        # posterior zero-inflation log prob
+        log_posterior_p_zero_e_hi_n = (
+                log_p_zero_e_hi_n
+                + log_fingerprint_likelihood_zero_n
+                - log_full_omega_posterior_norm_n)
+        logit_posterior_p_nonzero_e_hi_n = (
+                get_log_prob_compl(log_posterior_p_zero_e_hi_n)
+                - log_posterior_p_zero_e_hi_n)
+
+        # draw proper :math:`\omega` posterior particles via bootstrap re-sampling
+        log_posterior_omega_proper_mn = (
+            prior_omega_log_prob_mn
+            + fingerprint_log_likelihood_mn
+            - proposal_omega_log_prob_mn
+            - log_proper_omega_posterior_norm_n)
+        omega_proper_posterior_bootstrap_indices_mn = torch.distributions.Categorical(
+            logits=log_posterior_omega_proper_mn.permute((1, 0))).sample((n_particles_omega,))
+        omega_proper_posterior_bootstrap_mn = torch.gather(
+            proposal_omega_mn,
+            dim=0,
+            index=omega_proper_posterior_bootstrap_indices_mn)
+
+        # draw Bernoulli for posterior zero inflation of :math:`\omega` samples
+        omega_zero_inflation_mask_mn = torch.distributions.Bernoulli(
+            logits=logit_posterior_p_nonzero_e_hi_n).sample((n_particles_omega,))
+
+        # mask and finalize omega particles
+        omega_posterior_samples_mn = omega_zero_inflation_mask_mn.float() * omega_proper_posterior_bootstrap_mn
+
+        return omega_posterior_samples_mn
+
+        # draw gene expression for every omega particle
+
+        # gather the samples and output a dictionary of cell index to posterior samples
