@@ -97,3 +97,7 @@ class ApproximateZINBFit:
                 'p_zero': p_zero,
                 'iters': i,
                 'converged': converged}
+
+
+def int_ndarray_mode(arr: np.ndarray, axis: int):
+    return np.apply_along_axis(lambda x: np.bincount(x).argmax(), axis=axis, arr=arr)

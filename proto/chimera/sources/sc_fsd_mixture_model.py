@@ -14,6 +14,7 @@ from pyro_extras import CustomLogProbTerm, ZeroInflatedNegativeBinomial, \
 from sc_fingerprint import SingleCellFingerprintDataStore
 from sc_fsd_codec import FamilySizeDistributionCodec, SortByComponentWeights
 from sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
+from stats import int_ndarray_mode
 
 import logging
 from collections import defaultdict
@@ -848,7 +849,7 @@ class PosteriorGeneExpressionSampler(object):
             return (log_zero_inflated_mom_1_expression_n,
                     log_zero_inflated_mom_2_expression_n)
 
-    def get_gene_expression_moments_summary(
+    def get_gene_expression_posterior_moments_summary(
             self,
             gene_index: int,
             n_particles_omega: int,
@@ -875,10 +876,10 @@ class PosteriorGeneExpressionSampler(object):
             return a
 
         if mode_estimation_strategy == 'lower_bound':
-            def __get_mode(mean: torch.Tensor, std: torch.Tensor):
+            def __get_approximate_mode(mean: torch.Tensor, std: torch.Tensor):
                 return torch.clamp(torch.ceil(mean - np.sqrt(3) * std), 0)
         elif mode_estimation_strategy == 'upper_bound':
-            def __get_mode(mean: torch.Tensor, std: torch.Tensor):
+            def __get_approximate_mode(mean: torch.Tensor, std: torch.Tensor):
                 return torch.clamp(torch.floor(mean + np.sqrt(3) * std), 0)
         else:
             raise ValueError("Invalid mode_estimation_strategy; valid options are `lower_bound` and `upper_bound`")
@@ -911,7 +912,7 @@ class PosteriorGeneExpressionSampler(object):
 
             mean_e_hi_n = log_e_hi_mom_1_n.exp()
             std_e_hi_n = torch.clamp(log_e_hi_mom_2_n.exp() - mean_e_hi_n.pow(2), 0).sqrt()
-            mode_e_hi_n = __get_mode(mean_e_hi_n, std_e_hi_n)
+            mode_e_hi_n = __get_approximate_mode(mean_e_hi_n, std_e_hi_n)
 
             e_hi_mean_shard_list.append(__fix_scalar(mean_e_hi_n.cpu().numpy()))
             e_hi_std_shard_list.append(__fix_scalar(std_e_hi_n.cpu().numpy()))
@@ -1000,7 +1001,7 @@ class PosteriorGeneExpressionSampler(object):
             n_particles_omega: int,
             n_particles_cell: int,
             n_particles_expression: int,
-            run_mode: str):
+            run_mode: str) -> torch.Tensor:
         """
 
         .. note:: "proper" means non-zero-inflated part throughput.
@@ -1077,7 +1078,66 @@ class PosteriorGeneExpressionSampler(object):
             raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
 
         return e_hi_posterior_samples_smn \
+            .int() \
             .permute(2, 1, 0) \
             .contiguous() \
             .view(n_cells, -1) \
             .permute(1, 0)
+
+    def get_gene_expression_posterior_sampling_summary(
+            self,
+            gene_index: int,
+            n_proposals_omega: int,
+            n_particles_omega: int,
+            n_particles_cell: int,
+            n_particles_expression: int,
+            cell_shard_size: int,
+            run_mode: str) -> Dict[str, np.ndarray]:
+        """
+
+        :param gene_index:
+        :param n_proposals_omega:
+        :param n_particles_omega:
+        :param n_particles_cell:
+        :param n_particles_expression:
+        :param cell_shard_size:
+        :param run_mode:
+        :return:
+        """
+
+        def __fix_scalar(a: np.ndarray):
+            if a.ndim == 0:
+                a = a[None]
+            return a
+
+        e_hi_mean_shard_list = []
+        e_hi_std_shard_list = []
+        e_hi_mode_shard_list = []
+
+        n_cells = self.sc_family_size_model.sc_fingerprint_datastore.n_cells
+        for cell_shard in range(n_cells // cell_shard_size + 1):
+            i_cell_begin = min(cell_shard * cell_shard_size, n_cells)
+            i_cell_end = min((cell_shard + 1) * cell_shard_size, n_cells)
+            if i_cell_begin == i_cell_end:
+                break
+
+            e_hi_posterior_samples_sn = self._generate_gene_expression_posterior_samples(
+                gene_index=gene_index,
+                i_cell_begin=i_cell_begin,
+                i_cell_end=i_cell_end,
+                n_proposals_omega=n_proposals_omega,
+                n_particles_omega=n_particles_omega,
+                n_particles_cell=n_particles_cell,
+                n_particles_expression=n_particles_expression,
+                run_mode=run_mode)
+
+            e_hi_mean_shard_list.append(__fix_scalar(
+                torch.mean(e_hi_posterior_samples_sn.float(), dim=0).cpu().numpy()))
+            e_hi_std_shard_list.append(__fix_scalar(
+                torch.std(e_hi_posterior_samples_sn.float(), dim=0).cpu().numpy()))
+            e_hi_mode_shard_list.append(__fix_scalar(
+                int_ndarray_mode(e_hi_posterior_samples_sn.cpu().numpy(), axis=0)))
+
+        return {'e_hi_map': np.concatenate(e_hi_mode_shard_list),
+                'e_hi_std': np.concatenate(e_hi_std_shard_list),
+                'e_hi_mean': np.concatenate(e_hi_mean_shard_list)}

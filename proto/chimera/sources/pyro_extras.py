@@ -334,7 +334,7 @@ class MixtureDistribution(TorchDistribution):
 
 
 def get_confidence_interval(cdf: torch.Tensor, lower_cdf: float, upper_cdf: float):
-    """Calulates confidence intervals from a given empirical CDF along axis=0. A single batch dimension
+    """Calculates confidence intervals from a given empirical CDF along axis=0. A single batch dimension
     is expected at axis=1.
     
     Note:
@@ -352,7 +352,8 @@ def get_confidence_interval(cdf: torch.Tensor, lower_cdf: float, upper_cdf: floa
     lo_mask_non_degenerate = lo_mask.float() + ladder.unsqueeze(-1)
     hi_mask_non_degenerate = hi_mask.float() + flipped_ladder.unsqueeze(-1)
     lo_idx = torch.any(lo_mask, dim=0).long() * lo_mask_non_degenerate.argmax(dim=0)
-    hi_idx = torch.any(1 - hi_mask, dim=0).long() * torch.clamp(hi_mask_non_degenerate.argmin(dim=0) + 1, max=cdf.shape[0] - 1)
+    hi_idx = torch.any(1 - hi_mask, dim=0).long() * torch.clamp(
+        hi_mask_non_degenerate.argmin(dim=0) + 1, max=cdf.shape[0] - 1)
     return lo_idx, hi_idx
 
 
