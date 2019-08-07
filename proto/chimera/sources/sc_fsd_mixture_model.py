@@ -1061,7 +1061,7 @@ class PosteriorGeneExpressionSampler(object):
         e_hi_obs_dist = torch.distributions.Binomial(
             total_count=fingerprint_tensor_nr,
             logits=logit_p_binom_obs_hi_mnr)
-        e_hi_obs_samples_smnr = e_hi_obs_dist.sample((n_particles_expression,)).int()
+        e_hi_obs_samples_smnr = e_hi_obs_dist.sample((n_particles_expression,))
 
         if run_mode == "only_observed":
             e_hi_posterior_samples_smn = e_hi_obs_samples_smnr.sum(-1)
@@ -1070,7 +1070,7 @@ class PosteriorGeneExpressionSampler(object):
             p_unobs_hi_n = log_prob_fsd_hi_full_nr[:, 0].exp()
             e_hi_unobs_dist = torch.distributions.Poisson(
                 rate=p_unobs_hi_n * omega_posterior_samples_mn * mu_e_hi_n)
-            e_hi_unobs_samples_smn = e_hi_unobs_dist.sample((n_particles_expression,)).int()
+            e_hi_unobs_samples_smn = e_hi_unobs_dist.sample((n_particles_expression,))
             e_hi_posterior_samples_smn = e_hi_obs_samples_smnr.sum(-1) + e_hi_unobs_samples_smn
         else:
             raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
