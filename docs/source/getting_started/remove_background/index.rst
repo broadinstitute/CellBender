@@ -15,7 +15,7 @@ and takes about 30 minutes to finish.
 We have created a python script to download and trim the dataset. Navigate to ``examples/remove_background/``
 under your CellBender installation root directory and run the following command in the console:
 
-.. code-block:: bash
+.. code-block:: console
 
    $ python generate_tiny_10x_pbmc.py
 
@@ -27,7 +27,7 @@ Run remove-background
 
 We proceed to run ``remove-background`` on the trimmed dataset using the following command:
 
-.. code-block:: bash
+.. code-block:: console
 
    $ cellbender remove-background \
         --input ./tiny_raw_gene_bc_matrices/GRCh38 \

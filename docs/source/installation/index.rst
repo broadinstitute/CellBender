@@ -1,7 +1,7 @@
 .. _installation:
 
-Installation and Usage
-======================
+Installation
+============
 
 Manual Installation
 -------------------
@@ -39,13 +39,12 @@ Docker Image
 
 A GPU-enabled docker image is available from the Google Container Registry (GCR) as:
 
-  ``us.gcr.io/broad-dsde-methods/cellbender:latest``
+``us.gcr.io/broad-dsde-methods/cellbender:latest``
 
 
 Terra Workflow
 --------------
 
-For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/broad-dsde-methods/cellbender/10/wdl>`_
-is available as:
+For `Terra <https://app.terra.bio>`_ users, the following workflow is publicly available:
 
-  ``broad-dsde-methods/cellbender``
+* `cellbender/remove-background <https://portal.firecloud.org/#methods/cellbender/remove-background/>`_

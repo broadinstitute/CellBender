@@ -33,7 +33,7 @@ The recommended installation is as follows. Create a conda environment and activ
 
 .. code-block:: bash
 
-   $ conda create -n cellbender python=3.6
+   $ conda create -n cellbender python=3.7
    $ source activate cellbender
 
 Install the `pytables <https://www.pytables.org>`_ module:
@@ -65,10 +65,10 @@ A GPU-enabled docker image is available from the Google Container Registry (GCR)
 Terra Users
 ~~~~~~~~~~~
 
-For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/broad-dsde-methods/cellbender/>`_
+For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/cellbender/remove-background/>`_
 is available as:
 
-``broad-dsde-methods/cellbender``
+``cellbender/remove-background``
 
 
 Citing CellBender
