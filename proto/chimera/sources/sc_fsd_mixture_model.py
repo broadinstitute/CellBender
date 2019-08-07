@@ -1038,13 +1038,15 @@ class PosteriorGeneExpressionSampler(object):
             device=self.device,
             dtype=self.dtype)
 
-        # draw gene expression for each omega particle
+        # fetch intermediate tensors
         log_prob_fsd_hi_full_nr: torch.Tensor = trained_model_context["log_prob_fsd_hi_full_nr"]
         log_prob_fsd_lo_obs_nr: torch.Tensor = trained_model_context["log_prob_fsd_lo_obs_nr"]
         log_prob_fsd_hi_obs_nr: torch.Tensor = trained_model_context["log_prob_fsd_hi_obs_nr"]
         mu_e_lo_n: torch.Tensor = trained_model_context["mu_e_lo_n"]
         mu_e_hi_n: torch.Tensor = trained_model_context["mu_e_hi_n"]
         fingerprint_tensor_nr: torch.Tensor = minibatch_data["fingerprint_tensor"]
+
+        # the probability of being a real molecule for every omega particle and family size
         log_mu_e_lo_n = mu_e_lo_n.log()
         log_mu_e_hi_n = mu_e_hi_n.log()
         log_rate_e_lo_nr = log_mu_e_lo_n.unsqueeze(-1) + log_prob_fsd_lo_obs_nr
@@ -1055,14 +1057,22 @@ class PosteriorGeneExpressionSampler(object):
         log_p_binom_obs_hi_mnr = log_rate_e_hi_mnr - log_rate_combined_mnr
         logit_p_binom_obs_hi_mnr = log_p_binom_obs_hi_mnr - get_log_prob_compl(log_p_binom_obs_hi_mnr)
 
-        p_obs_hi_n = log_prob_fsd_hi_full_nr[:, 0].exp()
-        e_hi_unobs_dist = torch.distributions.Poisson(
-            rate=p_obs_hi_n * omega_posterior_samples_mn * mu_e_hi_n)
+        # draw posterior gene expression samples
         e_hi_obs_dist = torch.distributions.Binomial(
             total_count=fingerprint_tensor_nr,
             logits=logit_p_binom_obs_hi_mnr)
+        e_hi_obs_samples_smnr = e_hi_obs_dist.sample((n_particles_expression,)).int()
 
-        e_hi_unobs_samples_smn = e_hi_unobs_dist.sample((n_particles_expression,))
-        e_hi_obs_samples_smnr = e_hi_obs_dist.sample((n_particles_expression,))
+        if run_mode == "only_observed":
+            e_hi_posterior_samples_smn = e_hi_obs_samples_smnr.sum(-1)
+        elif run_mode == "full":
+            # the poisson rate for unobserved real molecules
+            p_unobs_hi_n = log_prob_fsd_hi_full_nr[:, 0].exp()
+            e_hi_unobs_dist = torch.distributions.Poisson(
+                rate=p_unobs_hi_n * omega_posterior_samples_mn * mu_e_hi_n)
+            e_hi_unobs_samples_smn = e_hi_unobs_dist.sample((n_particles_expression,)).int()
+            e_hi_posterior_samples_smn = e_hi_obs_samples_smnr.sum(-1) + e_hi_unobs_samples_smn
+        else:
+            raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
 
-        return e_hi_unobs_samples_smn, e_hi_obs_samples_smnr
+        return e_hi_posterior_samples_smn
