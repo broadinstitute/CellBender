@@ -541,10 +541,14 @@ def generate_downsampled_minibatch(original_data_dict: Dict[str, torch.Tensor],
     downsampled_data_dict = dict()
 
     # copy unchanged data
-    downsampled_data_dict['cell_index_tensor'] = original_data_dict['cell_index_tensor']
-    downsampled_data_dict['gene_index_tensor'] = original_data_dict['gene_index_tensor']
-    downsampled_data_dict['cell_sampling_site_scale_factor_tensor'] = original_data_dict['cell_sampling_site_scale_factor_tensor']
-    downsampled_data_dict['gene_sampling_site_scale_factor_tensor'] = original_data_dict['gene_sampling_site_scale_factor_tensor']
+    downsampled_data_dict['cell_index_tensor'] = \
+        original_data_dict['cell_index_tensor']
+    downsampled_data_dict['gene_index_tensor'] = \
+        original_data_dict['gene_index_tensor']
+    downsampled_data_dict['cell_sampling_site_scale_factor_tensor'] = \
+        original_data_dict['cell_sampling_site_scale_factor_tensor']
+    downsampled_data_dict['gene_sampling_site_scale_factor_tensor'] = \
+        original_data_dict['gene_sampling_site_scale_factor_tensor']
 
     # downsampling rate tensor
     downsampled_data_dict['downsampling_rate_tensor'] = min_downsampling_rate + (

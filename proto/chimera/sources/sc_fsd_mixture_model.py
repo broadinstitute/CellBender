@@ -412,7 +412,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
     def _get_fsd_xi_prior_dist(self,
                                fsd_xi_prior_locs_kq: torch.Tensor,
                                fsd_xi_prior_scales_kq: torch.Tensor) -> TorchDistribution:
-        """Calculates the prior distribution for :math:`\xi`, which is a marginalized Gaussian mixture.
+        """Calculates the prior distribution for :math:`\\xi`, which is a marginalized Gaussian mixture.
 
         :param fsd_xi_prior_locs_kq: location of Gaussian components
         :param fsd_xi_prior_scales_kq: scale of Gaussian components
@@ -695,26 +695,26 @@ class PosteriorGeneExpressionSampler(object):
             n_particles_cell: int,
             run_mode: str) -> Tuple[PosteriorImportanceSamplerInputs, Dict[str, Any], Dict[str, Any]]:
         """Generates the required inputs for ``PosteriorImportanceSampler`` to calculate the mean
-        and variance of gene expression, assuming no zero-inflation of the prior for :math:`\mu^>`.
+        and variance of gene expression, assuming no zero-inflation of the prior for :math:`\\mu^>`.
 
-        .. note:: According to the model, the prior for :math:`\mu^<`, the Poisson rate for chimeric
+        .. note:: According to the model, the prior for :math:`\\mu^<`, the Poisson rate for chimeric
             molecules, is deterministic; as such, it is directly picked up from the trained model
             context ``trained_model_context["mu_e_lo_n"]`` and no marginalization is necessary.
 
-            The prior :math:`\mu^>`, the Poisson rate for real molecules, however, is a zero-inflated
+            The prior :math:`\\mu^>`, the Poisson rate for real molecules, however, is a zero-inflated
             Gamma and must be marginalized. This method generates importance sampling inputs for
-            marginalizing :math:`\mu^>` and calculing the first and second moments of of gene expression,
-            for a non-zero-inflated Gamma. We parametrize :math:`\mu^>` as follows:
+            marginalizing :math:`\\mu^>` and calculing the first and second moments of of gene expression,
+            for a non-zero-inflated Gamma. We parametrize :math:`\\mu^>` as follows:
 
             .. math::
 
-                \mu^> | no-zero-inflation = \mathbb{E}[\mu^>] \omega^>,
+                \\mu^> | no-zero-inflation = \\mathbb{E}[\\mu^>] \\omega^>,
 
-                \omega^> \sim \Gamma(\alpha^>, \alpha^>),
+                \\omega^> \\sim \\mathrm{Gamma}(\\alpha^>, \\alpha^>),
 
-                \alpha^> = 1 / \phi^>,
+                \\alpha^> = 1 / \\phi^>,
 
-            where :math:`\phi^>` is the prior over-dipersion of expression and :math:`\mathbb{E}[\mu^>]`
+            where :math:`\\phi^>` is the prior over-dipersion of expression and :math:`\\mathbb{E}[\\mu^>]`
             is the prior mean of the expression.
 
         :param gene_index: index of the gene in the datastore
@@ -766,7 +766,7 @@ class PosteriorGeneExpressionSampler(object):
         log_rate_e_hi_nr = log_mu_e_hi_n.unsqueeze(-1) + log_prob_fsd_hi_obs_nr
 
         def fingerprint_log_like_function(omega_mn: torch.Tensor) -> torch.Tensor:
-            """Calculates the log likelihood of the fingerprint for given :math:`\omega^>` proposals.
+            """Calculates the log likelihood of the fingerprint for given :math:`\\omega^>` proposals.
 
             :param omega_mn: proposals; shape = (n_particles, batch_size)
             :return: log likelihood; shape = (n_particles, batch_size)
@@ -782,7 +782,7 @@ class PosteriorGeneExpressionSampler(object):
                     - fingerprint_log_norm_factor_n)
 
         def log_e_hi_conditional_moments_function(omega_mn: torch.Tensor) -> torch.Tensor:
-            """Calculates the mean and the variance of gene expression over the :math:`\omega^>` proposals
+            """Calculates the mean and the variance of gene expression over the :math:`\\omega^>` proposals
             conditional on not being zero-inflated.
 
             :param omega_mn: proposals; shape = (n_particles, batch_size)
@@ -821,7 +821,7 @@ class PosteriorGeneExpressionSampler(object):
                 log_e_hi_conditional_mom_1_mn,
                 log_e_hi_conditional_mom_2_mn), dim=0)
 
-        # Gamma concentration and rates for prior and proposal distributions of :math:`\omega`
+        # Gamma concentration and rates for prior and proposal distributions of :math:`\\omega`
         prior_concentration_n = alpha_e_hi_n
         prior_rate_n = alpha_e_hi_n
         proposal_concentration_n = alpha_e_hi_n + e_obs_n
@@ -925,7 +925,7 @@ class PosteriorGeneExpressionSampler(object):
         """Calculate posterior gene expression summary/
 
         :param gene_index: index of the gene in the datastore
-        :param n_particles_omega: number of random proposals used for importance sampling of :math:`\omega^>`
+        :param n_particles_omega: number of random proposals used for importance sampling of :math:`\\omega^>`
         :param n_particles_cell: number of posterior samples from the guide
         :param cell_shard_size: how many cells to include in every batch
         :param run_mode: see ``_generate_omega_importance_sampler_inputs``
@@ -1007,7 +1007,7 @@ class PosteriorGeneExpressionSampler(object):
         # draw proposals
         proposal_points_mn = proposal_proper_distribution.sample((n_proposals,))
 
-        # calculate the log norm factor of the proper part of :math:`\omega` posterior
+        # calculate the log norm factor of the proper part of :math:`\\omega` posterior
         prior_proper_log_prob_mn = prior_proper_distribution.log_prob(proposal_points_mn)
         proposal_proper_log_prob_mn = proposal_proper_distribution.log_prob(proposal_points_mn)
         fingerprint_log_likelihood_mn = log_likelihood_function(proposal_points_mn)
