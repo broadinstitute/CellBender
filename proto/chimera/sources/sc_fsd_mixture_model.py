@@ -627,7 +627,7 @@ class PosteriorGeneExpressionSampler(object):
             i_cell_begin: int,
             i_cell_end: int,
             n_particles_cell: int,
-            run_mode: str) -> Tuple[PosteriorImportanceSamplerInputs, Dict[str, Any]]:
+            run_mode: str) -> Tuple[PosteriorImportanceSamplerInputs, Dict[str, Any], Dict[str, Any]]:
         """Generates the required inputs for ``PosteriorImportanceSampler`` to calculate the mean
         and variance of gene expression, assuming no zero-inflation of the prior for :math:`\mu^>`.
 
@@ -769,7 +769,7 @@ class PosteriorGeneExpressionSampler(object):
             log_likelihood_function=fingerprint_log_like_function,
             log_objective_function=log_e_hi_conditional_moments_function)
 
-        return omega_importance_sampler_inputs, trained_model_context
+        return omega_importance_sampler_inputs, trained_model_context, minibatch_data
 
     def _estimate_log_gene_expression_with_fixed_n_particles(
             self,
@@ -791,7 +791,7 @@ class PosteriorGeneExpressionSampler(object):
         """
 
         # generate inputs for importance sampling with no zero inflation and the posterior model context
-        omega_importance_sampler_inputs, trained_model_context = self._generate_omega_importance_sampler_inputs(
+        omega_importance_sampler_inputs, trained_model_context, _ = self._generate_omega_importance_sampler_inputs(
             gene_index=gene_index,
             i_cell_begin=i_cell_begin,
             i_cell_end=i_cell_end,
@@ -999,6 +999,7 @@ class PosteriorGeneExpressionSampler(object):
             n_proposals_omega: int,
             n_particles_omega: int,
             n_particles_cell: int,
+            n_particles_expression: int,
             run_mode: str):
         """
 
@@ -1010,12 +1011,15 @@ class PosteriorGeneExpressionSampler(object):
         :param n_proposals_omega:
         :param n_particles_omega:
         :param n_particles_cell:
+        :param n_particles_expression:
         :param run_mode:
         :return:
         """
 
         # draw posterior samples from all non-marginalized latent variables
-        omega_importance_sampler_inputs, trained_model_context = self._generate_omega_importance_sampler_inputs(
+        (omega_importance_sampler_inputs,
+         trained_model_context,
+         minibatch_data) = self._generate_omega_importance_sampler_inputs(
             gene_index=gene_index,
             i_cell_begin=i_cell_begin,
             i_cell_end=i_cell_end,
@@ -1034,8 +1038,31 @@ class PosteriorGeneExpressionSampler(object):
             device=self.device,
             dtype=self.dtype)
 
-        return omega_posterior_samples_mn
+        # draw gene expression for each omega particle
+        log_prob_fsd_hi_full_nr: torch.Tensor = trained_model_context["log_prob_fsd_hi_full_nr"]
+        log_prob_fsd_lo_obs_nr: torch.Tensor = trained_model_context["log_prob_fsd_lo_obs_nr"]
+        log_prob_fsd_hi_obs_nr: torch.Tensor = trained_model_context["log_prob_fsd_hi_obs_nr"]
+        mu_e_lo_n: torch.Tensor = trained_model_context["mu_e_lo_n"]
+        mu_e_hi_n: torch.Tensor = trained_model_context["mu_e_hi_n"]
+        fingerprint_tensor_nr: torch.Tensor = minibatch_data["fingerprint_tensor"]
+        log_mu_e_lo_n = mu_e_lo_n.log()
+        log_mu_e_hi_n = mu_e_hi_n.log()
+        log_rate_e_lo_nr = log_mu_e_lo_n.unsqueeze(-1) + log_prob_fsd_lo_obs_nr
+        log_rate_e_hi_nr = log_mu_e_hi_n.unsqueeze(-1) + log_prob_fsd_hi_obs_nr
+        log_omega_mn = omega_posterior_samples_mn.log()
+        log_rate_e_hi_mnr = log_rate_e_hi_nr + log_omega_mn.unsqueeze(-1)
+        log_rate_combined_mnr = logaddexp(log_rate_e_lo_nr, log_rate_e_hi_mnr)
+        log_p_binom_obs_hi_mnr = log_rate_e_hi_mnr - log_rate_combined_mnr
+        logit_p_binom_obs_hi_mnr = log_p_binom_obs_hi_mnr - get_log_prob_compl(log_p_binom_obs_hi_mnr)
 
-        # draw gene expression for every omega particle
+        p_obs_hi_n = log_prob_fsd_hi_full_nr[:, 0].exp()
+        e_hi_unobs_dist = torch.distributions.Poisson(
+            rate=p_obs_hi_n * omega_posterior_samples_mn * mu_e_hi_n)
+        e_hi_obs_dist = torch.distributions.Binomial(
+            total_count=fingerprint_tensor_nr,
+            logits=logit_p_binom_obs_hi_mnr)
 
-        # gather the samples and output a dictionary of cell index to posterior samples
+        e_hi_unobs_samples_smn = e_hi_unobs_dist.sample((n_particles_expression,))
+        e_hi_obs_samples_smnr = e_hi_obs_dist.sample((n_particles_expression,))
+
+        return e_hi_unobs_samples_smn, e_hi_obs_samples_smnr
