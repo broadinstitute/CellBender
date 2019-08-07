@@ -1025,7 +1025,8 @@ class PosteriorGeneExpressionSampler(object):
             i_cell_end=i_cell_end,
             n_particles_cell=n_particles_cell,
             run_mode=run_mode)
-        batch_size = n_particles_cell * (i_cell_end - i_cell_begin)
+        n_cells = i_cell_end - i_cell_begin
+        batch_size = n_particles_cell * n_cells
 
         omega_posterior_samples_mn = self.generate_zero_inflated_bootstrap_posterior_samples(
             proposal_proper_distribution=omega_importance_sampler_inputs.proposal_distribution,
@@ -1075,4 +1076,8 @@ class PosteriorGeneExpressionSampler(object):
         else:
             raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
 
-        return e_hi_posterior_samples_smn
+        return e_hi_posterior_samples_smn \
+            .permute(2, 1, 0) \
+            .contiguous() \
+            .view(n_cells, -1) \
+            .permute(1, 0)
