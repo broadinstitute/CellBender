@@ -20,7 +20,7 @@ class FamilySizeDistributionCodec(torch.nn.Module):
 
     @property
     @abstractmethod
-    def total_fsd_params(self):
+    def total_fsd_params(self) -> int:
         raise NotImplementedError
 
     @abstractmethod
