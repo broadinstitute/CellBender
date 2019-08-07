@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, List, Dict, Union, Any
+from typing import Tuple, List, Dict, Union, Any, Callable
 
 import pyro
 from pyro import poutine
@@ -921,6 +921,76 @@ class PosteriorGeneExpressionSampler(object):
                 'e_hi_std': np.concatenate(e_hi_std_shard_list),
                 'e_hi_mean': np.concatenate(e_hi_mean_shard_list)}
 
+    # TODO unit test
+    @staticmethod
+    def generate_zero_inflated_bootstrap_posterior_samples(
+            proposal_proper_distribution: torch.distributions.Distribution,
+            prior_proper_distribution: torch.distributions.Distribution,
+            log_likelihood_function: Callable[[torch.Tensor], torch.Tensor],
+            logit_prob_zero_prior_n: torch.Tensor,
+            batch_size: int,
+            n_proposals: int,
+            n_particles: int,
+            device: torch.device,
+            dtype: torch.dtype) -> torch.Tensor:
+        """Draws posterior samples from a zero-inflated prior distribution with a given likelihood function
+        via bootstrap re-sampling.
+
+        .. note:: we refer to the non-zero-inflated component of distributions as the *proper* part.
+        """
+        # draw proposals
+        proposal_points_mn = proposal_proper_distribution.sample((n_proposals,))
+
+        # calculate the log norm factor of the proper part of :math:`\omega` posterior
+        prior_proper_log_prob_mn = prior_proper_distribution.log_prob(proposal_points_mn)
+        proposal_proper_log_prob_mn = proposal_proper_distribution.log_prob(proposal_points_mn)
+        fingerprint_log_likelihood_mn = log_likelihood_function(proposal_points_mn)
+        log_proper_posterior_norm_n = torch.logsumexp(
+            prior_proper_log_prob_mn
+            + fingerprint_log_likelihood_mn
+            - proposal_proper_log_prob_mn, 0) - np.log(n_proposals)
+
+        # prior zero-inflation log prob
+        log_prob_zero_prior_n: torch.Tensor = torch.nn.functional.logsigmoid(logit_prob_zero_prior_n)
+        log_prob_nonzero_prior_n = get_log_prob_compl(log_prob_zero_prior_n)
+
+        # log likelihood at zero
+        log_likelihood_zero_n = log_likelihood_function(
+            torch.zeros((1, batch_size), device=device, dtype=dtype)).squeeze(0)
+
+        # log normalization factor of the posterior, including the contribution of zero-inflation
+        log_full_posterior_norm_n = logaddexp(
+            log_prob_zero_prior_n + log_likelihood_zero_n,
+            log_prob_nonzero_prior_n + log_proper_posterior_norm_n)
+
+        # zero-inflation posterior log probability
+        log_prob_zero_posterior_n = (
+                log_prob_zero_prior_n
+                + log_likelihood_zero_n
+                - log_full_posterior_norm_n)
+        logit_prob_nonzero_posterior_n = (
+                get_log_prob_compl(log_prob_zero_posterior_n)
+                - log_prob_zero_posterior_n)
+
+        # draw proper posterior samples via bootstrap re-sampling
+        log_posterior_proper_mn = (
+            prior_proper_log_prob_mn
+            + fingerprint_log_likelihood_mn
+            - proposal_proper_log_prob_mn
+            - log_proper_posterior_norm_n)
+        posterior_proper_bootstrap_sample_indices_mn = torch.distributions.Categorical(
+            logits=log_posterior_proper_mn.permute((1, 0))).sample((n_particles,))
+        posterior_proper_bootstrap_samples_mn = torch.gather(
+            proposal_points_mn,
+            dim=0,
+            index=posterior_proper_bootstrap_sample_indices_mn)
+
+        # draw zero-inflation Bernoulli mask
+        posterior_zero_inflation_mask_mn = torch.distributions.Bernoulli(
+            logits=logit_prob_nonzero_posterior_n).sample((n_particles,)).float()
+
+        return posterior_zero_inflation_mask_mn * posterior_proper_bootstrap_samples_mn
+
     def _generate_gene_expression_posterior_samples(
             self,
             gene_index: int,
@@ -953,59 +1023,16 @@ class PosteriorGeneExpressionSampler(object):
             run_mode=run_mode)
         batch_size = n_particles_cell * (i_cell_end - i_cell_begin)
 
-        # draw omega proposals
-        proposal_omega_mn = omega_importance_sampler_inputs.proposal_distribution.sample((n_proposals_omega,))
-
-        # calculate the log norm factor of the proper part of :math:`\omega` posterior
-        prior_omega_log_prob_mn = omega_importance_sampler_inputs.prior_distribution.log_prob(proposal_omega_mn)
-        proposal_omega_log_prob_mn = omega_importance_sampler_inputs.proposal_distribution.log_prob(proposal_omega_mn)
-        fingerprint_log_likelihood_mn = omega_importance_sampler_inputs.log_likelihood_function(proposal_omega_mn)
-        log_proper_omega_posterior_norm_n = torch.logsumexp(
-            prior_omega_log_prob_mn
-            + fingerprint_log_likelihood_mn
-            - proposal_omega_log_prob_mn, 0) - np.log(n_proposals_omega)
-
-        # prior zero-inflation log prob
-        logit_p_zero_e_hi_n: torch.Tensor = trained_model_context["logit_p_zero_e_hi_n"]
-        log_p_zero_e_hi_n: torch.Tensor = torch.nn.functional.logsigmoid(logit_p_zero_e_hi_n)
-        log_p_nonzero_e_hi_n = get_log_prob_compl(log_p_zero_e_hi_n)
-
-        # fingerprint log likelihood for :math:`\omega` = 0
-        log_fingerprint_likelihood_zero_n = omega_importance_sampler_inputs.log_likelihood_function(
-            torch.zeros((1, batch_size), device=self.device, dtype=self.dtype)).squeeze(0)
-
-        log_full_omega_posterior_norm_n = logaddexp(
-            log_p_zero_e_hi_n + log_fingerprint_likelihood_zero_n,
-            log_p_nonzero_e_hi_n + log_proper_omega_posterior_norm_n)
-
-        # posterior zero-inflation log prob
-        log_posterior_p_zero_e_hi_n = (
-                log_p_zero_e_hi_n
-                + log_fingerprint_likelihood_zero_n
-                - log_full_omega_posterior_norm_n)
-        logit_posterior_p_nonzero_e_hi_n = (
-                get_log_prob_compl(log_posterior_p_zero_e_hi_n)
-                - log_posterior_p_zero_e_hi_n)
-
-        # draw proper :math:`\omega` posterior particles via bootstrap re-sampling
-        log_posterior_omega_proper_mn = (
-            prior_omega_log_prob_mn
-            + fingerprint_log_likelihood_mn
-            - proposal_omega_log_prob_mn
-            - log_proper_omega_posterior_norm_n)
-        omega_proper_posterior_bootstrap_indices_mn = torch.distributions.Categorical(
-            logits=log_posterior_omega_proper_mn.permute((1, 0))).sample((n_particles_omega,))
-        omega_proper_posterior_bootstrap_mn = torch.gather(
-            proposal_omega_mn,
-            dim=0,
-            index=omega_proper_posterior_bootstrap_indices_mn)
-
-        # draw Bernoulli for posterior zero inflation of :math:`\omega` samples
-        omega_zero_inflation_mask_mn = torch.distributions.Bernoulli(
-            logits=logit_posterior_p_nonzero_e_hi_n).sample((n_particles_omega,))
-
-        # mask and finalize omega particles
-        omega_posterior_samples_mn = omega_zero_inflation_mask_mn.float() * omega_proper_posterior_bootstrap_mn
+        omega_posterior_samples_mn = self.generate_zero_inflated_bootstrap_posterior_samples(
+            proposal_proper_distribution=omega_importance_sampler_inputs.proposal_distribution,
+            prior_proper_distribution=omega_importance_sampler_inputs.prior_distribution,
+            log_likelihood_function=omega_importance_sampler_inputs.log_likelihood_function,
+            logit_prob_zero_prior_n=trained_model_context["logit_p_zero_e_hi_n"],
+            batch_size=batch_size,
+            n_proposals=n_proposals_omega,
+            n_particles=n_particles_omega,
+            device=self.device,
+            dtype=self.dtype)
 
         return omega_posterior_samples_mn
 
