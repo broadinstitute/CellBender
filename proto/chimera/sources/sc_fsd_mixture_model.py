@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, List, Dict, Union, Any, Callable
+from typing import Tuple, List, Dict, Union, Any, Callable, Generator
 
 import pyro
 from pyro import poutine
@@ -649,8 +649,7 @@ class PosteriorGeneExpressionSampler(object):
 
     def _generate_single_gene_minibatch_data(self,
                                              gene_index: int,
-                                             i_cell_begin: int,
-                                             i_cell_end: int,
+                                             cell_index_list: List[int],
                                              n_particles_cell: int) -> Dict[str, torch.Tensor]:
         """Generate model input tensors for a given gene index and the cell index range
 
@@ -660,7 +659,7 @@ class PosteriorGeneExpressionSampler(object):
             sites (because they are not necessary for our purposes here). As such, the minibatches
             produced by this method should not be used for training.
         """
-        cell_index_array = np.repeat(np.arange(i_cell_begin, i_cell_end, dtype=np.int), n_particles_cell)
+        cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell)
         gene_index_array = gene_index * np.ones_like(cell_index_array)
         cell_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
         gene_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
@@ -672,6 +671,24 @@ class PosteriorGeneExpressionSampler(object):
             gene_sampling_site_scale_factor_array,
             self.device,
             self.dtype)
+
+    def _sharded_cell_index_generator(self,
+                                      gene_index: int,
+                                      cell_shard_size: int,
+                                      only_expressing_cells: bool) -> Generator[List[int], None, None]:
+        sc_fingerprint_datastore = self.sc_family_size_model.sc_fingerprint_datastore
+        if only_expressing_cells:
+            included_cell_indices = sc_fingerprint_datastore.expressing_cells_dict[gene_index].tolist()
+        else:
+            included_cell_indices = np.arange(0, sc_fingerprint_datastore.n_cells)
+        n_included_cells = len(included_cell_indices)
+
+        for i_cell_shard in range(n_included_cells // cell_shard_size + 1):
+            i_included_cell_begin = min(i_cell_shard * cell_shard_size, n_included_cells)
+            i_included_cell_end = min((i_cell_shard + 1) * cell_shard_size, n_included_cells)
+            if i_included_cell_begin == i_included_cell_end:
+                break
+            yield included_cell_indices[i_included_cell_begin:i_included_cell_end]
 
     @torch.no_grad()
     def _get_trained_model_context(self, minibatch_data: Dict[str, torch.Tensor]) \
@@ -690,8 +707,7 @@ class PosteriorGeneExpressionSampler(object):
     def _generate_omega_importance_sampler_inputs(
             self,
             gene_index: int,
-            i_cell_begin: int,
-            i_cell_end: int,
+            cell_index_list: List[int],
             n_particles_cell: int,
             run_mode: str) -> Tuple[PosteriorImportanceSamplerInputs, Dict[str, Any], Dict[str, Any]]:
         """Generates the required inputs for ``PosteriorImportanceSampler`` to calculate the mean
@@ -722,15 +738,16 @@ class PosteriorGeneExpressionSampler(object):
             we only calculate how many of the observed molecules are real (as opposed to background/chimeric).
             In the ``full`` mode, we also include currently unobserved molecules; that is, we estimate
             how many real molecules we expect to observe in the limit of infinite sequencing depth.
-        :param i_cell_begin: begin cell index (inclusive)
-        :param i_cell_end: end cell index (exclusive)
+        :param cell_index_list: list of cell indices to analyse
         :param n_particles_cell: how many repeats per cell
         :return: a tuple that matches the *args signature of ``PosteriorImportanceSampler.__init__``, and
             the trained model context.
         """
         assert run_mode in {"only_observed", "full"}
         minibatch_data = self._generate_single_gene_minibatch_data(
-            gene_index, i_cell_begin, i_cell_end, n_particles_cell)
+            gene_index=gene_index,
+            cell_index_list=cell_index_list,
+            n_particles_cell=n_particles_cell)
         trained_model_context = self._get_trained_model_context(minibatch_data)
 
         # localize required auxiliary quantities from the trained model context
@@ -840,8 +857,7 @@ class PosteriorGeneExpressionSampler(object):
     def _estimate_log_gene_expression_with_fixed_n_particles(
             self,
             gene_index: int,
-            i_cell_begin: int,
-            i_cell_end: int,
+            cell_index_list: List[int],
             n_particles_omega: int,
             output_ess: bool,
             run_mode: str):
@@ -849,8 +865,7 @@ class PosteriorGeneExpressionSampler(object):
 
         :param run_mode: see ``_generate_omega_importance_sampler_inputs``
         :param gene_index: index of the gene in the datastore
-        :param i_cell_begin: begin cell index (inclusive)
-        :param i_cell_end: end cell index (exclusive)
+        :param cell_index_list: list of cell indices to analyse
         :param n_particles_omega: number of random proposals used for importance sampling
         :return: estimated first and second moments of gene expression; if output_ess == True, also the ESS of
             the two estimators, in order.
@@ -859,13 +874,12 @@ class PosteriorGeneExpressionSampler(object):
         # generate inputs for importance sampling with no zero inflation and the posterior model context
         omega_importance_sampler_inputs, trained_model_context, _ = self._generate_omega_importance_sampler_inputs(
             gene_index=gene_index,
-            i_cell_begin=i_cell_begin,
-            i_cell_end=i_cell_end,
+            cell_index_list=cell_index_list,
             n_particles_cell=1,
             run_mode=run_mode)
 
         # perform importance sampling assuming no zero inflation
-        batch_size = i_cell_end - i_cell_begin
+        batch_size = len(cell_index_list)
         sampler = PosteriorImportanceSampler(omega_importance_sampler_inputs)
         sampler.run(
             n_particles=n_particles_omega,
@@ -920,6 +934,7 @@ class PosteriorGeneExpressionSampler(object):
             n_particles_omega: int,
             n_particles_cell: int,
             cell_shard_size: int,
+            only_expressing_cells: bool,
             run_mode: str = 'full',
             mode_estimation_strategy: str = 'lower_bound') -> Dict[str, np.ndarray]:
         """Calculate posterior gene expression summary/
@@ -928,6 +943,7 @@ class PosteriorGeneExpressionSampler(object):
         :param n_particles_omega: number of random proposals used for importance sampling of :math:`\\omega^>`
         :param n_particles_cell: number of posterior samples from the guide
         :param cell_shard_size: how many cells to include in every batch
+        :param only_expressing_cells: only analyse expressing cells
         :param run_mode: see ``_generate_omega_importance_sampler_inputs``
         :param mode_estimation_strategy: choices include 'upper_bound' and 'lower_bound'
         :return: a dictionary of summary statistics
@@ -951,22 +967,18 @@ class PosteriorGeneExpressionSampler(object):
 
         e_hi_mean_shard_list = []
         e_hi_std_shard_list = []
-        e_hi_mode_shard_list = []
+        e_hi_map_shard_list = []
+        included_cell_indices = []
 
-        n_cells = self.sc_family_size_model.sc_fingerprint_datastore.n_cells
-        for cell_shard in range(n_cells // cell_shard_size + 1):
-            i_cell_begin = min(cell_shard * cell_shard_size, n_cells)
-            i_cell_end = min((cell_shard + 1) * cell_shard_size, n_cells)
-            if i_cell_begin == i_cell_end:
-                break
+        for cell_index_list in self._sharded_cell_index_generator(gene_index, cell_shard_size, only_expressing_cells):
+            included_cell_indices += cell_index_list
 
             log_e_hi_mom_1_n_list = []
             log_e_hi_mom_2_n_list = []
             for _ in range(n_particles_cell):
                 log_e_hi_mom_1_n, log_e_hi_mom_2_n = self._estimate_log_gene_expression_with_fixed_n_particles(
                     gene_index=gene_index,
-                    i_cell_begin=i_cell_begin,
-                    i_cell_end=i_cell_end,
+                    cell_index_list=cell_index_list,
                     n_particles_omega=n_particles_omega,
                     output_ess=False,
                     run_mode=run_mode)
@@ -977,15 +989,23 @@ class PosteriorGeneExpressionSampler(object):
 
             mean_e_hi_n = log_e_hi_mom_1_n.exp()
             std_e_hi_n = torch.clamp(log_e_hi_mom_2_n.exp() - mean_e_hi_n.pow(2), 0).sqrt()
-            mode_e_hi_n = __get_approximate_mode(mean_e_hi_n, std_e_hi_n)
+            map_e_hi_n = __get_approximate_mode(mean_e_hi_n, std_e_hi_n)
 
             e_hi_mean_shard_list.append(__fix_scalar(mean_e_hi_n.cpu().numpy()))
             e_hi_std_shard_list.append(__fix_scalar(std_e_hi_n.cpu().numpy()))
-            e_hi_mode_shard_list.append(__fix_scalar(mode_e_hi_n.cpu().numpy()))
+            e_hi_map_shard_list.append(__fix_scalar(map_e_hi_n.int().cpu().numpy()))
 
-        return {'e_hi_map': np.concatenate(e_hi_mode_shard_list),
-                'e_hi_std': np.concatenate(e_hi_std_shard_list),
-                'e_hi_mean': np.concatenate(e_hi_mean_shard_list)}
+        e_hi_mean = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
+        e_hi_std = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
+        e_hi_map = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.int)
+
+        e_hi_mean[included_cell_indices] = np.concatenate(e_hi_mean_shard_list)
+        e_hi_std[included_cell_indices] = np.concatenate(e_hi_std_shard_list)
+        e_hi_map[included_cell_indices] = np.concatenate(e_hi_map_shard_list)
+
+        return {'e_hi_map': e_hi_map,
+                'e_hi_std': e_hi_std,
+                'e_hi_mean': e_hi_mean}
 
     # TODO unit test
     @staticmethod
@@ -1060,8 +1080,7 @@ class PosteriorGeneExpressionSampler(object):
     def _generate_gene_expression_posterior_samples(
             self,
             gene_index: int,
-            i_cell_begin: int,
-            i_cell_end: int,
+            cell_index_list: List[int],
             n_proposals_omega: int,
             n_particles_omega: int,
             n_particles_cell: int,
@@ -1072,8 +1091,7 @@ class PosteriorGeneExpressionSampler(object):
         .. note:: "proper" means non-zero-inflated part throughput.
 
         :param gene_index:
-        :param i_cell_begin:
-        :param i_cell_end:
+        :param cell_index_list:
         :param n_proposals_omega:
         :param n_particles_omega:
         :param n_particles_cell:
@@ -1087,11 +1105,10 @@ class PosteriorGeneExpressionSampler(object):
          trained_model_context,
          minibatch_data) = self._generate_omega_importance_sampler_inputs(
             gene_index=gene_index,
-            i_cell_begin=i_cell_begin,
-            i_cell_end=i_cell_end,
+            cell_index_list=cell_index_list,
             n_particles_cell=n_particles_cell,
             run_mode=run_mode)
-        n_cells = i_cell_end - i_cell_begin
+        n_cells = len(cell_index_list)
         batch_size = n_particles_cell * n_cells
 
         omega_posterior_samples_mn = self.generate_zero_inflated_bootstrap_posterior_samples(
@@ -1157,7 +1174,8 @@ class PosteriorGeneExpressionSampler(object):
             n_particles_cell: int,
             n_particles_expression: int,
             cell_shard_size: int,
-            run_mode: str) -> Dict[str, np.ndarray]:
+            run_mode: str,
+            only_expressing_cells: bool) -> Dict[str, np.ndarray]:
         """
 
         :param gene_index:
@@ -1167,6 +1185,7 @@ class PosteriorGeneExpressionSampler(object):
         :param n_particles_expression:
         :param cell_shard_size:
         :param run_mode:
+        :param only_expressing_cells:
         :return:
         """
 
@@ -1177,19 +1196,15 @@ class PosteriorGeneExpressionSampler(object):
 
         e_hi_mean_shard_list = []
         e_hi_std_shard_list = []
-        e_hi_mode_shard_list = []
+        e_hi_map_shard_list = []
+        included_cell_indices = []
 
-        n_cells = self.sc_family_size_model.sc_fingerprint_datastore.n_cells
-        for cell_shard in range(n_cells // cell_shard_size + 1):
-            i_cell_begin = min(cell_shard * cell_shard_size, n_cells)
-            i_cell_end = min((cell_shard + 1) * cell_shard_size, n_cells)
-            if i_cell_begin == i_cell_end:
-                break
+        for cell_index_list in self._sharded_cell_index_generator(gene_index, cell_shard_size, only_expressing_cells):
+            included_cell_indices += cell_index_list
 
             e_hi_posterior_samples_sn = self._generate_gene_expression_posterior_samples(
                 gene_index=gene_index,
-                i_cell_begin=i_cell_begin,
-                i_cell_end=i_cell_end,
+                cell_index_list=cell_index_list,
                 n_proposals_omega=n_proposals_omega,
                 n_particles_omega=n_particles_omega,
                 n_particles_cell=n_particles_cell,
@@ -1200,9 +1215,17 @@ class PosteriorGeneExpressionSampler(object):
                 torch.mean(e_hi_posterior_samples_sn.float(), dim=0).cpu().numpy()))
             e_hi_std_shard_list.append(__fix_scalar(
                 torch.std(e_hi_posterior_samples_sn.float(), dim=0).cpu().numpy()))
-            e_hi_mode_shard_list.append(__fix_scalar(
-                int_ndarray_mode(e_hi_posterior_samples_sn.cpu().numpy(), axis=0)))
+            e_hi_map_shard_list.append(__fix_scalar(
+                int_ndarray_mode(e_hi_posterior_samples_sn.int().cpu().numpy(), axis=0)))
 
-        return {'e_hi_map': np.concatenate(e_hi_mode_shard_list),
-                'e_hi_std': np.concatenate(e_hi_std_shard_list),
-                'e_hi_mean': np.concatenate(e_hi_mean_shard_list)}
+        e_hi_mean = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
+        e_hi_std = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
+        e_hi_map = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.int)
+
+        e_hi_mean[included_cell_indices] = np.concatenate(e_hi_mean_shard_list)
+        e_hi_std[included_cell_indices] = np.concatenate(e_hi_std_shard_list)
+        e_hi_map[included_cell_indices] = np.concatenate(e_hi_map_shard_list)
+
+        return {'e_hi_map': e_hi_map,
+                'e_hi_std': e_hi_std,
+                'e_hi_mean': e_hi_mean}
