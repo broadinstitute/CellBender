@@ -1,32 +1,38 @@
 import numpy as np
 import scipy.sparse as sp
-import itertools
 import operator
 import pickle
 import logging
-from typing import Tuple, List, Union, Any, Dict
+from typing import Tuple, List, Union, Dict, Callable
 import torch
 from tqdm import tqdm
 from stats import ApproximateZINBFit
 
 
 class SingleCellFingerprint:
+    EPS = np.finfo(np.float).eps
+
     def __init__(self,
                  gene_idx_list: List[int],
                  max_family_size: int,
-                 barcode_list: List[int] = [],
-                 csr_fingerprint_list: List[sp.csr_matrix] = []):
+                 barcode_list: Union[None, List[int]] = None,
+                 csr_fingerprint_list: Union[None, List[sp.csr_matrix]] = None):
         assert len(gene_idx_list) > 0, \
             "The fingerprint must have at least one gene!"
+        if barcode_list is None:
+            barcode_list = list()
+        if csr_fingerprint_list is None:
+            csr_fingerprint_list = list()
         assert len(barcode_list) == len(csr_fingerprint_list), \
-            "The fingerprint list must have as many elements as the cell barcodes list!"
+            "The fingerprint list must have as many elements as the cell barcode list!"
+
         self.gene_idx_list = gene_idx_list
         self.max_family_size = max_family_size
         self.csr_fingerprint_dict: Dict[int, sp.csr_matrix] = dict()
         self.barcode_list: List[int] = list()
         self._logger = logging.getLogger()
         
-        # populate if data given
+        # populate
         for barcode, csr_fingerprint_list in zip(barcode_list, csr_fingerprint_list):
             self.add(barcode, csr_fingerprint_list)
 
@@ -41,10 +47,10 @@ class SingleCellFingerprint:
             f"family size + 1 ({self.max_family_size + 1})!"
         self.csr_fingerprint_dict[barcode] = csr_fingerprint
         self.barcode_list.append(barcode)
-        
-    def get(self, barcode: int):
+
+    def __getitem__(self, barcode: int) -> sp.csr_matrix:
         return self.csr_fingerprint_dict[barcode]
-    
+
     def save(self, output_path: str):
         with open(output_path, 'wb') as f:
             pickle.dump(self.gene_idx_list, f)
@@ -78,7 +84,7 @@ class SingleCellFingerprint:
         for csr_fingerprint in self.csr_fingerprint_dict.values():
             orphan_reads += np.asarray(csr_fingerprint[:, 1].todense()).flatten()
             all_reads += csr_fingerprint.dot(read_counter)
-        good_turing_estimator = orphan_reads / (1e-12 + all_reads)
+        good_turing_estimator = orphan_reads / (SingleCellFingerprint.EPS + all_reads)
         good_turing_estimator[all_reads == 0] = np.nan
         return good_turing_estimator
     
@@ -104,34 +110,37 @@ class SingleCellFingerprint:
         for i_gene in range(self.num_genes):
             c_gene_good_turing_estimator = good_turing_estimator_array[i_gene]
             c_gene_total_expression = total_gene_expression_array[i_gene]            
-            failed_min_expresison = False
+            failed_min_expression = False
             failed_good_turing = False
             failed = False
             
             if c_gene_total_expression < min_total_gene_expression:
                 if verbose_logging:
-                    self._logger.warning(f"Total expression ({int(c_gene_total_expression)}) of gene "
-                                         f"({self.gene_idx_list[i_gene]}) is below the minimum allowed threshold "\
-                                         f"({min_total_gene_expression}) -- the gene was dropped from the fingerprint.")
-                failed_min_expresison = True
+                    self._logger.warning(
+                        f"Total expression ({int(c_gene_total_expression)}) of gene "
+                        f"({self.gene_idx_list[i_gene]}) is below the minimum allowed threshold "
+                        f"({min_total_gene_expression}) -- the gene was dropped from the fingerprint.")
+                failed_min_expression = True
                 failed = True
 
             if np.isnan(c_gene_good_turing_estimator) or c_gene_good_turing_estimator > max_good_turing:
                 if verbose_logging:
                     if np.isnan(c_gene_good_turing_estimator):
-                        self._logger.warning(f"Good-Turing estimator is not defined for gene "\
-                                             f"({self.gene_idx_list[i_gene]}) "\
-                                             f"-- the gene was dropped from the fingerprint.")
+                        self._logger.warning(
+                            f"Good-Turing estimator is not defined for gene "
+                            f"({self.gene_idx_list[i_gene]}) "
+                            f"-- the gene was dropped from the fingerprint.")
                     else:
-                        self._logger.warning(f"Good-Turing estimator ({c_gene_good_turing_estimator:.3f}) for "\
-                                             f"gene ({self.gene_idx_list[i_gene]}) is below the maximum allowed threshold "\
-                                             f"({max_good_turing}) -- the gene was dropped from the fingerprint.")
+                        self._logger.warning(
+                            f"Good-Turing estimator ({c_gene_good_turing_estimator:.3f}) for "
+                            f"gene ({self.gene_idx_list[i_gene]}) is below the maximum allowed threshold "
+                            f"({max_good_turing}) -- the gene was dropped from the fingerprint.")
                 failed_good_turing = True
                 failed = True
                 
             num_failed_good_turing += failed_good_turing
-            num_failed_min_expression += failed_min_expresison
-            num_failed_both += (failed_min_expresison and failed_good_turing)
+            num_failed_min_expression += failed_min_expression
+            num_failed_both += (failed_min_expression and failed_good_turing)
             
             if not failed:
                 kept_gene_array_idx_list.append(i_gene)
@@ -155,7 +164,6 @@ def random_choice(a, size):
 
 
 class SingleCellFingerprintDataStore:
-    
     # minimum over-dispersion of an estimated negative binomial fit
     MIN_NB_PHI = 1e-2
     
@@ -164,9 +172,11 @@ class SingleCellFingerprintDataStore:
                  top_k_genes: Union[None, int, Tuple[int, int]] = None,
                  gene_idx_list: Union[None, List[int]] = None,
                  max_estimated_chimera_family_size: int = 1,
-                 zinb_fitter_kwargs = dict(),
-                 gene_grouping_trans = np.log,
-                 n_gene_groups = 10):
+                 zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
+                 gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
+                 n_gene_groups: int = 10):
+        if zinb_fitter_kwargs is None:
+            zinb_fitter_kwargs = dict()
         self.sc_fingerprint = sc_fingerprint
         self.max_estimated_chimera_family_size = max_estimated_chimera_family_size
         self.gene_grouping_trans = gene_grouping_trans
@@ -180,9 +190,9 @@ class SingleCellFingerprintDataStore:
         # total observed expression of all genes
         total_e_obs_g = np.zeros((sc_fingerprint.num_genes,), dtype=np.uint64)
         for barcode in sc_fingerprint.barcode_list:
-            total_e_obs_g += np.asarray(np.sum(sc_fingerprint.get(barcode), -1)).flatten()
+            total_e_obs_g += np.asarray(np.sum(sc_fingerprint[barcode], -1)).flatten()
         if np.any(total_e_obs_g == 0):
-            self._logger.warning('Some genes in the provided fingerprint have zero expression in the experiment!')
+            self._logger.warning('Some genes in the provided fingerprint have zero expression!')
         
         # select highly expressed genes (if required)
         if top_k_genes is None and gene_idx_list is None:
@@ -196,10 +206,12 @@ class SingleCellFingerprintDataStore:
             sorted_gene_indices = np.asarray(
                 list(map(operator.itemgetter(0),
                          sorted(enumerate(total_e_obs_g), key=operator.itemgetter(1), reverse=True))))
-            try:
+            if isinstance(top_k_genes, tuple):
                 self.gene_idx_list_in_fingerprint = sorted_gene_indices[top_k_genes[0]:top_k_genes[1]]
-            except:
+            elif isinstance(top_k_genes, int):
                 self.gene_idx_list_in_fingerprint = sorted_gene_indices[:top_k_genes]
+            else:
+                raise ValueError("Bad value for `top_k_genes`")
         else:
             raise ValueError("Cannot specify both 'gene_idx_list' and 'top_k_genes'!")
 
@@ -208,7 +220,7 @@ class SingleCellFingerprintDataStore:
             internal_gene_index: sc_fingerprint.gene_idx_list[gene_index_in_fingerprint]
             for internal_gene_index, gene_index_in_fingerprint in enumerate(self.gene_idx_list_in_fingerprint)}
         
-        # ZINB fitters
+        # ZINB fitter
         self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
         
         # caches
@@ -232,7 +244,7 @@ class SingleCellFingerprintDataStore:
         if self._fingerprint_array is None:
             self._fingerprint_array = np.zeros((self.n_cells, self.n_genes, self.max_family_size), dtype=np.uint16)
             for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-                self._fingerprint_array[i_cell, :, :] = self.sc_fingerprint.get(barcode)[
+                self._fingerprint_array[i_cell, :, :] = self.sc_fingerprint[barcode][
                     self.gene_idx_list_in_fingerprint, 1:].todense()
                 
         return self._fingerprint_array
@@ -282,7 +294,7 @@ class SingleCellFingerprintDataStore:
             self._total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
             family_size_vector = np.arange(0, self.max_family_size + 1)
             for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-                self._total_obs_reads_per_cell[i_cell] = np.sum(self.sc_fingerprint.get(barcode).dot(family_size_vector))               
+                self._total_obs_reads_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode].dot(family_size_vector))
         return self._total_obs_reads_per_cell
 
     @property
@@ -290,7 +302,7 @@ class SingleCellFingerprintDataStore:
         if self._total_obs_molecules_per_cell is None:
             self._total_obs_molecules_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
             for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-                self._total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint.get(barcode))               
+                self._total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode])
         return self._total_obs_molecules_per_cell
     
     @property
@@ -308,7 +320,8 @@ class SingleCellFingerprintDataStore:
     @property
     def gene_groups_dict(self) -> Dict[int, np.ndarray]:
         if self._gene_groups_dict is None:
-            # the "weight" of each gene is a monotonic (approximately logarthimic) function of its total observed expression
+            # the "weight" of each gene is a monotonic (approximately logarthimic) function of its
+            # total observed expression
             weights = self.gene_grouping_trans(self.total_obs_expr_per_gene)
 
             # bucket genes into groups of equal total weight
@@ -328,7 +341,7 @@ class SingleCellFingerprintDataStore:
                 gene_group_stop_index = gene_group_stop_indices[i_group]
                 self._gene_groups_dict[i_group] = np.asarray(list(
                     map(operator.itemgetter(0),
-                    sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index])))
+                        sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index])))
         return self._gene_groups_dict        
     
     @property
@@ -428,7 +441,8 @@ class SingleCellFingerprintDataStore:
             for gene_index in gene_indices:
                 # sample from expressing cells
                 size_expressing = min(mb_expressing_cells_per_gene, self.num_expressing_cells[gene_index])
-                expressing_cell_indices = random_choice(self.expressing_cells_dict[gene_index], size_expressing).tolist()
+                expressing_cell_indices = random_choice(
+                    self.expressing_cells_dict[gene_index], size_expressing).tolist()
                 expressing_scale_factor = gene_scale_factor * self.num_expressing_cells[gene_index] / size_expressing
 
                 # sample from silent cells
@@ -444,7 +458,8 @@ class SingleCellFingerprintDataStore:
                 # the effective scale factor for a collapsed gene sampling site is scaled down by the number of cells
                 total_cells_per_gene = size_expressing + size_silent
                 effective_gene_scale_factor = gene_scale_factor / total_cells_per_gene
-                mb_effective_gene_scale_factors_per_cell.append(effective_gene_scale_factor * np.ones((total_cells_per_gene,)))
+                mb_effective_gene_scale_factors_per_cell.append(
+                    effective_gene_scale_factor * np.ones((total_cells_per_gene,)))
                 mb_gene_indices_per_cell.append(gene_index * np.ones((total_cells_per_gene,), dtype=np.int))
 
         gene_index_array = np.concatenate(mb_gene_indices_per_cell)
