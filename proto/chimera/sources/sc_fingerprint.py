@@ -94,7 +94,7 @@ class SingleCellFingerprint:
             gene_idx_list = loader.load()
             csr_fingerprint_dict = loader.load()
         
-        max_family_size = csr_fingerprint_dict.items().__iter__().__next__()[1].shape[1] - 1
+        max_family_size = csr_fingerprint_dict.items().__iter__().__next__()[1].shape[1]
         new = SingleCellFingerprint(gene_idx_list, max_family_size)
         for barcode, csr_fingerprint in csr_fingerprint_dict.items():
             new._add_new_barcode(barcode, csr_fingerprint)
