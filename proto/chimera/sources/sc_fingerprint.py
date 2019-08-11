@@ -67,7 +67,7 @@ class SingleCellFingerprint:
             "one of the cached properties."
         assert barcode not in self.csr_fingerprint_dict, \
             f"Cell barcode {barcode} already has a fingerprint!"
-        assert csr_fingerprint.shape[0] == len(self.gene_idx_list), \
+        assert csr_fingerprint.shape[0] == self.n_genes, \
             f"The fingerprint matrix must has as many rows ({csr_fingerprint.shape[0]}) as the number "\
             f"of genes ({len(self.gene_idx_list)})!"
         assert csr_fingerprint.shape[1] == self.max_family_size, \
@@ -123,7 +123,7 @@ class SingleCellFingerprint:
     def good_turing_estimator_g(self) -> np.ndarray:
         """Returns the Good-Turing estimator per gene.
 
-        .. note:: yields NaN if a gene has no counts.
+        .. note:: yields NaN if a gene has no counts across all barcodes.
         """
         self._finalize()
         orphan_reads = np.zeros((self.n_genes,), dtype=np.float)
@@ -208,7 +208,59 @@ class SingleCellFingerprint:
         new = SingleCellFingerprint(kept_gene_idx_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
             new.__add_new_barcode(barcode, csr_fingerprint[kept_gene_array_idx_list, :])
-        return new    
+        return new
+
+    def subset_genes(self, subset_gene_idx_list: List[int]) -> 'SingleCellFingerprint':
+        """Returns a new instance of the collection with subset gene indices.
+
+        .. note:: the order of genes in the new collection is the same as the provided sublist of genes.
+        """
+        full_gene_idx_set = set(self.gene_idx_list)
+        assert all(subset_gene_idx in full_gene_idx_set for subset_gene_idx in subset_gene_idx_list), \
+            "Some of the gene indices in ``subset_gene_idx_list`` do not exist in the instance!"
+        assert len(set(subset_gene_idx_list)) == len(subset_gene_idx_list), \
+            "The subset gene index list contains repeated entries"
+        gene_idx_to_old_list_index_map = {
+            gene_index: old_list_index for old_list_index, gene_index in enumerate(self.gene_idx_list)}
+        keep_index = list(map(gene_idx_to_old_list_index_map.get, subset_gene_idx_list))
+        new = SingleCellFingerprint(subset_gene_idx_list, self.max_family_size)
+        for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
+            new.__add_new_barcode(barcode, csr_fingerprint[keep_index, :])
+        return new
+
+    def subset_barcodes(self, subset_barcode_list: List[int]) -> 'SingleCellFingerprint':
+        """Returns a new instance of the collection with subset barcodes.
+
+        .. note:: the order of barcodes in the new collection is the same as the provided sublist of barcodes.
+        """
+        full_barcode_set = set(self.barcode_list)
+        assert all(subset_barcode in full_barcode_set for subset_barcode in subset_barcode_list), \
+            "Some of the barcodes in ``subset_barcode_list`` do not exist in the instance!"
+        assert len(set(subset_barcode_list)) == len(subset_barcode_list), \
+            "The subset barcode list contains repeated entries!"
+        new = SingleCellFingerprint(self.gene_idx_list, self.max_family_size)
+        for barcode in subset_barcode_list:
+            new.__add_new_barcode(barcode, self[barcode])
+        return new
+
+    def keep_top_k_genes_by_expression(self, first_rank: int, last_rank: int):
+        """Returns a new instance where only genes within a certain rank-range in expression are kept"""
+        assert first_rank >= 0
+        assert last_rank > first_rank
+        assert last_rank <= self.n_genes
+        sorted_gene_idx_list_by_expression = list(map(
+            operator.itemgetter(0),
+            sorted(
+                zip(self.gene_idx_list, self.total_molecules_per_gene_g),
+                key=operator.itemgetter(1),
+                reverse=True)))
+        return self.subset_genes(sorted_gene_idx_list_by_expression[first_rank:last_rank])
+
+    def sort_genes_by_expression(self) -> 'SingleCellFingerprint':
+        """Returns a new instance with genes sorted by their expression in descending order"""
+        return self.keep_top_k_genes_by_expression(
+            first_rank=0,
+            last_rank=self.n_genes)
 
 
 def random_choice(a, size):
@@ -217,13 +269,13 @@ def random_choice(a, size):
 
 
 class SingleCellFingerprintDataStore:
+    EPS = np.finfo(np.float).eps
+
     # minimum over-dispersion of an estimated negative binomial fit
     MIN_NB_PHI = 1e-2
     
     def __init__(self,
                  sc_fingerprint: SingleCellFingerprint,
-                 top_k_genes: Union[None, int, Tuple[int, int]] = None,
-                 gene_idx_list: Union[None, List[int]] = None,
                  max_estimated_chimera_family_size: int = 1,
                  zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
@@ -236,241 +288,176 @@ class SingleCellFingerprintDataStore:
         self.n_gene_groups = n_gene_groups
 
         self.n_cells = sc_fingerprint.n_cells
+        self.n_genes = sc_fingerprint.n_genes
         self.max_family_size = sc_fingerprint.max_family_size
 
         self._logger = logging.getLogger()
         
         # total observed expression of all genes
-        total_e_obs_g = np.zeros((sc_fingerprint.n_genes,), dtype=np.uint64)
-        for barcode in sc_fingerprint.barcode_list:
-            total_e_obs_g += np.asarray(np.sum(sc_fingerprint[barcode], -1)).flatten()
-        if np.any(total_e_obs_g == 0):
-            self._logger.warning('Some genes in the provided fingerprint have zero expression!')
-        
-        # select highly expressed genes (if required)
-        if top_k_genes is None and gene_idx_list is None:
-            self.gene_idx_list_in_fingerprint = np.where(total_e_obs_g > 0)[0]
-        elif top_k_genes is None and gene_idx_list is not None:
-            fingerprint_gene_idx_map = {
-                gene_index: order for order, gene_index in enumerate(sc_fingerprint.gene_idx_list)}
-            self.gene_idx_list_in_fingerprint = [
-                fingerprint_gene_idx_map[gene_idx] for gene_idx in gene_idx_list]
-        elif top_k_genes is not None and gene_idx_list is None:
-            sorted_gene_indices = np.asarray(
-                list(map(operator.itemgetter(0),
-                         sorted(enumerate(total_e_obs_g), key=operator.itemgetter(1), reverse=True))))
-            if isinstance(top_k_genes, tuple):
-                self.gene_idx_list_in_fingerprint = sorted_gene_indices[top_k_genes[0]:top_k_genes[1]]
-            elif isinstance(top_k_genes, int):
-                self.gene_idx_list_in_fingerprint = sorted_gene_indices[:top_k_genes]
-            else:
-                raise ValueError("Bad value for `top_k_genes`")
-        else:
-            raise ValueError("Cannot specify both 'gene_idx_list' and 'top_k_genes'!")
+        if np.any(sc_fingerprint.total_molecules_per_gene_g == 0):
+            self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "\
+                                 "entire dataset!")
 
-        self.n_genes = len(self.gene_idx_list_in_fingerprint)
-        self.internal_gene_index_to_original_gene_index_map = {
-            internal_gene_index: sc_fingerprint.gene_idx_list[gene_index_in_fingerprint]
-            for internal_gene_index, gene_index_in_fingerprint in enumerate(self.gene_idx_list_in_fingerprint)}
-        
         # ZINB fitter
         self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
-        
-        # caches
-        self._fingerprint_array = None
-        self._obs_expr_matrix = None
-        self._expressing_cells_dict = None
-        self._silent_cells_dict = None
-        self._num_expressing_cells = None
-        self._num_silent_cells = None
-        self._empirical_fsd_params = None
-        self._empirical_e_hi_params = None
-        self._total_obs_reads_per_cell = None
-        self._total_obs_molecules_per_cell = None
-        self._mean_obs_expr_per_gene = None
-        self._total_obs_expr_per_gene = None
-        self._gene_groups_dict = None
-    
-    # TODO: replace this with pydata.sparse
-    @property
-    def fingerprint_array(self) -> np.ndarray:
-        if self._fingerprint_array is None:
-            self._fingerprint_array = np.zeros((self.n_cells, self.n_genes, self.max_family_size), dtype=np.uint16)
-            for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-                self._fingerprint_array[i_cell, :, :] = self.sc_fingerprint[barcode][
-                    self.gene_idx_list_in_fingerprint, :].todense()
-        return self._fingerprint_array
-    
-    # TODO: replace this with pydata.sparse
-    @property
-    def obs_expr_matrix(self) -> np.ndarray:
-        if self._obs_expr_matrix is None:
-            self._obs_expr_matrix = np.zeros((self.n_cells, self.n_genes), dtype=np.uint32)
-            self._obs_expr_matrix[:, :] = np.sum(self.fingerprint_array, -1)
-        return self._obs_expr_matrix
-    
-    @property
+
+    @cachedproperty
+    def dense_fingerprint_ndarray(self) -> np.ndarray:
+        fingerprint_array = np.zeros((self.n_cells, self.n_genes, self.max_family_size), dtype=np.uint16)
+        for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
+            fingerprint_array[i_cell, :, :] = self.sc_fingerprint[barcode].todense()
+        return fingerprint_array
+
+    @cachedproperty
+    def dense_count_matrix(self) -> np.ndarray:
+        return np.sum(self.dense_fingerprint_ndarray, -1)
+
+    @cachedproperty
     def expressing_cells_dict(self) -> Dict[int, np.ndarray]:
-        if self._expressing_cells_dict is None:
-            self._expressing_cells_dict = dict()
-            for i_gene in range(self.n_genes):
-                self._expressing_cells_dict[i_gene] = np.where(self.obs_expr_matrix[:, i_gene] > 0)[0]
-        return self._expressing_cells_dict
-    
-    @property
+        expressing_cells_dict = dict()
+        for i_gene in range(self.n_genes):
+            expressing_cells_dict[i_gene] = np.where(self.dense_count_matrix[:, i_gene] > 0)[0]
+        return expressing_cells_dict
+
+    @cachedproperty
     def silent_cells_dict(self) -> Dict[int, np.ndarray]:
-        if self._silent_cells_dict is None:
-            self._silent_cells_dict = dict()
-            for i_gene in range(self.n_genes):
-                self._silent_cells_dict[i_gene] = np.where(self.obs_expr_matrix[:, i_gene] == 0)[0]
-        return self._silent_cells_dict
+        silent_cells_dict = dict()
+        for i_gene in range(self.n_genes):
+            silent_cells_dict[i_gene] = np.where(self.dense_count_matrix[:, i_gene] == 0)[0]
+        return silent_cells_dict
 
-    @property
+    @cachedproperty
     def num_expressing_cells(self) -> List[int]:
-        if self._num_expressing_cells is None:
-            self._num_expressing_cells = []
-            for i_gene in range(self.n_genes):
-                self._num_expressing_cells.append(len(self.expressing_cells_dict[i_gene]))
-        return self._num_expressing_cells
+        num_expressing_cells = [len(self.expressing_cells_dict[i_gene])
+                                for i_gene in range(self.n_genes)]
+        return num_expressing_cells
     
-    @property
+    @cachedproperty
     def num_silent_cells(self) -> List[int]:
-        if self._num_silent_cells is None:
-            self._num_silent_cells = [
-                self.n_cells - self.num_expressing_cells[i_gene] for i_gene in range(self.n_genes)]
-        return self._num_silent_cells
+        num_silent_cells = [self.n_cells - len(self.expressing_cells_dict[i_gene])
+                            for i_gene in range(self.n_genes)]
+        return num_silent_cells
         
-    @property
+    @cachedproperty
     def total_obs_reads_per_cell(self) -> np.ndarray:
-        if self._total_obs_reads_per_cell is None:
-            self._total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
-            family_size_vector = np.arange(0, self.max_family_size + 1)
-            for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-                self._total_obs_reads_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode].dot(family_size_vector))
-        return self._total_obs_reads_per_cell
+        total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
+        family_size_vector = np.arange(1, self.max_family_size + 1)
+        for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
+            total_obs_reads_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode].dot(family_size_vector))
+        return total_obs_reads_per_cell
 
-    @property
+    @cachedproperty
     def total_obs_molecules_per_cell(self) -> np.ndarray:
-        if self._total_obs_molecules_per_cell is None:
-            self._total_obs_molecules_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
-            for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-                self._total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode])
-        return self._total_obs_molecules_per_cell
+        total_obs_molecules_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
+        for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
+            total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode])
+        return total_obs_molecules_per_cell
     
-    @property
+    @cachedproperty
     def total_obs_expr_per_gene(self) -> np.ndarray:
-        if self._total_obs_expr_per_gene is None:
-            self._total_obs_expr_per_gene = np.sum(self.obs_expr_matrix, axis=0)
-        return self._total_obs_expr_per_gene
+        return np.sum(self.dense_count_matrix, axis=0)
 
-    @property
+    @cachedproperty
     def mean_obs_expr_per_gene(self) -> np.ndarray:
-        if self._mean_obs_expr_per_gene is None:
-            self._mean_obs_expr_per_gene = self.total_obs_expr_per_gene.astype(np.float) / self.n_cells
-        return self._mean_obs_expr_per_gene
-    
-    @property
+        return self.total_obs_expr_per_gene.astype(np.float) / self.n_cells
+
+    @cachedproperty
     def gene_groups_dict(self) -> Dict[int, np.ndarray]:
-        if self._gene_groups_dict is None:
-            # the "weight" of each gene is a monotonic (approximately logarthimic) function of its
-            # total observed expression
-            weights = self.gene_grouping_trans(self.total_obs_expr_per_gene)
+        # the "weight" of each gene is a monotonic (approximately logarthimic) function of its
+        # total observed expression
+        weights = self.gene_grouping_trans(self.total_obs_expr_per_gene)
 
-            # bucket genes into groups of equal total weight
-            sorted_genes_idx_weight = sorted(enumerate(weights), key=operator.itemgetter(1), reverse=True)
-            sorted_weights = np.asarray(list(map(operator.itemgetter(1), sorted_genes_idx_weight)))
-            weight_per_group = np.sum(weights) / self.n_gene_groups
-            sorted_weights_cumsum = np.cumsum(sorted_weights)
-            gene_group_start_indices = [
-                min(np.where(sorted_weights_cumsum > i_group * weight_per_group)[0][0], self.n_genes)
-                for i_group in range(self.n_gene_groups)]
-            gene_group_stop_indices = [gene_group_start_indices[j + 1] for j in range(self.n_gene_groups - 1)]
-            gene_group_stop_indices.append(self.n_genes)
+        # bucket genes into groups of equal total weight
+        sorted_genes_idx_weight = sorted(enumerate(weights), key=operator.itemgetter(1), reverse=True)
+        sorted_weights = np.asarray(list(map(operator.itemgetter(1), sorted_genes_idx_weight)))
+        weight_per_group = np.sum(weights) / self.n_gene_groups
+        sorted_weights_cumsum = np.cumsum(sorted_weights)
+        gene_group_start_indices = [
+            min(np.where(sorted_weights_cumsum > i_group * weight_per_group)[0][0], self.n_genes)
+            for i_group in range(self.n_gene_groups)]
+        gene_group_stop_indices = [gene_group_start_indices[j + 1] for j in range(self.n_gene_groups - 1)]
+        gene_group_stop_indices.append(self.n_genes)
 
-            self._gene_groups_dict = dict()
-            for i_group in range(self.n_gene_groups):
-                gene_group_start_index = gene_group_start_indices[i_group]
-                gene_group_stop_index = gene_group_stop_indices[i_group]
-                self._gene_groups_dict[i_group] = np.asarray(list(
-                    map(operator.itemgetter(0),
-                        sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index])))
-        return self._gene_groups_dict        
+        gene_groups_dict = dict()
+        for i_group in range(self.n_gene_groups):
+            gene_group_start_index = gene_group_start_indices[i_group]
+            gene_group_stop_index = gene_group_stop_indices[i_group]
+            gene_groups_dict[i_group] = np.asarray(list(
+                map(operator.itemgetter(0),
+                    sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index])))
+        return gene_groups_dict
     
-    @property
+    @cachedproperty
     def empirical_fsd_params(self) -> np.ndarray:
-        if self._empirical_fsd_params is None:
-            self._empirical_fsd_params = np.zeros((self.n_genes, 3))
-            for gene_index in range(self.n_genes):
-                gene_fs_hist = np.sum(self.fingerprint_array[:, gene_index, :], 0)
+        empirical_fsd_params = np.zeros((self.n_genes, 3))
+        for gene_index in range(self.n_genes):
+            gene_fs_hist = np.sum(self.dense_fingerprint_ndarray[:, gene_index, :], 0)
+
+            # "cap" the empirical histogram as a heuristic for attenuating chimeric counts
+            if self.max_estimated_chimera_family_size >= 1:
+                gene_fs_hist[:self.max_estimated_chimera_family_size] = gene_fs_hist[
+                    self.max_estimated_chimera_family_size]
+
+            family_size_array = np.arange(1, self.max_family_size + 1)
+            family_size_pmf = gene_fs_hist / np.sum(gene_fs_hist)
+            family_size_mean = np.sum(family_size_array * family_size_pmf)
+            family_size_var = np.sum((family_size_array ** 2) * family_size_pmf) - family_size_mean ** 2
+
+            # estimate negative binomial fit using first two moments
+            mu = family_size_mean
+            phi = max(self.MIN_NB_PHI, (family_size_var - family_size_mean) / (family_size_mean ** 2))
+
+            # calculate p_obs
+            alpha = 1. / phi
+            p_obs = 1. - np.exp(alpha * np.log(alpha / (alpha + mu)))
+
+            empirical_fsd_params[gene_index, 0] = mu
+            empirical_fsd_params[gene_index, 1] = phi
+            empirical_fsd_params[gene_index, 2] = p_obs
                 
-                # "cap" the empirical hisogram as a heuristic for attenuating chimeric counts
-                if self.max_estimated_chimera_family_size >= 1:
-                    gene_fs_hist[:self.max_estimated_chimera_family_size] = gene_fs_hist[self.max_estimated_chimera_family_size]
+        return empirical_fsd_params
 
-                family_size_array = np.arange(1, self.max_family_size + 1)
-                family_size_pmf = gene_fs_hist / np.sum(gene_fs_hist)
-                family_size_mean = np.sum(family_size_array * family_size_pmf)
-                family_size_var = np.sum((family_size_array ** 2) * family_size_pmf) - family_size_mean ** 2
-
-                # calculate NB params using first two moments
-                mu = family_size_mean
-                phi = max(self.MIN_NB_PHI, (family_size_var - family_size_mean) / (family_size_mean ** 2))
-
-                # calculate p_obs
-                alpha = 1. / phi
-                p_obs = 1. - np.exp(alpha * np.log(alpha / (alpha + mu)))
-                
-                self._empirical_fsd_params[gene_index, 0] = mu
-                self._empirical_fsd_params[gene_index, 1] = phi
-                self._empirical_fsd_params[gene_index, 2] = p_obs
-                
-        return self._empirical_fsd_params
-
-    @property
+    @cachedproperty
     def empirical_e_hi_params(self) -> np.ndarray:
-        if self._empirical_e_hi_params is None:
-            # total observed expression per gene per cell
-            e_obs = np.sum(self.fingerprint_array, -1)
-            
-            # estimated probability of observing real molecules
-            p_obs = self.empirical_fsd_params[:, 2][None, :]
-            
-            # inflate the counts to account for p_obs
-            e_hi_est = e_obs / (1e-12 + p_obs)
-            
-            # fit ZINB to e_hi_est
-            self._empirical_e_hi_params = np.zeros((self.n_genes, 3))
-            self._logger.warning("Fitting approximate ZINB to UMI-based gene expression data...")
-            for gene_index in tqdm(range(self.n_genes)):
-                zinb_fit = self.zinb_fitter(e_hi_est[:, gene_index])
-                if not zinb_fit['converged']:
-                    self._logger.warning(f'ZINB fit to gene (internal index: {gene_index}) was not successful!')
-                self._empirical_e_hi_params[gene_index, 0] = zinb_fit['mu']
-                self._empirical_e_hi_params[gene_index, 1] = zinb_fit['phi']
-                self._empirical_e_hi_params[gene_index, 2] = zinb_fit['p_zero']
-        return self._empirical_e_hi_params
+        # estimated probability of observing real molecules
+        p_obs = self.empirical_fsd_params[:, 2][None, :]
+
+        # inflate the counts to account for p_obs
+        e_hi_est = self.dense_count_matrix / (self.EPS + p_obs)
+
+        # fit ZINB to e_hi_est
+        empirical_e_hi_params = np.zeros((self.n_genes, 3))
+        self._logger.warning("Fitting approximate ZINB to UMI counts (per gene)...")
+        for gene_index in tqdm(range(self.n_genes)):
+            zinb_fit = self.zinb_fitter(e_hi_est[:, gene_index])
+            if not zinb_fit['converged']:
+                self._logger.warning(f'ZINB fit to gene (internal index: {gene_index}) was not successful!')
+            empirical_e_hi_params[gene_index, 0] = zinb_fit['mu']
+            empirical_e_hi_params[gene_index, 1] = zinb_fit['phi']
+            empirical_e_hi_params[gene_index, 2] = zinb_fit['p_zero']
+        return empirical_e_hi_params
     
-    @property
+    @cachedproperty
     def empirical_mu_e_hi(self) -> np.ndarray:
         return self.empirical_e_hi_params[:, 0]
         
-    @property
+    @cachedproperty
     def empirical_phi_e_hi(self) -> np.ndarray:
         return self.empirical_e_hi_params[:, 1]
 
-    @property
+    @cachedproperty
     def empirical_p_zero_e_hi(self) -> np.ndarray:
         return self.empirical_e_hi_params[:, 2]
 
-    @property
+    @cachedproperty
     def empirical_fsd_mu_hi(self) -> np.ndarray:
         return self.empirical_fsd_params[:, 0]
         
-    @property
+    @cachedproperty
     def empirical_fsd_phi_hi(self) -> np.ndarray:
         return self.empirical_fsd_params[:, 1]
 
-    @property
+    @cachedproperty
     def empirical_fsd_p_obs(self) -> np.ndarray:
         return self.empirical_fsd_params[:, 2]
     
@@ -541,7 +528,7 @@ class SingleCellFingerprintDataStore:
         assert len(gene_sampling_site_scale_factor_array) == mb_size
         
         total_obs_reads_per_cell_array = self.total_obs_reads_per_cell[cell_index_array]
-        fingerprint_array = self.fingerprint_array[cell_index_array, gene_index_array, :]
+        fingerprint_array = self.dense_fingerprint_ndarray[cell_index_array, gene_index_array, :]
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
         
         return {
