@@ -50,7 +50,7 @@ class SingleCellFingerprint:
 
         # populate
         for barcode, csr_fingerprint_list in zip(barcode_list, csr_fingerprint_list):
-            self.__add_new_barcode(barcode, csr_fingerprint_list)
+            self._add_new_barcode(barcode, csr_fingerprint_list)
 
     def _finalize(self):
         self._finalized = True
@@ -59,7 +59,7 @@ class SingleCellFingerprint:
     def finalized(self):
         return self._finalized
 
-    def __add_new_barcode(self, barcode: int, csr_fingerprint: sp.csr_matrix):
+    def _add_new_barcode(self, barcode: int, csr_fingerprint: sp.csr_matrix):
         """Adds a new barcode to the collection.
         """
         assert not self.finalized, \
@@ -97,7 +97,7 @@ class SingleCellFingerprint:
         max_family_size = csr_fingerprint_dict.items().__iter__().__next__()[1].shape[1] - 1
         new = SingleCellFingerprint(gene_idx_list, max_family_size)
         for barcode, csr_fingerprint in csr_fingerprint_dict.items():
-            new.__add_new_barcode(barcode, csr_fingerprint)
+            new._add_new_barcode(barcode, csr_fingerprint)
         return new
 
     @property
@@ -207,7 +207,7 @@ class SingleCellFingerprint:
         
         new = SingleCellFingerprint(kept_gene_idx_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
-            new.__add_new_barcode(barcode, csr_fingerprint[kept_gene_array_idx_list, :])
+            new._add_new_barcode(barcode, csr_fingerprint[kept_gene_array_idx_list, :])
         return new
 
     def subset_genes(self, subset_gene_idx_list: List[int]) -> 'SingleCellFingerprint':
@@ -225,7 +225,7 @@ class SingleCellFingerprint:
         keep_index = list(map(gene_idx_to_old_list_index_map.get, subset_gene_idx_list))
         new = SingleCellFingerprint(subset_gene_idx_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
-            new.__add_new_barcode(barcode, csr_fingerprint[keep_index, :])
+            new._add_new_barcode(barcode, csr_fingerprint[keep_index, :])
         return new
 
     def subset_barcodes(self, subset_barcode_list: List[int]) -> 'SingleCellFingerprint':
@@ -240,7 +240,7 @@ class SingleCellFingerprint:
             "The subset barcode list contains repeated entries!"
         new = SingleCellFingerprint(self.gene_idx_list, self.max_family_size)
         for barcode in subset_barcode_list:
-            new.__add_new_barcode(barcode, self[barcode])
+            new._add_new_barcode(barcode, self[barcode])
         return new
 
     def keep_top_k_genes_by_expression(self, first_rank: int, last_rank: int):
@@ -282,6 +282,7 @@ class SingleCellFingerprintDataStore:
                  n_gene_groups: int = 10):
         if zinb_fitter_kwargs is None:
             zinb_fitter_kwargs = dict()
+
         self.sc_fingerprint = sc_fingerprint
         self.max_estimated_chimera_family_size = max_estimated_chimera_family_size
         self.gene_grouping_trans = gene_grouping_trans
