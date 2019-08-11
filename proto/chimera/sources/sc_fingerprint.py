@@ -152,8 +152,8 @@ class SingleCellFingerprint:
                      min_total_gene_expression: int = 10,
                      verbose_logging: bool = False) -> 'SingleCellFingerprint':
         # calculate summary statistics
-        good_turing_estimator_array = self.good_turing_estimator_g()
-        total_gene_expression_array = self.total_molecules_per_gene_g()
+        good_turing_estimator_array = self.good_turing_estimator_g
+        total_gene_expression_array = self.total_molecules_per_gene_g
         
         num_failed_good_turing = 0
         num_failed_min_expression = 0
