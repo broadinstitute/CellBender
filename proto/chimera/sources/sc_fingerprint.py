@@ -3,6 +3,7 @@ import scipy.sparse as sp
 import operator
 import pickle
 import logging
+from boltons.cacheutils import cachedproperty
 from typing import Tuple, List, Union, Dict, Callable
 import torch
 from tqdm import tqdm
@@ -17,6 +18,20 @@ class SingleCellFingerprint:
                  max_family_size: int,
                  barcode_list: Union[None, List[int]] = None,
                  csr_fingerprint_list: Union[None, List[sp.csr_matrix]] = None):
+        """Initializer.
+
+        :param gene_idx_list: list of gene indices (these indices could correspond to gene identities in an
+            external gene list)
+        :param max_family_size: maximum allowed family size per molecule
+        :param barcode_list: list of barcodes (in an integer representation)
+        :param csr_fingerprint_list: list of sparse fingerprint matrices corresponding to the barcodes in
+            ``barcode_list``
+
+        .. note:: the (sparse) fingerprint matrix of a barcode is a matrix of shape ``(n_genes, max_family_size)``.
+            A element ``(i, j)`` in the matrix denotes the number of unique instances of gene ``i`` that is
+            observed ``j + 1`` times in the experiment. In particular, the first column of the fingerprint matrix
+            corresponds to the count of singleton ("orphan") molecules.
+        """
         assert len(gene_idx_list) > 0, \
             "The fingerprint must have at least one gene!"
         if barcode_list is None:
@@ -31,33 +46,49 @@ class SingleCellFingerprint:
         self.csr_fingerprint_dict: Dict[int, sp.csr_matrix] = dict()
         self.barcode_list: List[int] = list()
         self._logger = logging.getLogger()
-        
+        self._finalized = False
+
         # populate
         for barcode, csr_fingerprint_list in zip(barcode_list, csr_fingerprint_list):
-            self.add(barcode, csr_fingerprint_list)
+            self.__add_new_barcode(barcode, csr_fingerprint_list)
 
-    def add(self, barcode: int, csr_fingerprint: sp.csr_matrix):
+    def _finalize(self):
+        self._finalized = True
+
+    @property
+    def finalized(self):
+        return self._finalized
+
+    def __add_new_barcode(self, barcode: int, csr_fingerprint: sp.csr_matrix):
+        """Adds a new barcode to the collection.
+        """
+        assert not self.finalized, \
+            "The class is in a finalized state, possibly as a matter of accessing "\
+            "one of the cached properties."
         assert barcode not in self.csr_fingerprint_dict, \
             f"Cell barcode {barcode} already has a fingerprint!"
         assert csr_fingerprint.shape[0] == len(self.gene_idx_list), \
             f"The fingerprint matrix must has as many rows ({csr_fingerprint.shape[0]}) as the number "\
             f"of genes ({len(self.gene_idx_list)})!"
-        assert csr_fingerprint.shape[1] == self.max_family_size + 1, \
+        assert csr_fingerprint.shape[1] == self.max_family_size, \
             f"The fingerprint matrix must has as many columns ({csr_fingerprint.shape[1]}) as the maximum "\
-            f"family size + 1 ({self.max_family_size + 1})!"
+            f"family size ({self.max_family_size})!"
         self.csr_fingerprint_dict[barcode] = csr_fingerprint
         self.barcode_list.append(barcode)
 
     def __getitem__(self, barcode: int) -> sp.csr_matrix:
+        """Returns the fingerprint for a given barcode (NOTE: not barcode index!)"""
         return self.csr_fingerprint_dict[barcode]
 
     def save(self, output_path: str):
+        """Saves the instance to a .pkl file"""
         with open(output_path, 'wb') as f:
             pickle.dump(self.gene_idx_list, f)
             pickle.dump(self.csr_fingerprint_dict, f)
     
     @staticmethod
     def load(input_path: str) -> 'SingleCellFingerprint':
+        """Instantiate from a .pkl file"""
         with open(input_path, 'rb') as f:
             loader = pickle.Unpickler(f)
             gene_idx_list = loader.load()
@@ -66,48 +97,70 @@ class SingleCellFingerprint:
         max_family_size = csr_fingerprint_dict.items().__iter__().__next__()[1].shape[1] - 1
         new = SingleCellFingerprint(gene_idx_list, max_family_size)
         for barcode, csr_fingerprint in csr_fingerprint_dict.items():
-            new.add(barcode, csr_fingerprint)
+            new.__add_new_barcode(barcode, csr_fingerprint)
         return new
 
     @property
-    def num_genes(self):
+    def n_genes(self):
         return len(self.gene_idx_list)
     
     @property
-    def num_cells(self):
+    def n_cells(self):
         return len(self.barcode_list)
 
-    def _get_good_turing_estimator(self) -> np.ndarray:
-        orphan_reads = np.zeros((self.num_genes,), dtype=np.float)
-        all_reads = np.zeros((self.num_genes,), dtype=np.float)
-        read_counter = np.arange(0, self.max_family_size + 1)
+    @cachedproperty
+    def collapsed_csr_fingerprint_matrix(self):
+        """Returns the collapsed fingerprint matrix.
+
+        .. note:: The collapsed fingerprint matrix is simply the vertically stacked fingerprint matrix
+            of each barcode in the order of addition to the collection (i.e. in the same order as
+            ``barcode_list``).
+        """
+        self._finalize()
+        return sp.vstack(list(map(self.csr_fingerprint_dict.get, self.barcode_list)))
+
+    @cachedproperty
+    def good_turing_estimator_g(self) -> np.ndarray:
+        """Returns the Good-Turing estimator per gene.
+
+        .. note:: yields NaN if a gene has no counts.
+        """
+        self._finalize()
+        orphan_reads = np.zeros((self.n_genes,), dtype=np.float)
+        all_reads = np.zeros((self.n_genes,), dtype=np.float)
+        read_counter = np.arange(1, self.max_family_size + 1)
         for csr_fingerprint in self.csr_fingerprint_dict.values():
-            orphan_reads += np.asarray(csr_fingerprint[:, 1].todense()).flatten()
+            orphan_reads += np.asarray(csr_fingerprint[:, 0].todense()).flatten()
             all_reads += csr_fingerprint.dot(read_counter)
         good_turing_estimator = orphan_reads / (SingleCellFingerprint.EPS + all_reads)
         good_turing_estimator[all_reads == 0] = np.nan
         return good_turing_estimator
-    
-    def _get_total_gene_expression(self) -> np.ndarray:
-        total_gene_expression = np.zeros((self.num_genes,))
+
+    @cachedproperty
+    def total_molecules_per_gene_g(self) -> np.ndarray:
+        self._finalize()
+        total_gene_expression = np.zeros((self.n_genes,))
         for csr_fingerprint in self.csr_fingerprint_dict.values():
             total_gene_expression += np.asarray(np.sum(csr_fingerprint, -1)).flatten()
         return total_gene_expression
-    
+
+    def filter_barcodes(self) -> 'SingleCellFingerprint':
+        raise NotImplementedError
+
     def filter_genes(self,
                      max_good_turing: float = 0.5,
                      min_total_gene_expression: int = 10,
                      verbose_logging: bool = False) -> 'SingleCellFingerprint':
         # calculate summary statistics
-        good_turing_estimator_array = self._get_good_turing_estimator()
-        total_gene_expression_array = self._get_total_gene_expression()
+        good_turing_estimator_array = self.good_turing_estimator_g()
+        total_gene_expression_array = self.total_molecules_per_gene_g()
         
         num_failed_good_turing = 0
         num_failed_min_expression = 0
         num_failed_both = 0
         
         kept_gene_array_idx_list = list()
-        for i_gene in range(self.num_genes):
+        for i_gene in range(self.n_genes):
             c_gene_good_turing_estimator = good_turing_estimator_array[i_gene]
             c_gene_total_expression = total_gene_expression_array[i_gene]            
             failed_min_expression = False
@@ -154,7 +207,7 @@ class SingleCellFingerprint:
         
         new = SingleCellFingerprint(kept_gene_idx_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
-            new.add(barcode, csr_fingerprint[kept_gene_array_idx_list, :])
+            new.__add_new_barcode(barcode, csr_fingerprint[kept_gene_array_idx_list, :])
         return new    
 
 
@@ -182,13 +235,13 @@ class SingleCellFingerprintDataStore:
         self.gene_grouping_trans = gene_grouping_trans
         self.n_gene_groups = n_gene_groups
 
-        self.n_cells = sc_fingerprint.num_cells
+        self.n_cells = sc_fingerprint.n_cells
         self.max_family_size = sc_fingerprint.max_family_size
 
         self._logger = logging.getLogger()
         
         # total observed expression of all genes
-        total_e_obs_g = np.zeros((sc_fingerprint.num_genes,), dtype=np.uint64)
+        total_e_obs_g = np.zeros((sc_fingerprint.n_genes,), dtype=np.uint64)
         for barcode in sc_fingerprint.barcode_list:
             total_e_obs_g += np.asarray(np.sum(sc_fingerprint[barcode], -1)).flatten()
         if np.any(total_e_obs_g == 0):
@@ -245,8 +298,7 @@ class SingleCellFingerprintDataStore:
             self._fingerprint_array = np.zeros((self.n_cells, self.n_genes, self.max_family_size), dtype=np.uint16)
             for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
                 self._fingerprint_array[i_cell, :, :] = self.sc_fingerprint[barcode][
-                    self.gene_idx_list_in_fingerprint, 1:].todense()
-                
+                    self.gene_idx_list_in_fingerprint, :].todense()
         return self._fingerprint_array
     
     # TODO: replace this with pydata.sparse
