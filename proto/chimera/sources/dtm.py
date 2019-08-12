@@ -680,7 +680,7 @@ class PosteriorGeneExpressionSampler(object):
             only_expressing_cells: bool) -> Generator[List[int], None, None]:
         sc_fingerprint_dtm = self.dtm_model.sc_fingerprint_dtm
         if only_expressing_cells:
-            included_cell_indices = sc_fingerprint_dtm.expressing_cells_dict[gene_index].tolist()
+            included_cell_indices = sc_fingerprint_dtm.expressing_cells_per_gene_dict[gene_index].tolist()
         else:
             included_cell_indices = np.arange(0, sc_fingerprint_dtm.n_cells)
         n_included_cells = len(included_cell_indices)

@@ -8,6 +8,7 @@ from typing import Tuple, List, Union, Dict, Callable
 import torch
 from tqdm import tqdm
 from stats import ApproximateZINBFit
+import random
 
 
 class SingleCellFingerprintBase:
@@ -16,7 +17,7 @@ class SingleCellFingerprintBase:
         only be used for quantities that scale either as O(n_cells) or O(n_genes). In particular, the count
         matrix and the fingerprint tensor is stored as sparse matrices.
     """
-    EPS = np.finfo(np.float).eps
+    _eps = np.finfo(np.float).eps
 
     def __init__(self,
                  gene_idx_list: List[int],
@@ -137,7 +138,7 @@ class SingleCellFingerprintBase:
         for csr_fingerprint in self.csr_fingerprint_dict.values():
             orphan_reads += np.asarray(csr_fingerprint[:, 0].todense()).flatten()
             all_reads += csr_fingerprint.dot(read_counter)
-        good_turing_estimator = orphan_reads / (SingleCellFingerprintBase.EPS + all_reads)
+        good_turing_estimator = orphan_reads / (SingleCellFingerprintBase._eps + all_reads)
         good_turing_estimator[all_reads == 0] = np.nan
         return good_turing_estimator
 
@@ -148,6 +149,15 @@ class SingleCellFingerprintBase:
         for csr_fingerprint in self.csr_fingerprint_dict.values():
             total_gene_expression += np.asarray(np.sum(csr_fingerprint, -1)).flatten()
         return total_gene_expression
+
+    @cachedproperty
+    def sparse_count_matrix_csr(self):
+        self._finalize()
+        return sp.vstack(
+            list(map(
+                lambda barcode: sp.csr_matrix(self.csr_fingerprint_dict[barcode].sum(-1)).T,
+                self.barcode_list)),
+            format='csr')
 
     def filter_barcodes(self) -> 'SingleCellFingerprintBase':
         raise NotImplementedError
@@ -268,18 +278,17 @@ class SingleCellFingerprintBase:
             last_rank=self.n_genes)
 
 
-def random_choice(a, size):
-    random_indices = np.random.randint(0, len(a), size=size)
-    return a[random_indices]
+def random_choice(a: List[int], size: int):
+    return random.sample(a, size)
 
 
 class SingleCellFingerprintDTM:
     """This class extends the functionality of SingleCellFingerprintBase for Droplet Time Machine (TM)
     training."""
-    EPS = np.finfo(np.float).eps
+    _eps = np.finfo(np.float).eps
 
     # minimum over-dispersion of an estimated negative binomial fit
-    MIN_NB_PHI = 1e-2
+    _min_nb_phi = 1e-2
     
     def __init__(self,
                  sc_fingerprint_base: SingleCellFingerprintBase,
@@ -287,7 +296,7 @@ class SingleCellFingerprintDTM:
                  zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
-                 allow_dense: bool = False):
+                 allow_dense_int_ndarray: bool = False):
         if zinb_fitter_kwargs is None:
             zinb_fitter_kwargs = dict()
 
@@ -295,23 +304,23 @@ class SingleCellFingerprintDTM:
         self.max_estimated_chimera_family_size = max_estimated_chimera_family_size
         self.gene_grouping_trans = gene_grouping_trans
         self.n_gene_groups = n_gene_groups
-        self.allow_dense = allow_dense
+        self.allow_dense_int_ndarray = allow_dense_int_ndarray
 
         self._logger = logging.getLogger()
         
         # total observed expression of all genes
         if np.any(sc_fingerprint_base.total_molecules_per_gene_g == 0):
-            self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "\
+            self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "
                                  "entire dataset!")
 
         # ZINB fitter
         self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
 
-    @property
+    @cachedproperty
     def n_cells(self):
         return self.sc_fingerprint_base.n_cells
 
-    @property
+    @cachedproperty
     def n_genes(self):
         return self.sc_fingerprint_base.n_genes
 
@@ -321,43 +330,70 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def dense_fingerprint_ndarray(self) -> np.ndarray:
-        assert self.allow_dense
+        assert self.allow_dense_int_ndarray
         fingerprint_array = np.zeros((self.n_cells, self.n_genes, self.max_family_size), dtype=np.uint16)
         for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
             fingerprint_array[i_cell, :, :] = self.sc_fingerprint_base[barcode].todense()
         return fingerprint_array
 
+    @property
+    def sparse_count_matrix_csr(self) -> sp.csr_matrix:
+        return self.sc_fingerprint_base.sparse_count_matrix_csr
+
+    @cachedproperty
+    def sparse_count_matrix_csc(self) -> sp.csc_matrix:
+        return sp.csc_matrix(self.sc_fingerprint_base.sparse_count_matrix_csr)
+
     @cachedproperty
     def dense_count_matrix_ndarray(self) -> np.ndarray:
-        assert self.allow_dense
+        assert self.allow_dense_int_ndarray
         return np.sum(self.dense_fingerprint_ndarray, -1)
 
     @cachedproperty
-    def expressing_cells_dict(self) -> Dict[int, np.ndarray]:
-        expressing_cells_dict = dict()
-        for i_gene in range(self.n_genes):
-            expressing_cells_dict[i_gene] = np.where(self.dense_count_matrix_ndarray[:, i_gene] > 0)[0]
-        return expressing_cells_dict
+    def expressing_cells_per_gene_dict(self) -> Dict[int, List[int]]:
+        expressing_cells_per_gene_dict: Dict[int, List[int]] = dict()
+        if self.allow_dense_int_ndarray:
+            for i_gene in range(self.n_genes):
+                expressing_cells_per_gene_dict[i_gene] = np.where(
+                    self.dense_count_matrix_ndarray[:, i_gene] > 0)[0].tolist()
+        else:
+            for i_gene in range(self.n_genes):
+                expressing_cells_per_gene_dict[i_gene] = (
+                    self.sparse_count_matrix_csc[:, i_gene].nonzero()[0].tolist())
+        return expressing_cells_per_gene_dict
 
     @cachedproperty
-    def silent_cells_dict(self) -> Dict[int, np.ndarray]:
-        silent_cells_dict = dict()
-        for i_gene in range(self.n_genes):
-            silent_cells_dict[i_gene] = np.where(self.dense_count_matrix_ndarray[:, i_gene] == 0)[0]
-        return silent_cells_dict
+    def silent_cells_per_gene_dict(self) -> Dict[int, List[int]]:
+        silent_cells_per_gene_dict: Dict[int, List[int]] = dict()
+        if self.allow_dense_int_ndarray:
+            for i_gene in range(self.n_genes):
+                silent_cells_per_gene_dict[i_gene] = np.where(
+                    self.dense_count_matrix_ndarray[:, i_gene] == 0)[0].tolist()
+        else:
+            all_cells_set = set(range(0, self.n_cells))
+            for i_gene in range(self.n_genes):
+                silent_cells_per_gene_dict[i_gene] = list(
+                    all_cells_set - set(self.get_expressing_cell_indices(i_gene)))
+        return silent_cells_per_gene_dict
+
+    def get_expressing_cell_indices(self, gene_index: int) -> List[int]:
+        return self.expressing_cells_per_gene_dict[gene_index]
+
+    def get_silent_cell_indices(self, gene_index: int) -> List[int]:
+        return self.expressing_cells_per_gene_dict[gene_index]
 
     @cachedproperty
-    def num_expressing_cells(self) -> List[int]:
-        num_expressing_cells = [len(self.expressing_cells_dict[i_gene])
-                                for i_gene in range(self.n_genes)]
+    def n_expressing_cells_per_gene(self) -> List[int]:
+        num_expressing_cells = [
+            len(self.get_expressing_cell_indices(i_gene)) for i_gene in range(self.n_genes)]
         return num_expressing_cells
-    
+
     @cachedproperty
-    def num_silent_cells(self) -> List[int]:
-        num_silent_cells = [self.n_cells - len(self.expressing_cells_dict[i_gene])
-                            for i_gene in range(self.n_genes)]
+    def n_silent_cells_per_gene(self) -> List[int]:
+        num_silent_cells = [
+            self.n_cells - self.n_expressing_cells_per_gene[i_gene] for i_gene in range(self.n_genes)]
         return num_silent_cells
-        
+
     @cachedproperty
     def total_obs_reads_per_cell(self) -> np.ndarray:
         total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
@@ -375,15 +411,15 @@ class SingleCellFingerprintDTM:
     
     @cachedproperty
     def total_obs_expr_per_gene(self) -> np.ndarray:
-        return np.sum(self.dense_count_matrix_ndarray, axis=0)
+        return np.asarray(self.sparse_count_matrix_csr.sum(0)).squeeze(0)
 
     @cachedproperty
     def mean_obs_expr_per_gene(self) -> np.ndarray:
         return self.total_obs_expr_per_gene.astype(np.float) / self.n_cells
 
     @cachedproperty
-    def gene_groups_dict(self) -> Dict[int, np.ndarray]:
-        # the "weight" of each gene is a monotonic (approximately logarthimic) function of its
+    def gene_groups_dict(self) -> Dict[int, List[int]]:
+        # the "weight" of each gene is a monotonic (approximately logarithmic) function of its
         # total observed expression
         weights = self.gene_grouping_trans(self.total_obs_expr_per_gene)
 
@@ -398,34 +434,36 @@ class SingleCellFingerprintDTM:
         gene_group_stop_indices = [gene_group_start_indices[j + 1] for j in range(self.n_gene_groups - 1)]
         gene_group_stop_indices.append(self.n_genes)
 
-        gene_groups_dict = dict()
+        gene_groups_dict: Dict[int, List[int]] = dict()
         for i_group in range(self.n_gene_groups):
             gene_group_start_index = gene_group_start_indices[i_group]
             gene_group_stop_index = gene_group_stop_indices[i_group]
-            gene_groups_dict[i_group] = np.asarray(list(
+            gene_groups_dict[i_group] = list(
                 map(operator.itemgetter(0),
-                    sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index])))
+                    sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index]))
         return gene_groups_dict
     
     @cachedproperty
     def empirical_fsd_params(self) -> np.ndarray:
         empirical_fsd_params = np.zeros((self.n_genes, 3))
         for gene_index in range(self.n_genes):
-            gene_fs_hist = np.sum(self.dense_fingerprint_ndarray[:, gene_index, :], 0)
+            collapsed_slice = gene_index + self.n_genes * np.arange(self.n_cells)
+            counts_per_family_size = np.asarray(
+                self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_slice, :].sum(0)).squeeze(0)
 
             # "cap" the empirical histogram as a heuristic for attenuating chimeric counts
             if self.max_estimated_chimera_family_size >= 1:
-                gene_fs_hist[:self.max_estimated_chimera_family_size] = gene_fs_hist[
+                counts_per_family_size[:self.max_estimated_chimera_family_size] = counts_per_family_size[
                     self.max_estimated_chimera_family_size]
 
             family_size_array = np.arange(1, self.max_family_size + 1)
-            family_size_pmf = gene_fs_hist / np.sum(gene_fs_hist)
+            family_size_pmf = counts_per_family_size / np.sum(counts_per_family_size)
             family_size_mean = np.sum(family_size_array * family_size_pmf)
             family_size_var = np.sum((family_size_array ** 2) * family_size_pmf) - family_size_mean ** 2
 
             # estimate negative binomial fit using first two moments
             mu = family_size_mean
-            phi = max(self.MIN_NB_PHI, (family_size_var - family_size_mean) / (family_size_mean ** 2))
+            phi = max(self._min_nb_phi, (family_size_var - family_size_mean) / (family_size_mean ** 2))
 
             # calculate p_obs
             alpha = 1. / phi
@@ -440,21 +478,21 @@ class SingleCellFingerprintDTM:
     @cachedproperty
     def empirical_e_hi_params(self) -> np.ndarray:
         # estimated probability of observing real molecules
-        p_obs = self.empirical_fsd_params[:, 2][None, :]
+        p_obs_g = self.empirical_fsd_params[:, 2]
 
-        # inflate the counts to account for p_obs
-        e_hi_est = self.dense_count_matrix_ndarray / (self.EPS + p_obs)
-
-        # fit ZINB to e_hi_est
-        empirical_e_hi_params = np.zeros((self.n_genes, 3))
+        # fit zero-inflated negative-binomial
         self._logger.warning("Fitting approximate ZINB to UMI counts (per gene)...")
+        empirical_e_hi_params = np.zeros((self.n_genes, 3))
         for gene_index in tqdm(range(self.n_genes)):
-            zinb_fit = self.zinb_fitter(e_hi_est[:, gene_index])
-            if not zinb_fit['converged']:
+            # inflate the counts to account for p_obs
+            e_hi_est = np.asarray(self.sparse_count_matrix_csc[:, gene_index].todense()).squeeze(-1) / (
+                    p_obs_g[gene_index] + self._eps)
+            fit = self.zinb_fitter(e_hi_est)
+            if not fit['converged']:
                 self._logger.warning(f'ZINB fit to gene (internal index: {gene_index}) was not successful!')
-            empirical_e_hi_params[gene_index, 0] = zinb_fit['mu']
-            empirical_e_hi_params[gene_index, 1] = zinb_fit['phi']
-            empirical_e_hi_params[gene_index, 2] = zinb_fit['p_zero']
+            empirical_e_hi_params[gene_index, 0] = fit['mu']
+            empirical_e_hi_params[gene_index, 1] = fit['phi']
+            empirical_e_hi_params[gene_index, 2] = fit['p_zero']
         return empirical_e_hi_params
     
     @cachedproperty
@@ -499,15 +537,15 @@ class SingleCellFingerprintDTM:
             # select cells
             for gene_index in gene_indices:
                 # sample from expressing cells
-                size_expressing = min(mb_expressing_cells_per_gene, self.num_expressing_cells[gene_index])
+                size_expressing = min(mb_expressing_cells_per_gene, self.n_expressing_cells_per_gene[gene_index])
                 expressing_cell_indices = random_choice(
-                    self.expressing_cells_dict[gene_index], size_expressing).tolist()
-                expressing_scale_factor = gene_scale_factor * self.num_expressing_cells[gene_index] / size_expressing
+                    self.expressing_cells_per_gene_dict[gene_index], size_expressing).tolist()
+                expressing_scale_factor = gene_scale_factor * self.n_expressing_cells_per_gene[gene_index] / size_expressing
 
                 # sample from silent cells
-                size_silent = min(mb_silent_cells_per_gene, self.num_silent_cells[gene_index])
+                size_silent = min(mb_silent_cells_per_gene, self.n_silent_cells_per_gene[gene_index])
                 silent_cell_indices = random_choice(self.silent_cells_dict[gene_index], size_silent)
-                silent_scale_factor = gene_scale_factor * self.num_silent_cells[gene_index] / size_silent
+                silent_scale_factor = gene_scale_factor * self.n_silent_cells_per_gene[gene_index] / size_silent
 
                 mb_cell_indices_per_gene.append(expressing_cell_indices)
                 mb_cell_indices_per_gene.append(silent_cell_indices)
@@ -532,10 +570,10 @@ class SingleCellFingerprintDTM:
                 'gene_sampling_site_scale_factor_array': gene_sampling_site_scale_factor_array}
 
     def generate_torch_minibatch_data(self,
-                                      cell_index_array,
-                                      gene_index_array,
-                                      cell_sampling_site_scale_factor_array,
-                                      gene_sampling_site_scale_factor_array,
+                                      cell_index_array: np.ndarray,
+                                      gene_index_array: np.ndarray,
+                                      cell_sampling_site_scale_factor_array: np.ndarray,
+                                      gene_sampling_site_scale_factor_array: np.ndarray,
                                       device=torch.device("cuda"),
                                       dtype=torch.float) -> Dict[str, torch.Tensor]:
         assert cell_index_array.ndim == 1
@@ -548,7 +586,9 @@ class SingleCellFingerprintDTM:
         assert len(gene_sampling_site_scale_factor_array) == mb_size
         
         total_obs_reads_per_cell_array = self.total_obs_reads_per_cell[cell_index_array]
-        fingerprint_array = self.dense_fingerprint_ndarray[cell_index_array, gene_index_array, :]
+        collapsed_index_array = cell_index_array * self.n_genes + gene_index_array
+        fingerprint_array = np.asarray(
+            self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_index_array, :])
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
         
         return {
