@@ -490,6 +490,7 @@ class SingleCellRNACountsDataset:
         write_succeeded = write_matrix_to_cellranger_h5(
             output_file=output_file,
             gene_names=self.data['gene_names'],
+            gene_ids=self.data['gene_ids'],
             barcodes=self.data['barcodes'],
             inferred_count_matrix=inferred_count_matrix,
             cell_barcode_inds=cell_barcode_inds,
@@ -515,6 +516,7 @@ class SingleCellRNACountsDataset:
             write_matrix_to_cellranger_h5(
                 output_file=filtered_output_file,
                 gene_names=self.data['gene_names'],
+                gene_ids=self.data['gene_ids'],
                 barcodes=cell_barcodes,
                 inferred_count_matrix=inferred_count_matrix[cell_barcode_inds, :],
                 cell_barcode_inds=None,
@@ -664,10 +666,14 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
             in the list is the number of genomes in the dataset.  Each numpy
             array contains the string names of genes in the genome, which
             correspond to the columns in the out['matrix'].
+        out['gene_ids']: List of numpy arrays, where the number of elements
+            in the list is the number of genomes in the dataset.  Each numpy
+            array contains the string Ensembl ID of genes in the genome, which
+            also correspond to the columns in the out['matrix'].
 
     """
 
-    assert os.path.isdir(filedir), "The directory {filedir} is not accessible."
+    assert os.path.isdir(filedir), f"The directory {filedir} is not accessible."
 
     # Decide whether data is CellRanger v2 or v3.
     cellranger_version = detect_cellranger_version_mtx(filedir=filedir)
@@ -676,36 +682,45 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
     # CellRanger version 3
     if cellranger_version == 3:
 
-        matrix_file = os.path.join(filedir, 'matrix.mtx.gz')
+        matrix_file = os.path.join(filedir, "matrix.mtx.gz")
         gene_file = os.path.join(filedir, "features.tsv.gz")
         barcode_file = os.path.join(filedir, "barcodes.tsv.gz")
 
         # Read in feature names.
         features = np.genfromtxt(fname=gene_file,
-                                 delimiter="\t", skip_header=0,
-                                 dtype='<U50')
+                                 delimiter="\t", skip_header=0, dtype='<U50')
 
         # Restrict to gene expression only.
-        gene_info = features[features[:, 2] == 'Gene Expression']
+        is_gene_expression = (features[:, 2] == "Gene Expression")
+        gene_info = features[is_gene_expression]
         gene_names = gene_info[:, 1].squeeze()  # second column
+        gene_ids = gene_info[:, 0].squeeze()  # first column
+
+        # Read in sparse count matrix.
+        count_matrix = io.mmread(matrix_file).tocsr().transpose()
+
+        # Excise other 'features' from the count matrix
+        gene_feature_inds = np.where(is_gene_expression)[0]
+        count_matrix = count_matrix[:, gene_feature_inds]
 
     # CellRanger version 2
     elif cellranger_version == 2:
 
         # Read in the count matrix using scipy.
-        matrix_file = os.path.join(filedir, 'matrix.mtx')
+        matrix_file = os.path.join(filedir, "matrix.mtx")
         gene_file = os.path.join(filedir, "genes.tsv")
         barcode_file = os.path.join(filedir, "barcodes.tsv")
 
         # Read in gene names.
-        gene_names = np.genfromtxt(fname=gene_file,
-                                   delimiter="\t", skip_header=0,
-                                   dtype='<U50')[:, 1].squeeze()  # second column
+        gene_info = np.genfromtxt(fname=gene_file,
+                                  delimiter="\t", skip_header=0, dtype='<U50')
+        gene_names = gene_info[:, 1].squeeze()  # second column
+        gene_ids = gene_info[:, 0].squeeze()  # first column
+
+        # Read in sparse count matrix.
+        count_matrix = io.mmread(matrix_file).tocsr().transpose()
 
     # For both versions:
-
-    # Read in sparse count matrix.
-    count_matrix = io.mmread(matrix_file).tocsr().transpose()
 
     # Read in barcode names.
     barcodes = np.genfromtxt(fname=barcode_file,
@@ -723,6 +738,7 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
 
     return {'matrix': count_matrix,
             'gene_names': gene_names,
+            'gene_ids': gene_ids,
             'barcodes': barcodes}
 
 
@@ -783,6 +799,10 @@ def get_matrix_from_cellranger_h5(filename: str) \
             in the list is the number of genomes in the dataset.  Each numpy
             array contains the string names of genes in the genome, which
             correspond to the columns in the out['matrix'].
+        out['gene_ids']: List of numpy arrays, where the number of elements
+            in the list is the number of genomes in the dataset.  Each numpy
+            array contains the string Ensembl ID of genes in the genome, which
+            also correspond to the columns in the out['matrix'].
 
     """
 
@@ -793,6 +813,7 @@ def get_matrix_from_cellranger_h5(filename: str) \
     with tables.open_file(filename, 'r') as f:
         # Initialize empty lists.
         gene_names = []
+        gene_ids = []
         csc_list = []
         barcodes = None
 
@@ -813,6 +834,7 @@ def get_matrix_from_cellranger_h5(filename: str) \
                     csc_list.append(sp.csc_matrix((data, indices, indptr),
                                                   shape=shape))
                     gene_names.extend(getattr(group, 'gene_names').read())
+                    gene_ids.extend(getattr(group, 'genes').read())
 
                 except tables.NoSuchNodeError:
                     # This exists to bypass the root node, which has no data.
@@ -837,10 +859,12 @@ def get_matrix_from_cellranger_h5(filename: str) \
             feature_types = getattr(feature_group,
                                     'feature_type').read()
             feature_names = getattr(feature_group, 'name').read()
+            feature_ids = getattr(feature_group, 'id').read()
 
             # The only 'feature' we want is 'Gene Expression'
             is_gene_expression = (feature_types == b'Gene Expression')
             gene_names.extend(feature_names[is_gene_expression])
+            gene_ids.extend(feature_ids[is_gene_expression])
 
             # Excise other 'features' from the count matrix
             gene_feature_inds = np.where(is_gene_expression)[0]
@@ -860,12 +884,14 @@ def get_matrix_from_cellranger_h5(filename: str) \
 
     return {'matrix': count_matrix,
             'gene_names': np.array(gene_names),
+            'gene_ids': np.array(gene_ids),
             'barcodes': np.array(barcodes)}
 
 
 def write_matrix_to_cellranger_h5(
         output_file: str,
         gene_names: np.ndarray,
+        gene_ids: np.ndarray,
         barcodes: np.ndarray,
         inferred_count_matrix: sp.csc.csc_matrix,
         cell_barcode_inds: Union[np.ndarray, None] = None,
@@ -881,6 +907,7 @@ def write_matrix_to_cellranger_h5(
     Args:
         output_file: Path to output .h5 file (e.g., 'output.h5').
         gene_names: Name of each gene (column of count matrix).
+        gene_ids: Ensembl ID of each gene (column of count matrix).
         barcodes: Name of each barcode (row of count matrix).
         inferred_count_matrix: Count matrix to be written to file, in sparse
             format.  Rows are barcodes, columns are genes.
@@ -909,6 +936,9 @@ def write_matrix_to_cellranger_h5(
         "The number of gene names must match the number of columns in the " \
         "count matrix."
 
+    assert gene_names.size == gene_ids.size, \
+        "The number of gene_names must match the number of gene_ids."
+
     assert barcodes.size == inferred_count_matrix.shape[0], \
         "The number of barcodes must match the number of rows in the count" \
         "matrix."
@@ -927,6 +957,7 @@ def write_matrix_to_cellranger_h5(
 
             # Create arrays within that group for barcodes and gene_names.
             f.create_array(group, "gene_names", gene_names)
+            f.create_array(group, "genes", gene_ids)
             f.create_array(group, "barcodes", barcodes)
 
             # Create arrays to store the count data.
