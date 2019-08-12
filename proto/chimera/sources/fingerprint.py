@@ -105,14 +105,12 @@ class SingleCellFingerprintBase:
             new._add_new_barcode(barcode, csr_fingerprint)
         return new
 
-    @cachedproperty
+    @property
     def n_genes(self):
-        self._finalize()
         return len(self.gene_idx_list)
     
-    @cachedproperty
+    @property
     def n_cells(self):
-        self._finalize()
         return len(self.barcode_list)
 
     @cachedproperty
