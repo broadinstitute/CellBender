@@ -669,9 +669,7 @@ class PosteriorGeneExpressionSampler(object):
             cell_index_array,
             gene_index_array,
             cell_sampling_site_scale_factor_array,
-            gene_sampling_site_scale_factor_array,
-            self.device,
-            self.dtype)
+            gene_sampling_site_scale_factor_array)
 
     def _sharded_cell_index_generator(
             self,
