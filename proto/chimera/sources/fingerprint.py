@@ -278,7 +278,7 @@ class SingleCellFingerprintBase:
             last_rank=self.n_genes)
 
 
-def random_choice(a: List[int], size: int):
+def random_choice(a: List[int], size: int) -> List[int]:
     return random.sample(a, size)
 
 
@@ -520,9 +520,9 @@ class SingleCellFingerprintDTM:
         return self.empirical_fsd_params[:, 2]
     
     def _generate_stratified_sample(self,
-                                    mb_genes_per_gene_group,
-                                    mb_expressing_cells_per_gene,
-                                    mb_silent_cells_per_gene) -> Dict[str, np.ndarray]:
+                                    mb_genes_per_gene_group: int,
+                                    mb_expressing_cells_per_gene: int,
+                                    mb_silent_cells_per_gene: int) -> Dict[str, np.ndarray]:
         mb_cell_indices_per_gene = []
         mb_cell_scale_factors_per_gene = []
         mb_effective_gene_scale_factors_per_cell = []
@@ -539,16 +539,18 @@ class SingleCellFingerprintDTM:
                 # sample from expressing cells
                 size_expressing = min(mb_expressing_cells_per_gene, self.n_expressing_cells_per_gene[gene_index])
                 expressing_cell_indices = random_choice(
-                    self.expressing_cells_per_gene_dict[gene_index], size_expressing).tolist()
-                expressing_scale_factor = gene_scale_factor * self.n_expressing_cells_per_gene[gene_index] / size_expressing
+                    self.get_expressing_cell_indices(gene_index), size_expressing)
+                expressing_scale_factor = gene_scale_factor * (
+                        self.n_expressing_cells_per_gene[gene_index] / size_expressing)
 
                 # sample from silent cells
                 size_silent = min(mb_silent_cells_per_gene, self.n_silent_cells_per_gene[gene_index])
-                silent_cell_indices = random_choice(self.silent_cells_dict[gene_index], size_silent)
-                silent_scale_factor = gene_scale_factor * self.n_silent_cells_per_gene[gene_index] / size_silent
+                silent_cell_indices = random_choice(self.get_silent_cell_indices(gene_index), size_silent)
+                silent_scale_factor = gene_scale_factor * (
+                        self.n_silent_cells_per_gene[gene_index] / size_silent)
 
-                mb_cell_indices_per_gene.append(expressing_cell_indices)
-                mb_cell_indices_per_gene.append(silent_cell_indices)
+                mb_cell_indices_per_gene.append(np.asarray(expressing_cell_indices))
+                mb_cell_indices_per_gene.append(np.asarray(silent_cell_indices))
                 mb_cell_scale_factors_per_gene.append(expressing_scale_factor * np.ones((size_expressing,)))
                 mb_cell_scale_factors_per_gene.append(silent_scale_factor * np.ones((size_silent,)))
 
