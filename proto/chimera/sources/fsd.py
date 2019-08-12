@@ -5,7 +5,6 @@ from pyro.distributions.torch_distribution import TorchDistribution
 
 import torch
 from torch.distributions import transforms
-from torch.distributions.transforms import Transform
 from torch.nn.parameter import Parameter
 
 from pyro_extras import NegativeBinomial, MixtureDistribution
@@ -14,9 +13,9 @@ from fingerprint import SingleCellFingerprintDTM
 from abc import abstractmethod
 
 
-class FamilySizeDistributionCodec(torch.nn.Module):
+class FSDCodec(torch.nn.Module):
     def __init__(self):
-        super(FamilySizeDistributionCodec, self).__init__()
+        super(FSDCodec, self).__init__()
 
     @property
     @abstractmethod
@@ -53,16 +52,16 @@ class FamilySizeDistributionCodec(torch.nn.Module):
         raise NotImplementedError
 
 
-class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistributionCodec):
+class NBMixtureFSDCodec(FSDCodec):
     def __init__(self,
-                 sc_fingerprint_datastore: SingleCellFingerprintDTM,
+                 sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  n_fsd_lo_comps: int,
                  n_fsd_hi_comps: int,
                  fsd_init_params_dict: Dict[str, float],
                  device=torch.device("cuda"),
                  dtype=torch.float):
-        super(GeneralNegativeBinomialMixtureFamilySizeDistributionCodec, self).__init__()
-        self.sc_fingerprint_datastore = sc_fingerprint_datastore
+        super(NBMixtureFSDCodec, self).__init__()
+        self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.n_fsd_lo_comps = n_fsd_lo_comps
         self.n_fsd_hi_comps = n_fsd_hi_comps
         self.fsd_init_params_dict = fsd_init_params_dict
@@ -80,8 +79,8 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
         self.stick = transforms.StickBreakingTransform()
 
         # initialization of p_lo and p_hi
-        mean_fsd_mu_hi = np.mean(sc_fingerprint_datastore.empirical_fsd_mu_hi)
-        mean_fsd_phi_hi = np.mean(sc_fingerprint_datastore.empirical_fsd_phi_hi)
+        mean_fsd_mu_hi = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi)
+        mean_fsd_phi_hi = np.mean(sc_fingerprint_dtm.empirical_fsd_phi_hi)
         (self.init_fsd_mu_lo, self.init_fsd_phi_lo, self.init_fsd_w_lo,
          self.init_fsd_mu_hi, self.init_fsd_phi_hi, self.init_fsd_w_hi) = self.generate_fsd_init_params(
             mean_fsd_mu_hi, mean_fsd_phi_hi)
@@ -238,10 +237,10 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
     def init_fsd_xi_loc_posterior(self):
         if self._init_fsd_xi_loc_posterior is None:
             xi_list = []
-            for i_gene in range(self.sc_fingerprint_datastore.n_genes):
+            for i_gene in range(self.sc_fingerprint_dtm.n_genes):
                 mu_lo, phi_lo, w_lo, mu_hi, phi_hi, w_hi = self.generate_fsd_init_params(
-                    self.sc_fingerprint_datastore.empirical_fsd_mu_hi[i_gene],
-                    self.sc_fingerprint_datastore.empirical_fsd_phi_hi[i_gene])
+                    self.sc_fingerprint_dtm.empirical_fsd_mu_hi[i_gene],
+                    self.sc_fingerprint_dtm.empirical_fsd_phi_hi[i_gene])
                 xi = self.encode({
                     'mu_lo': torch.tensor(mu_lo, dtype=self.dtype),
                     'phi_lo': torch.tensor(phi_lo, dtype=self.dtype),
@@ -254,8 +253,8 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
         return self._init_fsd_xi_loc_posterior
 
 
-class SortByComponentWeights(Transform):
-    def __init__(self, fsd_codec: FamilySizeDistributionCodec):
+class SortByComponentWeights(transforms.Transform):
+    def __init__(self, fsd_codec: FSDCodec):
         super(SortByComponentWeights, self).__init__()
         self.fsd_codec = fsd_codec
         self._intermediates_cache = {}

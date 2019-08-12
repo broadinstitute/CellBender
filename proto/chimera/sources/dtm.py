@@ -13,7 +13,7 @@ from torch.nn.parameter import Parameter
 from pyro_extras import CustomLogProbTerm, ZeroInflatedNegativeBinomial, \
     MixtureDistribution, logit, logaddexp, get_log_prob_compl
 from fingerprint import SingleCellFingerprintDTM
-from fsd import FamilySizeDistributionCodec, SortByComponentWeights
+from fsd import FSDCodec, SortByComponentWeights
 from sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 from stats import int_ndarray_mode
 
@@ -29,7 +29,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                  init_params_dict: Dict[str, Union[int, float, bool]],
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 fsd_codec: FamilySizeDistributionCodec,
+                 fsd_codec: FSDCodec,
                  guide_type: str = 'map',
                  device=torch.device('cuda'),
                  dtype=torch.float):
