@@ -590,7 +590,7 @@ class SingleCellFingerprintDTM:
         total_obs_reads_per_cell_array = self.total_obs_reads_per_cell[cell_index_array]
         collapsed_index_array = cell_index_array * self.n_genes + gene_index_array
         fingerprint_array = np.asarray(
-            self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_index_array, :])
+            self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_index_array, :].todense())
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
         
         return {
