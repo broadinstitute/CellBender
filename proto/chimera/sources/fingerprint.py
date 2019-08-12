@@ -296,7 +296,9 @@ class SingleCellFingerprintDTM:
                  zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
-                 allow_dense_int_ndarray: bool = False):
+                 allow_dense_int_ndarray: bool = False,
+                 device: torch.device = torch.device("cuda"),
+                 dtype: torch.dtype = torch.float):
         if zinb_fitter_kwargs is None:
             zinb_fitter_kwargs = dict()
 
@@ -305,6 +307,8 @@ class SingleCellFingerprintDTM:
         self.gene_grouping_trans = gene_grouping_trans
         self.n_gene_groups = n_gene_groups
         self.allow_dense_int_ndarray = allow_dense_int_ndarray
+        self.device = device
+        self.dtype = dtype
 
         self._logger = logging.getLogger()
         
@@ -519,10 +523,11 @@ class SingleCellFingerprintDTM:
     def empirical_fsd_p_obs(self) -> np.ndarray:
         return self.empirical_fsd_params[:, 2]
     
-    def _generate_stratified_sample(self,
-                                    mb_genes_per_gene_group: int,
-                                    mb_expressing_cells_per_gene: int,
-                                    mb_silent_cells_per_gene: int) -> Dict[str, np.ndarray]:
+    def _generate_stratified_sample(
+            self,
+            mb_genes_per_gene_group: int,
+            mb_expressing_cells_per_gene: int,
+            mb_silent_cells_per_gene: int) -> Dict[str, np.ndarray]:
         mb_cell_indices_per_gene = []
         mb_cell_scale_factors_per_gene = []
         mb_effective_gene_scale_factors_per_cell = []
@@ -575,9 +580,7 @@ class SingleCellFingerprintDTM:
                                       cell_index_array: np.ndarray,
                                       gene_index_array: np.ndarray,
                                       cell_sampling_site_scale_factor_array: np.ndarray,
-                                      gene_sampling_site_scale_factor_array: np.ndarray,
-                                      device=torch.device("cuda"),
-                                      dtype=torch.float) -> Dict[str, torch.Tensor]:
+                                      gene_sampling_site_scale_factor_array: np.ndarray) -> Dict[str, torch.Tensor]:
         assert cell_index_array.ndim == 1
         assert gene_index_array.ndim == 1
         assert cell_sampling_site_scale_factor_array.ndim == 1
@@ -594,39 +597,37 @@ class SingleCellFingerprintDTM:
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
         
         return {
-            'cell_index_tensor': torch.tensor(cell_index_array, device=device),
-            'gene_index_tensor': torch.tensor(gene_index_array, device=device),
+            'cell_index_tensor': torch.tensor(cell_index_array, device=self.device),
+            'gene_index_tensor': torch.tensor(gene_index_array, device=self.device),
             'total_obs_reads_per_cell_tensor': torch.tensor(
-                total_obs_reads_per_cell_array.astype(np.int), device=device, dtype=dtype),
+                total_obs_reads_per_cell_array.astype(np.int), device=self.device, dtype=self.dtype),
             'fingerprint_tensor': torch.tensor(
-                fingerprint_array.astype(np.int), device=device, dtype=dtype),
+                fingerprint_array.astype(np.int), device=self.device, dtype=self.dtype),
             'empirical_fsd_mu_hi_tensor': torch.tensor(
-                empirical_fsd_mu_hi_array, device=device, dtype=dtype),
+                empirical_fsd_mu_hi_array, device=self.device, dtype=self.dtype),
             'cell_sampling_site_scale_factor_tensor': torch.tensor(
-                cell_sampling_site_scale_factor_array, device=device, dtype=dtype),
+                cell_sampling_site_scale_factor_array, device=self.device, dtype=self.dtype),
             'gene_sampling_site_scale_factor_tensor': torch.tensor(
-                gene_sampling_site_scale_factor_array, device=device, dtype=dtype),
-            'downsampling_rate_tensor': torch.ones(mb_size, device=device, dtype=dtype),
+                gene_sampling_site_scale_factor_array, device=self.device, dtype=self.dtype),
+            'downsampling_rate_tensor': torch.ones(mb_size, device=self.device, dtype=self.dtype),
             'fingerprint_obs_log_prob_prefactor': 1.0}
 
-    def generate_stratified_sample_torch(self,
-                                         mb_genes_per_gene_group: int,
-                                         mb_expressing_cells_per_gene: int,
-                                         mb_silent_cells_per_gene: int,
-                                         device: torch.device = torch.device("cuda"),
-                                         dtype: torch.dtype = torch.float) -> Dict[str, torch.Tensor]:
+    def generate_stratified_sample_torch(
+            self,
+            mb_genes_per_gene_group: int,
+            mb_expressing_cells_per_gene: int,
+            mb_silent_cells_per_gene: int) -> Dict[str, torch.Tensor]:
         sample_dict = self._generate_stratified_sample(
             mb_genes_per_gene_group,
             mb_expressing_cells_per_gene,
             mb_silent_cells_per_gene)
         return self.generate_torch_minibatch_data(
-            sample_dict['cell_index_array'],
-            sample_dict['gene_index_array'],
-            sample_dict['cell_sampling_site_scale_factor_array'],
-            sample_dict['gene_sampling_site_scale_factor_array'],
-            device, dtype)
+            cell_index_array=sample_dict['cell_index_array'],
+            gene_index_array=sample_dict['gene_index_array'],
+            cell_sampling_site_scale_factor_array=sample_dict['cell_sampling_site_scale_factor_array'],
+            gene_sampling_site_scale_factor_array=sample_dict['gene_sampling_site_scale_factor_array'])
 
-    
+
 def downsample_single_fingerprint_numpy(fingerprint_array: np.ndarray, downsampling_rate: float):
     assert fingerprint_array.ndim == 1
     assert 0. <= downsampling_rate <= 1.0
