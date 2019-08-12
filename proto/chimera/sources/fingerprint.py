@@ -380,7 +380,7 @@ class SingleCellFingerprintDTM:
         return self.expressing_cells_per_gene_dict[gene_index]
 
     def get_silent_cell_indices(self, gene_index: int) -> List[int]:
-        return self.expressing_cells_per_gene_dict[gene_index]
+        return self.silent_cells_per_gene_dict[gene_index]
 
     @cachedproperty
     def n_expressing_cells_per_gene(self) -> List[int]:
@@ -610,11 +610,11 @@ class SingleCellFingerprintDTM:
             'fingerprint_obs_log_prob_prefactor': 1.0}
 
     def generate_stratified_sample_torch(self,
-                                         mb_genes_per_gene_group,
-                                         mb_expressing_cells_per_gene,
-                                         mb_silent_cells_per_gene,
-                                         device=torch.device("cuda"),
-                                         dtype=torch.float) -> Dict[str, torch.Tensor]:
+                                         mb_genes_per_gene_group: int,
+                                         mb_expressing_cells_per_gene: int,
+                                         mb_silent_cells_per_gene: int,
+                                         device: torch.device = torch.device("cuda"),
+                                         dtype: torch.dtype = torch.float) -> Dict[str, torch.Tensor]:
         sample_dict = self._generate_stratified_sample(
             mb_genes_per_gene_group,
             mb_expressing_cells_per_gene,
