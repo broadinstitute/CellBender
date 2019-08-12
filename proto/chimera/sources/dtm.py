@@ -12,8 +12,8 @@ from torch.nn.parameter import Parameter
 
 from pyro_extras import CustomLogProbTerm, ZeroInflatedNegativeBinomial, \
     MixtureDistribution, logit, logaddexp, get_log_prob_compl
-from sc_fingerprint import SingleCellFingerprintDataStore
-from sc_fsd_codec import FamilySizeDistributionCodec, SortByComponentWeights
+from fingerprint import SingleCellFingerprintDTM
+from fsd import FamilySizeDistributionCodec, SortByComponentWeights
 from sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 from stats import int_ndarray_mode
 
@@ -21,26 +21,26 @@ import logging
 from collections import defaultdict
 
 
-class SingleCellFamilySizeModel(torch.nn.Module):
+class DropletTimeMachineModel(torch.nn.Module):
 
     EPS = 1e-6
     
     def __init__(self,
                  init_params_dict: Dict[str, Union[int, float, bool]],
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
-                 sc_fingerprint_datastore: SingleCellFingerprintDataStore,
+                 sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  fsd_codec: FamilySizeDistributionCodec,
                  guide_type: str = 'map',
                  device=torch.device('cuda'),
                  dtype=torch.float):
-        super(SingleCellFamilySizeModel, self).__init__()
+        super(DropletTimeMachineModel, self).__init__()
 
         self.model_constraint_params_dict = model_constraint_params_dict
-        self.sc_fingerprint_datastore = sc_fingerprint_datastore
+        self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.fsd_codec = fsd_codec
         
-        self.n_total_cells = sc_fingerprint_datastore.n_cells
-        self.n_total_genes = sc_fingerprint_datastore.n_genes
+        self.n_total_cells = sc_fingerprint_dtm.n_cells
+        self.n_total_genes = sc_fingerprint_dtm.n_genes
 
         self.guide_type = guide_type
 
@@ -64,17 +64,17 @@ class SingleCellFamilySizeModel(torch.nn.Module):
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
 
         # empirical normalization factors
-        self.median_total_reads_per_cell: float = np.median(sc_fingerprint_datastore.total_obs_reads_per_cell).item()
-        self.median_fsd_mu_hi: float = np.median(sc_fingerprint_datastore.empirical_fsd_mu_hi).item()
+        self.median_total_reads_per_cell: float = np.median(sc_fingerprint_dtm.total_obs_reads_per_cell).item()
+        self.median_fsd_mu_hi: float = np.median(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # initial parameters for e_lo
         self.init_alpha_c: float = init_params_dict['chimera.alpha_c']
         self.init_beta_c: float = init_params_dict['chimera.beta_c']
 
         # initial parameters for e_hi
-        self.init_mu_e_hi_g = sc_fingerprint_datastore.empirical_mu_e_hi
-        self.init_phi_e_hi_g = sc_fingerprint_datastore.empirical_phi_e_hi
-        self.init_logit_p_zero_e_hi_g = logit(torch.tensor(sc_fingerprint_datastore.empirical_p_zero_e_hi)).numpy()
+        self.init_mu_e_hi_g = sc_fingerprint_dtm.empirical_mu_e_hi
+        self.init_phi_e_hi_g = sc_fingerprint_dtm.empirical_phi_e_hi
+        self.init_logit_p_zero_e_hi_g = logit(torch.tensor(sc_fingerprint_dtm.empirical_p_zero_e_hi)).numpy()
 
         # logging
         self._logger = logging.getLogger()
@@ -292,7 +292,7 @@ class SingleCellFamilySizeModel(torch.nn.Module):
                             n_particles: int):
 
         # calculate the fingerprint log likelihood
-        fingerprint_log_likelihood_n = SingleCellFamilySizeModel._get_fingerprint_log_likelihood_monte_carlo(
+        fingerprint_log_likelihood_n = DropletTimeMachineModel._get_fingerprint_log_likelihood_monte_carlo(
             fingerprint_tensor_nr=fingerprint_tensor_nr,
             log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
             log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
@@ -634,23 +634,24 @@ class SingleCellFamilySizeModel(torch.nn.Module):
 class PosteriorGeneExpressionSampler(object):
     """Calculates the real gene expression from a trained model using importance sampling"""
     def __init__(self,
-                 sc_family_size_model: SingleCellFamilySizeModel,
+                 dtm_model: DropletTimeMachineModel,
                  device: torch.device,
                  dtype: torch.dtype):
         """Initializer.
 
-        :param sc_family_size_model: an instance of ``SingleCellFamilySizeModel``
+        :param dtm_model: an instance of ``DropletTimeMachineModel``
         :param device: torch device
         :param dtype: torch dtype
         """
-        self.sc_family_size_model = sc_family_size_model
+        self.dtm_model = dtm_model
         self.device = device
         self.dtype = dtype
 
-    def _generate_single_gene_minibatch_data(self,
-                                             gene_index: int,
-                                             cell_index_list: List[int],
-                                             n_particles_cell: int) -> Dict[str, torch.Tensor]:
+    def _generate_single_gene_minibatch_data(
+            self,
+            gene_index: int,
+            cell_index_list: List[int],
+            n_particles_cell: int) -> Dict[str, torch.Tensor]:
         """Generate model input tensors for a given gene index and the cell index range
 
         :param n_particles_cell: repeat factor for every cell
@@ -664,7 +665,7 @@ class PosteriorGeneExpressionSampler(object):
         cell_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
         gene_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
 
-        return self.sc_family_size_model.sc_fingerprint_datastore.generate_torch_minibatch_data(
+        return self.dtm_model.sc_fingerprint_dtm.generate_torch_minibatch_data(
             cell_index_array,
             gene_index_array,
             cell_sampling_site_scale_factor_array,
@@ -672,15 +673,16 @@ class PosteriorGeneExpressionSampler(object):
             self.device,
             self.dtype)
 
-    def _sharded_cell_index_generator(self,
-                                      gene_index: int,
-                                      cell_shard_size: int,
-                                      only_expressing_cells: bool) -> Generator[List[int], None, None]:
-        sc_fingerprint_datastore = self.sc_family_size_model.sc_fingerprint_datastore
+    def _sharded_cell_index_generator(
+            self,
+            gene_index: int,
+            cell_shard_size: int,
+            only_expressing_cells: bool) -> Generator[List[int], None, None]:
+        sc_fingerprint_dtm = self.dtm_model.sc_fingerprint_dtm
         if only_expressing_cells:
-            included_cell_indices = sc_fingerprint_datastore.expressing_cells_dict[gene_index].tolist()
+            included_cell_indices = sc_fingerprint_dtm.expressing_cells_dict[gene_index].tolist()
         else:
-            included_cell_indices = np.arange(0, sc_fingerprint_datastore.n_cells)
+            included_cell_indices = np.arange(0, sc_fingerprint_dtm.n_cells)
         n_included_cells = len(included_cell_indices)
 
         for i_cell_shard in range(n_included_cells // cell_shard_size + 1):
@@ -696,9 +698,9 @@ class PosteriorGeneExpressionSampler(object):
         """Samples the posterior on a given minibatch, replays it on the model, and returns a
         dictionary of intermediate tensors that appear in the model evaluated at the posterior
         samples."""
-        guide_trace = poutine.trace(self.sc_family_size_model.guide).get_trace(
+        guide_trace = poutine.trace(self.dtm_model.guide).get_trace(
             minibatch_data, posterior_sampling_mode=True)
-        trained_model = poutine.replay(self.sc_family_size_model.model, trace=guide_trace)
+        trained_model = poutine.replay(self.dtm_model.model, trace=guide_trace)
         trained_model_trace = poutine.trace(trained_model).get_trace(
             minibatch_data, posterior_sampling_mode=True)
         return trained_model_trace.nodes["_RETURN"]["value"]
@@ -995,9 +997,9 @@ class PosteriorGeneExpressionSampler(object):
             e_hi_std_shard_list.append(__fix_scalar(std_e_hi_n.cpu().numpy()))
             e_hi_map_shard_list.append(__fix_scalar(map_e_hi_n.int().cpu().numpy()))
 
-        e_hi_mean = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
-        e_hi_std = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
-        e_hi_map = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.int)
+        e_hi_mean = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.float)
+        e_hi_std = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.float)
+        e_hi_map = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.int)
 
         e_hi_mean[included_cell_indices] = np.concatenate(e_hi_mean_shard_list)
         e_hi_std[included_cell_indices] = np.concatenate(e_hi_std_shard_list)
@@ -1218,9 +1220,9 @@ class PosteriorGeneExpressionSampler(object):
             e_hi_map_shard_list.append(__fix_scalar(
                 int_ndarray_mode(e_hi_posterior_samples_sn.int().cpu().numpy(), axis=0)))
 
-        e_hi_mean = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
-        e_hi_std = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.float)
-        e_hi_map = np.zeros((self.sc_family_size_model.sc_fingerprint_datastore.n_cells,), dtype=np.int)
+        e_hi_mean = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.float)
+        e_hi_std = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.float)
+        e_hi_map = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.int)
 
         e_hi_mean[included_cell_indices] = np.concatenate(e_hi_mean_shard_list)
         e_hi_std[included_cell_indices] = np.concatenate(e_hi_std_shard_list)

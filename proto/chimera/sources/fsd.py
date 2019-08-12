@@ -9,7 +9,7 @@ from torch.distributions.transforms import Transform
 from torch.nn.parameter import Parameter
 
 from pyro_extras import NegativeBinomial, MixtureDistribution
-from sc_fingerprint import SingleCellFingerprintDataStore
+from fingerprint import SingleCellFingerprintDTM
 
 from abc import abstractmethod
 
@@ -55,7 +55,7 @@ class FamilySizeDistributionCodec(torch.nn.Module):
 
 class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistributionCodec):
     def __init__(self,
-                 sc_fingerprint_datastore: SingleCellFingerprintDataStore,
+                 sc_fingerprint_datastore: SingleCellFingerprintDTM,
                  n_fsd_lo_comps: int,
                  n_fsd_hi_comps: int,
                  fsd_init_params_dict: Dict[str, float],
@@ -199,6 +199,7 @@ class GeneralNegativeBinomialMixtureFamilySizeDistributionCodec(FamilySizeDistri
 
         return dist_lo, dist_hi
 
+    # TODO magic numbers
     def generate_fsd_init_params(self, mu_hi_guess, phi_hi_guess):
         mu_lo = self.fsd_init_mu_lo_to_mu_hi_ratio * mu_hi_guess * np.power(
             np.asarray([self.fsd_init_mu_decay]), np.arange(self.n_fsd_lo_comps))

@@ -10,7 +10,12 @@ from tqdm import tqdm
 from stats import ApproximateZINBFit
 
 
-class SingleCellFingerprint:
+class SingleCellFingerprintBase:
+    """
+    .. note:: This class is supposed to be close to optimally memory-efficient. As such, dense arrays must
+        only be used for quantities that scale either as O(n_cells) or O(n_genes). In particular, the count
+        matrix and the fingerprint tensor is stored as sparse matrices.
+    """
     EPS = np.finfo(np.float).eps
 
     def __init__(self,
@@ -27,7 +32,7 @@ class SingleCellFingerprint:
         :param csr_fingerprint_list: list of sparse fingerprint matrices corresponding to the barcodes in
             ``barcode_list``
 
-        .. note:: the (sparse) fingerprint matrix of a barcode is a matrix of shape ``(n_genes, max_family_size)``.
+        .. note:: The (sparse) fingerprint matrix of a barcode is a matrix of shape ``(n_genes, max_family_size)``.
             A element ``(i, j)`` in the matrix denotes the number of unique instances of gene ``i`` that is
             observed ``j + 1`` times in the experiment. In particular, the first column of the fingerprint matrix
             corresponds to the count of singleton ("orphan") molecules.
@@ -87,7 +92,7 @@ class SingleCellFingerprint:
             pickle.dump(self.csr_fingerprint_dict, f)
     
     @staticmethod
-    def load(input_path: str) -> 'SingleCellFingerprint':
+    def load(input_path: str) -> 'SingleCellFingerprintBase':
         """Instantiate from a .pkl file"""
         with open(input_path, 'rb') as f:
             loader = pickle.Unpickler(f)
@@ -95,17 +100,19 @@ class SingleCellFingerprint:
             csr_fingerprint_dict = loader.load()
         
         max_family_size = csr_fingerprint_dict.items().__iter__().__next__()[1].shape[1]
-        new = SingleCellFingerprint(gene_idx_list, max_family_size)
+        new = SingleCellFingerprintBase(gene_idx_list, max_family_size)
         for barcode, csr_fingerprint in csr_fingerprint_dict.items():
             new._add_new_barcode(barcode, csr_fingerprint)
         return new
 
-    @property
+    @cachedproperty
     def n_genes(self):
+        self._finalize()
         return len(self.gene_idx_list)
     
-    @property
+    @cachedproperty
     def n_cells(self):
+        self._finalize()
         return len(self.barcode_list)
 
     @cachedproperty
@@ -132,7 +139,7 @@ class SingleCellFingerprint:
         for csr_fingerprint in self.csr_fingerprint_dict.values():
             orphan_reads += np.asarray(csr_fingerprint[:, 0].todense()).flatten()
             all_reads += csr_fingerprint.dot(read_counter)
-        good_turing_estimator = orphan_reads / (SingleCellFingerprint.EPS + all_reads)
+        good_turing_estimator = orphan_reads / (SingleCellFingerprintBase.EPS + all_reads)
         good_turing_estimator[all_reads == 0] = np.nan
         return good_turing_estimator
 
@@ -144,13 +151,13 @@ class SingleCellFingerprint:
             total_gene_expression += np.asarray(np.sum(csr_fingerprint, -1)).flatten()
         return total_gene_expression
 
-    def filter_barcodes(self) -> 'SingleCellFingerprint':
+    def filter_barcodes(self) -> 'SingleCellFingerprintBase':
         raise NotImplementedError
 
     def filter_genes(self,
                      max_good_turing: float = 0.5,
                      min_total_gene_expression: int = 10,
-                     verbose_logging: bool = False) -> 'SingleCellFingerprint':
+                     verbose_logging: bool = False) -> 'SingleCellFingerprintBase':
         # calculate summary statistics
         good_turing_estimator_array = self.good_turing_estimator_g
         total_gene_expression_array = self.total_molecules_per_gene_g
@@ -205,12 +212,12 @@ class SingleCellFingerprint:
         self._logger.warning(f"Number of genes failed both criteria: {num_failed_both}")
         self._logger.warning(f"Number of retained genes: {len(kept_gene_idx_list)}")
         
-        new = SingleCellFingerprint(kept_gene_idx_list, self.max_family_size)
+        new = SingleCellFingerprintBase(kept_gene_idx_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
             new._add_new_barcode(barcode, csr_fingerprint[kept_gene_array_idx_list, :])
         return new
 
-    def subset_genes(self, subset_gene_idx_list: List[int]) -> 'SingleCellFingerprint':
+    def subset_genes(self, subset_gene_idx_list: List[int]) -> 'SingleCellFingerprintBase':
         """Returns a new instance of the collection with subset gene indices.
 
         .. note:: the order of genes in the new collection is the same as the provided sublist of genes.
@@ -223,12 +230,12 @@ class SingleCellFingerprint:
         gene_idx_to_old_list_index_map = {
             gene_index: old_list_index for old_list_index, gene_index in enumerate(self.gene_idx_list)}
         keep_index = list(map(gene_idx_to_old_list_index_map.get, subset_gene_idx_list))
-        new = SingleCellFingerprint(subset_gene_idx_list, self.max_family_size)
+        new = SingleCellFingerprintBase(subset_gene_idx_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
             new._add_new_barcode(barcode, csr_fingerprint[keep_index, :])
         return new
 
-    def subset_barcodes(self, subset_barcode_list: List[int]) -> 'SingleCellFingerprint':
+    def subset_barcodes(self, subset_barcode_list: List[int]) -> 'SingleCellFingerprintBase':
         """Returns a new instance of the collection with subset barcodes.
 
         .. note:: the order of barcodes in the new collection is the same as the provided sublist of barcodes.
@@ -238,7 +245,7 @@ class SingleCellFingerprint:
             "Some of the barcodes in ``subset_barcode_list`` do not exist in the instance!"
         assert len(set(subset_barcode_list)) == len(subset_barcode_list), \
             "The subset barcode list contains repeated entries!"
-        new = SingleCellFingerprint(self.gene_idx_list, self.max_family_size)
+        new = SingleCellFingerprintBase(self.gene_idx_list, self.max_family_size)
         for barcode in subset_barcode_list:
             new._add_new_barcode(barcode, self[barcode])
         return new
@@ -256,7 +263,7 @@ class SingleCellFingerprint:
                 reverse=True)))
         return self.subset_genes(sorted_gene_idx_list_by_expression[first_rank:last_rank])
 
-    def sort_genes_by_expression(self) -> 'SingleCellFingerprint':
+    def sort_genes_by_expression(self) -> 'SingleCellFingerprintBase':
         """Returns a new instance with genes sorted by their expression in descending order"""
         return self.keep_top_k_genes_by_expression(
             first_rank=0,
@@ -268,63 +275,77 @@ def random_choice(a, size):
     return a[random_indices]
 
 
-class SingleCellFingerprintDataStore:
+class SingleCellFingerprintDTM:
+    """This class extends the functionality of SingleCellFingerprintBase for Droplet Time Machine (TM)
+    training."""
     EPS = np.finfo(np.float).eps
 
     # minimum over-dispersion of an estimated negative binomial fit
     MIN_NB_PHI = 1e-2
     
     def __init__(self,
-                 sc_fingerprint: SingleCellFingerprint,
+                 sc_fingerprint_base: SingleCellFingerprintBase,
                  max_estimated_chimera_family_size: int = 1,
                  zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
-                 n_gene_groups: int = 10):
+                 n_gene_groups: int = 10,
+                 allow_dense: bool = False):
         if zinb_fitter_kwargs is None:
             zinb_fitter_kwargs = dict()
 
-        self.sc_fingerprint = sc_fingerprint
+        self.sc_fingerprint_base = sc_fingerprint_base
         self.max_estimated_chimera_family_size = max_estimated_chimera_family_size
         self.gene_grouping_trans = gene_grouping_trans
         self.n_gene_groups = n_gene_groups
-
-        self.n_cells = sc_fingerprint.n_cells
-        self.n_genes = sc_fingerprint.n_genes
-        self.max_family_size = sc_fingerprint.max_family_size
+        self.allow_dense = allow_dense
 
         self._logger = logging.getLogger()
         
         # total observed expression of all genes
-        if np.any(sc_fingerprint.total_molecules_per_gene_g == 0):
+        if np.any(sc_fingerprint_base.total_molecules_per_gene_g == 0):
             self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "\
                                  "entire dataset!")
 
         # ZINB fitter
         self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
 
+    @property
+    def n_cells(self):
+        return self.sc_fingerprint_base.n_cells
+
+    @property
+    def n_genes(self):
+        return self.sc_fingerprint_base.n_genes
+
+    @property
+    def max_family_size(self):
+        return self.sc_fingerprint_base.max_family_size
+
     @cachedproperty
     def dense_fingerprint_ndarray(self) -> np.ndarray:
+        assert self.allow_dense
         fingerprint_array = np.zeros((self.n_cells, self.n_genes, self.max_family_size), dtype=np.uint16)
-        for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-            fingerprint_array[i_cell, :, :] = self.sc_fingerprint[barcode].todense()
+        for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
+            fingerprint_array[i_cell, :, :] = self.sc_fingerprint_base[barcode].todense()
         return fingerprint_array
 
     @cachedproperty
-    def dense_count_matrix(self) -> np.ndarray:
+    def dense_count_matrix_ndarray(self) -> np.ndarray:
+        assert self.allow_dense
         return np.sum(self.dense_fingerprint_ndarray, -1)
 
     @cachedproperty
     def expressing_cells_dict(self) -> Dict[int, np.ndarray]:
         expressing_cells_dict = dict()
         for i_gene in range(self.n_genes):
-            expressing_cells_dict[i_gene] = np.where(self.dense_count_matrix[:, i_gene] > 0)[0]
+            expressing_cells_dict[i_gene] = np.where(self.dense_count_matrix_ndarray[:, i_gene] > 0)[0]
         return expressing_cells_dict
 
     @cachedproperty
     def silent_cells_dict(self) -> Dict[int, np.ndarray]:
         silent_cells_dict = dict()
         for i_gene in range(self.n_genes):
-            silent_cells_dict[i_gene] = np.where(self.dense_count_matrix[:, i_gene] == 0)[0]
+            silent_cells_dict[i_gene] = np.where(self.dense_count_matrix_ndarray[:, i_gene] == 0)[0]
         return silent_cells_dict
 
     @cachedproperty
@@ -343,20 +364,20 @@ class SingleCellFingerprintDataStore:
     def total_obs_reads_per_cell(self) -> np.ndarray:
         total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
         family_size_vector = np.arange(1, self.max_family_size + 1)
-        for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-            total_obs_reads_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode].dot(family_size_vector))
+        for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
+            total_obs_reads_per_cell[i_cell] = np.sum(self.sc_fingerprint_base[barcode].dot(family_size_vector))
         return total_obs_reads_per_cell
 
     @cachedproperty
     def total_obs_molecules_per_cell(self) -> np.ndarray:
         total_obs_molecules_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
-        for i_cell, barcode in enumerate(self.sc_fingerprint.barcode_list):
-            total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint[barcode])
+        for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
+            total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint_base[barcode])
         return total_obs_molecules_per_cell
     
     @cachedproperty
     def total_obs_expr_per_gene(self) -> np.ndarray:
-        return np.sum(self.dense_count_matrix, axis=0)
+        return np.sum(self.dense_count_matrix_ndarray, axis=0)
 
     @cachedproperty
     def mean_obs_expr_per_gene(self) -> np.ndarray:
@@ -424,7 +445,7 @@ class SingleCellFingerprintDataStore:
         p_obs = self.empirical_fsd_params[:, 2][None, :]
 
         # inflate the counts to account for p_obs
-        e_hi_est = self.dense_count_matrix / (self.EPS + p_obs)
+        e_hi_est = self.dense_count_matrix_ndarray / (self.EPS + p_obs)
 
         # fit ZINB to e_hi_est
         empirical_e_hi_params = np.zeros((self.n_genes, 3))
