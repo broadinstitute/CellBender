@@ -2,10 +2,10 @@ numpy
 scipy
 tables
 pandas
-torch
 pyro-ppl>=0.3.2
 scikit-learn
 matplotlib
+sphinx>=2.1
 sphinx-rtd-theme
 sphinx-autodoc-typehints
 sphinxcontrib-programoutput
