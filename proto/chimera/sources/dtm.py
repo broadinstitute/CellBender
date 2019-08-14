@@ -38,10 +38,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.model_constraint_params_dict = model_constraint_params_dict
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.fsd_codec = fsd_codec
-        
-        self.n_total_cells = sc_fingerprint_dtm.n_cells
-        self.n_total_genes = sc_fingerprint_dtm.n_genes
-
         self.guide_type = guide_type
 
         self.device = device
@@ -72,9 +68,15 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.init_beta_c: float = init_params_dict['chimera.beta_c']
 
         # initial parameters for e_hi
-        self.init_mu_e_hi_g = sc_fingerprint_dtm.empirical_mu_e_hi
-        self.init_phi_e_hi_g = sc_fingerprint_dtm.empirical_phi_e_hi
-        self.init_logit_p_zero_e_hi_g = logit(torch.tensor(sc_fingerprint_dtm.empirical_p_zero_e_hi)).numpy()
+        init_log_mu_e_hi_g = np.log(self.EPS + sc_fingerprint_dtm.empirical_mu_e_hi)
+        init_log_phi_e_hi_g = np.log(self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi)
+        init_logit_p_zero_e_hi_g = logit(torch.tensor(sc_fingerprint_dtm.empirical_p_zero_e_hi)).numpy()
+        self.init_e_hi_zeta_gr = np.stack((
+            init_log_mu_e_hi_g,
+            init_log_phi_e_hi_g,
+            init_logit_p_zero_e_hi_g)).T
+        self.init_e_hi_zeta_loc_r = np.mean(self.init_e_hi_zeta_gr, axis=0)
+        self.init_e_hi_zeta_scale = init_params_dict['e_hi.init_zeta_scale']
 
         # logging
         self._logger = logging.getLogger()
@@ -134,18 +136,14 @@ class DropletTimeMachineModel(torch.nn.Module):
             torch.tensor(self.init_beta_c, device=self.device, dtype=self.dtype),
             constraint=constraints.positive)
 
-        # gene expression parameters
-        mu_e_hi_g = pyro.param(
-            "mu_e_hi_g",
-            torch.tensor(self.init_mu_e_hi_g, device=self.device, dtype=self.dtype),
-            constraint=constraints.positive)
-        phi_e_hi_g = pyro.param(
-            "phi_e_hi_g",
-            torch.tensor(self.init_phi_e_hi_g, device=self.device, dtype=self.dtype),
-            constraint=constraints.positive)
-        logit_p_zero_e_hi_g = pyro.param(
-            "logit_p_zero_e_hi_g",
-            torch.tensor(self.init_logit_p_zero_e_hi_g, device=self.device, dtype=self.dtype))
+        # gene expression prior
+        e_hi_zeta_loc_r = pyro.param(
+            "e_hi_zeta_loc_r",
+            torch.tensor(self.init_e_hi_zeta_loc_r, device=self.device, dtype=self.dtype))
+        e_hi_zeta_scale_tril_rr = pyro.param(
+            "e_hi_zeta_scale_tril_rr",
+            self.init_e_hi_zeta_scale * torch.eye(3, device=self.device, dtype=self.dtype),
+            constraint=constraints.lower_cholesky)
 
         # useful auxiliary quantities
         family_size_vector_obs_r = torch.arange(
@@ -163,19 +161,30 @@ class DropletTimeMachineModel(torch.nn.Module):
             fsd_xi_prior_locs_kq,
             fsd_xi_prior_scales_kq)
 
+        # e_hi zeta prior distribution
+        e_hi_zeta_prior_dist = self._get_hi_zeta_prior_dist(
+            e_hi_zeta_loc_r,
+            e_hi_zeta_scale_tril_rr)
+
         with pyro.plate("collapsed_gene_cell", size=mb_size):
 
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 # sample gene family size distribution parameters
                 fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_prior_dist)
 
-            # transform to the constrained space
+                # sample e_hi expression parameters
+                e_hi_zeta_nr = pyro.sample("e_hi_zeta_nr", e_hi_zeta_prior_dist)
+
+            # transform fsd xi to the constrained space
             fsd_params_dict = self.fsd_codec.decode(fsd_xi_nq)
 
             # get chimeric and real family size distributions
             fsd_lo_dist, fsd_hi_dist = self.fsd_codec.get_fsd_components(
                 fsd_params_dict,
                 downsampling_rate_tensor=downsampling_rate_tensor_n)
+
+            # transform e_hi zeta to ZINB parameters
+            mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n = self._decode_e_hi_zeta(e_hi_zeta_nr)
 
             # extract required quantities from the distributions
             mu_fsd_lo_n = fsd_lo_dist.mean.squeeze(-1)
@@ -210,11 +219,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                     alpha_fsd_hi_comps_nj.log() - (alpha_fsd_hi_comps_nj + mu_fsd_hi_comps_nj).log())
             p_obs_hi_comps_nj = get_log_prob_compl(log_p_unobs_hi_comps_nj).exp()
             
-            # slicing expression mu and phi by gene_index_tensor -- we only need these slices later on
-            phi_e_hi_n = phi_e_hi_g[gene_index_tensor_n]
-            mu_e_hi_n = mu_e_hi_g[gene_index_tensor_n]
-            logit_p_zero_e_hi_n = logit_p_zero_e_hi_g[gene_index_tensor_n]
-
             # empirical "cell size" scale estimate
             cell_size_scale_n = total_obs_reads_per_cell_tensor_n / (
                 self.median_total_reads_per_cell * downsampling_rate_tensor_n)
@@ -409,6 +413,13 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         return log_like_n
 
+    @staticmethod
+    def _get_hi_zeta_prior_dist(e_hi_zeta_loc_r: torch.Tensor,
+                                e_hi_zeta_scale_tril_rr: torch.Tensor) -> TorchDistribution:
+        return dist.MultivariateNormal(
+            loc=e_hi_zeta_loc_r,
+            scale_tril=e_hi_zeta_scale_tril_rr)
+
     def _get_fsd_xi_prior_dist(self,
                                fsd_xi_prior_locs_kq: torch.Tensor,
                                fsd_xi_prior_scales_kq: torch.Tensor) -> TorchDistribution:
@@ -442,6 +453,13 @@ class DropletTimeMachineModel(torch.nn.Module):
                 fsd_xi_prior_scales_kq[0, :]).to_event(1)
 
         return fsd_xi_prior_dist
+
+    @staticmethod
+    def _decode_e_hi_zeta(e_hi_zeta_nr) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mu_e_hi_n = e_hi_zeta_nr[..., 0].exp()
+        phi_e_hi_n = e_hi_zeta_nr[..., 1].exp()
+        logit_p_zero_e_hi_n = e_hi_zeta_nr[..., 2]
+        return mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n
 
     @staticmethod
     def _sample_gene_plate_soft_constraints(
@@ -550,6 +568,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         # sizes
         mb_size = fingerprint_tensor_nr.shape[0]
 
+        # fsd xi gmm
         if self.fsd_gmm_num_components > 1:
             # MAP estimate of GMM fsd prior weights
             fsd_xi_prior_weights_map_k = pyro.param(
@@ -564,24 +583,48 @@ class DropletTimeMachineModel(torch.nn.Module):
                     + (1 - self.fsd_gmm_num_components * self.fsd_gmm_min_weight_per_component)
                     * fsd_xi_prior_weights_map_k))
 
-        # point estimate for fsd_xi (gene)
+        # point estimate for fsd xi (per gene)
         fsd_xi_posterior_loc_gq = pyro.param(
             "fsd_xi_posterior_loc_gq",
             self.fsd_codec.get_sorted_fsd_xi(self.fsd_codec.init_fsd_xi_loc_posterior))
-        
+
+        # point estimate for e_hi zeta ( per gene)
+        e_hi_zeta_posterior_loc_gr = pyro.param(
+            "e_hi_zeta_posterior_loc_gr",
+            torch.tensor(self.init_e_hi_zeta_gr, device=self.device, dtype=self.dtype))
+
         # base posterior distribution for xi
         if self.guide_type == 'map':
+
             fsd_xi_posterior_base_dist = dist.Delta(
                 v=fsd_xi_posterior_loc_gq[gene_index_tensor_n, :]).to_event(1)
+
+            e_hi_zeta_posterior_dist = dist.Delta(
+                v=e_hi_zeta_posterior_loc_gr[gene_index_tensor_n, :]).to_event(1)
+
         elif self.guide_type == 'gaussian':
+
+            # scale for fsd xi (per gene)
             fsd_xi_posterior_scale_gq = pyro.param(
                 "fsd_xi_posterior_scale_gq",
                 self.fsd_gmm_init_xi_scale * torch.ones(
-                    (self.n_total_genes, self.fsd_codec.total_fsd_params), device=self.device, dtype=self.dtype),
+                    (self.sc_fingerprint_dtm.n_genes,
+                     self.fsd_codec.total_fsd_params), device=self.device, dtype=self.dtype),
                 constraint=constraints.greater_than(self.fsd_xi_posterior_min_scale))
             fsd_xi_posterior_base_dist = dist.Normal(
                 loc=fsd_xi_posterior_loc_gq[gene_index_tensor_n, :],
                 scale=fsd_xi_posterior_scale_gq[gene_index_tensor_n, :]).to_event(1)
+
+            # scale for e_hi zeta (per gene)
+            e_hi_zeta_posterior_scale_gr = pyro.param(
+                "e_hi_zeta_posterior_scale_gr",
+                self.init_e_hi_zeta_scale * torch.ones(
+                    (self.sc_fingerprint_dtm.n_genes, 3), device=self.device, dtype=self.dtype),
+                constraint=constraints.positive)
+            e_hi_zeta_posterior_dist = dist.Normal(
+                loc=e_hi_zeta_posterior_loc_gr[gene_index_tensor_n, :],
+                scale=e_hi_zeta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1)
+
         else:
             raise Exception("Unknown guide_type!")
         
@@ -593,6 +636,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         with pyro.plate("collapsed_gene_cell", size=mb_size):
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
+                pyro.sample("e_hi_zeta_nr", e_hi_zeta_posterior_dist)
 
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()
