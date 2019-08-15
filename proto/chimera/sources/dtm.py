@@ -1188,7 +1188,9 @@ class PosteriorGeneExpressionSampler(object):
 
         # draw posterior gene expression samples
         e_hi_obs_samples_smnr = get_binomial_samples_sparse_counts(
-            fingerprint_tensor_nr, logit_p_binom_obs_hi_mnr)
+            total_counts=fingerprint_tensor_nr,
+            logits=logit_p_binom_obs_hi_mnr,
+            sample_shape=torch.Size((n_particles_expression,)))
 
         if run_mode == "only_observed":
             e_hi_posterior_samples_smn = e_hi_obs_samples_smnr.sum(-1)
