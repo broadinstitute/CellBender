@@ -11,7 +11,8 @@ from torch.distributions import constraints
 from torch.nn.parameter import Parameter
 
 from pyro_extras import CustomLogProbTerm, ZeroInflatedNegativeBinomial, \
-    MixtureDistribution, logit, logaddexp, get_log_prob_compl
+    MixtureDistribution, logit, logaddexp, get_log_prob_compl, \
+    get_binomial_samples_sparse_counts
 from fingerprint import SingleCellFingerprintDTM
 from fsd import FSDCodec, SortByComponentWeights
 from sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
@@ -1186,10 +1187,8 @@ class PosteriorGeneExpressionSampler(object):
         logit_p_binom_obs_hi_mnr = log_p_binom_obs_hi_mnr - get_log_prob_compl(log_p_binom_obs_hi_mnr)
 
         # draw posterior gene expression samples
-        e_hi_obs_dist = torch.distributions.Binomial(
-            total_count=fingerprint_tensor_nr,
-            logits=logit_p_binom_obs_hi_mnr)
-        e_hi_obs_samples_smnr = e_hi_obs_dist.sample((n_particles_expression,))
+        e_hi_obs_samples_smnr = get_binomial_samples_sparse_counts(
+            fingerprint_tensor_nr, logit_p_binom_obs_hi_mnr)
 
         if run_mode == "only_observed":
             e_hi_posterior_samples_smn = e_hi_obs_samples_smnr.sum(-1)

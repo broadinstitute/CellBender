@@ -333,6 +333,25 @@ class MixtureDistribution(TorchDistribution):
             for log_prob, log_weight in zip(log_probs, log_weights)), -1), -1)
 
 
+def get_binomial_samples_sparse_counts(
+        total_counts: torch.Tensor,
+        logits: torch.Tensor,
+        sample_shape: torch.Size):
+    total_counts_x, logits_x = broadcast_all(total_counts, logits)
+    total_counts_n = total_counts_x.flatten()
+    total_counts_nnz_mask_n = total_counts_n > 0
+    total_counts_nnz_m = total_counts_n[total_counts_nnz_mask_n]
+    logits_nnz_m = logits_x.flatten()[total_counts_nnz_mask_n]
+    binom_nnz_samples_sm = torch.distributions.Binomial(
+        total_count=total_counts_nnz_m,
+        logits=logits_nnz_m).sample(sample_shape)
+    binom_samples_sn = torch.zeros(
+        sample_shape + total_counts_n.shape,
+        dtype=total_counts.dtype, device=total_counts.device)
+    binom_samples_sn[..., total_counts_nnz_mask_n] = binom_nnz_samples_sm
+    return binom_samples_sn.view(sample_shape + total_counts_x.shape)
+
+
 def get_confidence_interval(cdf: torch.Tensor, lower_cdf: float, upper_cdf: float):
     """Calculates confidence intervals from a given empirical CDF along axis=0. A single batch dimension
     is expected at axis=1.
