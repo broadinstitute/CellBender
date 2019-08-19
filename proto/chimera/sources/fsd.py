@@ -2,6 +2,7 @@ import numpy as np
 from typing import Tuple, List, Dict, Union
 
 from pyro.distributions.torch_distribution import TorchDistribution
+from boltons.cacheutils import cachedproperty
 
 import torch
 from torch.distributions import transforms
@@ -203,7 +204,7 @@ class NBMixtureFSDCodec(FSDCodec):
         mu_lo = self.fsd_init_mu_lo_to_mu_hi_ratio * mu_hi_guess * np.power(
             np.asarray([self.fsd_init_mu_decay]), np.arange(self.n_fsd_lo_comps))
         mu_lo = np.maximum(mu_lo, 1.1 * self.fsd_init_min_mu_lo)
-        phi_lo = min(1.0, 0.9 * self.fsd_init_max_phi_lo) * np.ones((self.n_fsd_lo_comps,))
+        phi_lo = np.ones((self.n_fsd_lo_comps,))
         w_lo = np.power(np.asarray([self.fsd_init_w_decay]), np.arange(self.n_fsd_lo_comps))
         w_lo = w_lo / np.sum(w_lo)
 
@@ -216,7 +217,7 @@ class NBMixtureFSDCodec(FSDCodec):
 
         return mu_lo, phi_lo, w_lo, mu_hi, phi_hi, w_hi
 
-    @property
+    @cachedproperty
     def init_fsd_xi_loc_prior(self):
         mu_lo = torch.tensor(self.init_fsd_mu_lo, device=self.device, dtype=self.dtype)
         phi_lo = torch.tensor(self.init_fsd_phi_lo, device=self.device, dtype=self.dtype)
@@ -233,24 +234,22 @@ class NBMixtureFSDCodec(FSDCodec):
             'phi_hi': phi_hi,
             'w_hi': w_hi})
 
-    @property
+    @cachedproperty
     def init_fsd_xi_loc_posterior(self):
-        if self._init_fsd_xi_loc_posterior is None:
-            xi_list = []
-            for i_gene in range(self.sc_fingerprint_dtm.n_genes):
-                mu_lo, phi_lo, w_lo, mu_hi, phi_hi, w_hi = self.generate_fsd_init_params(
-                    self.sc_fingerprint_dtm.empirical_fsd_mu_hi[i_gene],
-                    self.sc_fingerprint_dtm.empirical_fsd_phi_hi[i_gene])
-                xi = self.encode({
-                    'mu_lo': torch.tensor(mu_lo, dtype=self.dtype),
-                    'phi_lo': torch.tensor(phi_lo, dtype=self.dtype),
-                    'w_lo': torch.tensor(w_lo, dtype=self.dtype),
-                    'mu_hi': torch.tensor(mu_hi, dtype=self.dtype),
-                    'phi_hi': torch.tensor(phi_hi, dtype=self.dtype),
-                    'w_hi': torch.tensor(w_hi, dtype=self.dtype)})
-                xi_list.append(xi.unsqueeze(0))
-            self._init_fsd_xi_loc_posterior = torch.cat(xi_list, 0).to(self.device)
-        return self._init_fsd_xi_loc_posterior
+        xi_list = []
+        for i_gene in range(self.sc_fingerprint_dtm.n_genes):
+            mu_lo, phi_lo, w_lo, mu_hi, phi_hi, w_hi = self.generate_fsd_init_params(
+                self.sc_fingerprint_dtm.empirical_fsd_mu_hi[i_gene],
+                self.sc_fingerprint_dtm.empirical_fsd_phi_hi[i_gene])
+            xi = self.encode({
+                'mu_lo': torch.tensor(mu_lo, dtype=self.dtype),
+                'phi_lo': torch.tensor(phi_lo, dtype=self.dtype),
+                'w_lo': torch.tensor(w_lo, dtype=self.dtype),
+                'mu_hi': torch.tensor(mu_hi, dtype=self.dtype),
+                'phi_hi': torch.tensor(phi_hi, dtype=self.dtype),
+                'w_hi': torch.tensor(w_hi, dtype=self.dtype)})
+            xi_list.append(xi.unsqueeze(0))
+        return torch.cat(xi_list, 0).to(self.device)
 
 
 class SortByComponentWeights(transforms.Transform):
