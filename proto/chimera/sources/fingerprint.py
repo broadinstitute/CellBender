@@ -292,7 +292,7 @@ class SingleCellFingerprintDTM:
     
     def __init__(self,
                  sc_fingerprint_base: SingleCellFingerprintBase,
-                 max_estimated_chimera_family_size: int = 1,
+                 max_estimated_chimera_family_size: int = 0,
                  zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,

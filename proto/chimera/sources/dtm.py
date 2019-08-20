@@ -62,7 +62,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # empirical normalization factors
         self.mean_total_reads_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_reads_per_cell).item()
-        self.mean_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
+        self.read_depth_scale: float = np.sum(sc_fingerprint_dtm.total_obs_reads_per_cell) / 20_000_000
 
         # initial parameters for e_lo
         self.init_alpha_c: float = init_params_dict['chimera.alpha_c']
@@ -236,7 +236,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 alpha_c=alpha_c,
                 beta_c=beta_c,
                 cell_size_scale_n=cell_size_scale_n,
-                mean_fsd_mu_hi=self.mean_fsd_mu_hi,
+                read_depth_scale=self.read_depth_scale,
                 mu_e_hi_n=mu_e_hi_n,
                 phi_e_hi_n=phi_e_hi_n,
                 logit_p_zero_e_hi_n=logit_p_zero_e_hi_n,
@@ -322,7 +322,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             alpha_c: torch.Tensor,
             beta_c: torch.Tensor,
             cell_size_scale_n: torch.Tensor,
-            mean_fsd_mu_hi: float,
+            read_depth_scale: float,
             mu_e_hi_n: torch.Tensor,
             phi_e_hi_n: torch.Tensor,
             logit_p_zero_e_hi_n: torch.Tensor,
@@ -333,7 +333,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         :param alpha_c: baseline chimera formation coefficient
         :param beta_c: cell-size-dependent chimera formation coefficient
         :param cell_size_scale_n: (relative) cell size scale factor
-        :param mean_fsd_mu_hi: empirical dataset-wide median family size
+        :param read_depth_scale: empirical dataset-wide read-depth scale
         :param mu_fsd_hi_n: mean family size per real molecule
         :param mu_e_hi_n: prior rate of real gene expression
         :param phi_e_hi_n: prior over-dispersion of real gene expression
@@ -347,9 +347,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             mu=mu_e_hi_n,
             phi=phi_e_hi_n)
         mean_e_hi_n = e_hi_prior_dist_global.mean
-        normalized_total_fragments_n = mean_e_hi_n * mu_fsd_hi_n / (
-                mean_fsd_mu_hi * downsampling_rate_tensor_n)
-        mu_e_lo_n = (alpha_c + beta_c * cell_size_scale_n) * normalized_total_fragments_n
+        scaled_mu_fsd_hi_n = mu_fsd_hi_n / read_depth_scale
+        scaled_total_fragments_n = mean_e_hi_n * scaled_mu_fsd_hi_n / downsampling_rate_tensor_n
+        mu_e_lo_n = (alpha_c + beta_c * cell_size_scale_n) * scaled_total_fragments_n
         return mu_e_lo_n
 
     @staticmethod
