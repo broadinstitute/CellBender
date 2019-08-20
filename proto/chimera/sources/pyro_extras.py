@@ -340,16 +340,21 @@ def get_binomial_samples_sparse_counts(
     total_counts_x, logits_x = broadcast_all(total_counts, logits)
     total_counts_n = total_counts_x.flatten()
     total_counts_nnz_mask_n = total_counts_n > 0
-    total_counts_nnz_m = total_counts_n[total_counts_nnz_mask_n]
-    logits_nnz_m = logits_x.flatten()[total_counts_nnz_mask_n]
-    binom_nnz_samples_sm = torch.distributions.Binomial(
-        total_count=total_counts_nnz_m,
-        logits=logits_nnz_m).sample(sample_shape)
-    binom_samples_sn = torch.zeros(
-        sample_shape + total_counts_n.shape,
-        dtype=total_counts.dtype, device=total_counts.device)
-    binom_samples_sn[..., total_counts_nnz_mask_n] = binom_nnz_samples_sm
-    return binom_samples_sn.view(sample_shape + total_counts_x.shape)
+    if torch.any(total_counts_nnz_mask_n).item():
+        total_counts_nnz_m = total_counts_n[total_counts_nnz_mask_n]
+        logits_nnz_m = logits_x.flatten()[total_counts_nnz_mask_n]
+        binom_nnz_samples_sm = torch.distributions.Binomial(
+            total_count=total_counts_nnz_m,
+            logits=logits_nnz_m).sample(sample_shape)
+        binom_samples_sn = torch.zeros(
+            sample_shape + total_counts_n.shape,
+            dtype=total_counts.dtype, device=total_counts.device)
+        binom_samples_sn[..., total_counts_nnz_mask_n] = binom_nnz_samples_sm
+        return binom_samples_sn.view(sample_shape + total_counts_x.shape)
+    else:
+        return torch.zeros(
+            sample_shape + total_counts_x.shape,
+            dtype=total_counts.dtype, device=total_counts.device)
 
 
 def get_confidence_interval(cdf: torch.Tensor, lower_cdf: float, upper_cdf: float):
