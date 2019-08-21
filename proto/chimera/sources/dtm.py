@@ -49,6 +49,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.fsd_gmm_dirichlet_concentration: float = init_params_dict['fsd.gmm_dirichlet_concentration']
         self.fsd_gmm_init_xi_scale: float = init_params_dict['fsd.gmm_init_xi_scale']
         self.fsd_gmm_min_xi_scale: float = init_params_dict['fsd.gmm_min_xi_scale']
+        self.fsd_gmm_max_xi_scale: Union[None, float] = init_params_dict['fsd.gmm_max_xi_scale']
         self.fsd_gmm_init_components_perplexity: float = init_params_dict['fsd.gmm_init_components_perplexity']
         self.fsd_gmm_min_weight_per_component: float = init_params_dict['fsd.gmm_min_weight_per_component']
         self.enable_fsd_w_dirichlet_reg: bool = init_params_dict['fsd.enable_fsd_w_dirichlet_reg']
@@ -121,12 +122,17 @@ class DropletTimeMachineModel(torch.nn.Module):
                 (self.fsd_gmm_num_components, self.fsd_codec.total_fsd_params),
                 dtype=self.dtype, device=self.device))
 
+        if self.fsd_gmm_max_xi_scale is None:
+            fsd_xi_prior_scales_constraint = constraints.greater_than(self.fsd_gmm_min_xi_scale)
+        else:
+            fsd_xi_prior_scales_constraint = constraints.interval(
+                self.fsd_gmm_min_xi_scale, self.fsd_gmm_max_xi_scale)
         fsd_xi_prior_scales_kq = pyro.param(
             "fsd_xi_prior_scales_kq",
             self.fsd_gmm_init_xi_scale * torch.ones(
                 (self.fsd_gmm_num_components, self.fsd_codec.total_fsd_params),
                 dtype=self.dtype, device=self.device),
-            constraint=constraints.greater_than(self.fsd_gmm_min_xi_scale))
+            constraint=fsd_xi_prior_scales_constraint)
         
         # chimera parameters
         alpha_c = pyro.param(
