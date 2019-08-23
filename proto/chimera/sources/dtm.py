@@ -63,7 +63,8 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # empirical normalization factors
         self.mean_total_reads_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_reads_per_cell).item()
-        self.read_depth_scale: float = np.sum(sc_fingerprint_dtm.total_obs_reads_per_cell) / 20_000_000
+        # self.read_depth_scale: float = np.sum(sc_fingerprint_dtm.total_obs_reads_per_cell) / 20_000_000
+        self.read_depth_scale: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # initial parameters for e_lo
         self.init_alpha_c: float = init_params_dict['chimera.alpha_c']
