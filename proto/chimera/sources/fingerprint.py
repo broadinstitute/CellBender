@@ -24,7 +24,8 @@ class SingleCellFingerprintBase:
                  gene_idx_list: List[int],
                  max_family_size: int,
                  barcode_list: Union[None, List[int]] = None,
-                 csr_fingerprint_list: Union[None, List[sp.csr_matrix]] = None):
+                 csr_fingerprint_list: Union[None, List[sp.csr_matrix]] = None,
+                 verbose: bool = True):
         """Initializer.
 
         :param gene_idx_list: list of gene indices (these indices could correspond to gene identities in an
@@ -52,6 +53,7 @@ class SingleCellFingerprintBase:
         self.max_family_size = max_family_size
         self.csr_fingerprint_dict: Dict[int, sp.csr_matrix] = dict()
         self.barcode_list: List[int] = list()
+        self.verbose = verbose
         self._logger = logging.getLogger()
         self._finalized = False
 
@@ -82,6 +84,10 @@ class SingleCellFingerprintBase:
                 f"family size ({self.max_family_size})!"
         self.csr_fingerprint_dict[barcode] = csr_fingerprint
         self.barcode_list.append(barcode)
+
+    def _log_caching(self, name: str):
+        if self.verbose:
+            self._logger.warning(f"Calculating and caching {name}...")
 
     def __getitem__(self, barcode: int) -> sp.csr_matrix:
         """Returns the fingerprint for a given barcode (NOTE: not barcode index!)"""
@@ -124,6 +130,7 @@ class SingleCellFingerprintBase:
             ``barcode_list``).
         """
         self._finalize()
+        self._log_caching("collapsed_csr_fingerprint_matrix")
         return sp.vstack(list(map(self.csr_fingerprint_dict.get, self.barcode_list)))
 
     @cachedproperty
@@ -133,6 +140,7 @@ class SingleCellFingerprintBase:
         .. note:: yields NaN if a gene has no counts across all barcodes.
         """
         self._finalize()
+        self._log_caching("good_turing_estimator_g")
         orphan_reads = np.zeros((self.n_genes,), dtype=np.float)
         all_reads = np.zeros((self.n_genes,), dtype=np.float)
         read_counter = np.arange(1, self.max_family_size + 1)
@@ -146,6 +154,7 @@ class SingleCellFingerprintBase:
     @cachedproperty
     def total_molecules_per_gene_g(self) -> np.ndarray:
         self._finalize()
+        self._log_caching("total_molecules_per_gene_g")
         total_gene_expression = np.zeros((self.n_genes,))
         for csr_fingerprint in self.csr_fingerprint_dict.values():
             total_gene_expression += np.asarray(np.sum(csr_fingerprint, -1)).flatten()
@@ -154,6 +163,7 @@ class SingleCellFingerprintBase:
     @cachedproperty
     def sparse_count_matrix_csr(self):
         self._finalize()
+        self._log_caching("sparse_count_matrix_csr")
         return sp.vstack(
             list(map(
                 lambda barcode: sp.csr_matrix(self.csr_fingerprint_dict[barcode].sum(-1)).T,
@@ -302,6 +312,7 @@ class SingleCellFingerprintDTM:
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
                  allow_dense_int_ndarray: bool = False,
+                 verbose: bool = True,
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
         if zinb_fitter_kwargs is None:
@@ -316,6 +327,7 @@ class SingleCellFingerprintDTM:
         self.gene_grouping_trans = gene_grouping_trans
         self.n_gene_groups = n_gene_groups
         self.allow_dense_int_ndarray = allow_dense_int_ndarray
+        self.verbose = verbose
         self.device = device
         self.dtype = dtype
 
@@ -328,6 +340,10 @@ class SingleCellFingerprintDTM:
 
         # ZINB fitter
         self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
+
+    def _log_caching(self, name: str):
+        if self.verbose:
+            self._logger.warning(f"Calculating and caching {name}...")
 
     @cachedproperty
     def n_cells(self):
@@ -343,6 +359,7 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def dense_fingerprint_ndarray(self) -> np.ndarray:
+        self._log_caching("dense_fingerprint_ndarray")
         assert self.allow_dense_int_ndarray
         fingerprint_array = np.zeros((self.n_cells, self.n_genes, self.max_family_size), dtype=np.uint16)
         for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
@@ -351,16 +368,19 @@ class SingleCellFingerprintDTM:
 
     @property
     def sparse_count_matrix_csr(self) -> sp.csr_matrix:
+        self._log_caching("sparse_count_matrix_csr")
         return self.sc_fingerprint_base.sparse_count_matrix_csr
 
     @cachedproperty
     def sparse_count_matrix_csc(self) -> sp.csc_matrix:
+        self._log_caching("sparse_count_matrix_csc")
         return sp.csc_matrix(self.sc_fingerprint_base.sparse_count_matrix_csr)
 
     @cachedproperty
     def family_size_threshold_per_gene(self) -> np.ndarray:
         """Estimates per-gene family size cut-off given a lower CDF threshold on the empirical
         family size distribution."""
+        self._log_caching("family_size_threshold_per_gene")
         assert 0 <= self.low_family_size_cdf_threshold < 1
         family_size_threshold_g = np.zeros((self.n_genes,), dtype=np.int)
         for gene_index in range(self.n_genes):
@@ -377,6 +397,7 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def sparse_family_size_truncated_count_matrix_csr(self):
+        self._log_caching("sparse_family_size_truncated_count_matrix_csr")
         family_size_mask_g = (
                 np.arange(0, self.max_family_size)[:, None]
                 >= (self.family_size_threshold_per_gene - 1)
@@ -391,15 +412,18 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def sparse_family_size_truncated_count_matrix_csc(self):
+        self._log_caching("sparse_family_size_truncated_count_matrix_csc")
         return sp.csc_matrix(self.sparse_family_size_truncated_count_matrix_csr)
 
     @cachedproperty
     def dense_count_matrix_ndarray(self) -> np.ndarray:
+        self._log_caching("dense_count_matrix_ndarray")
         assert self.allow_dense_int_ndarray
         return np.sum(self.dense_fingerprint_ndarray, -1)
 
     @cachedproperty
     def expressing_cells_per_gene_dict(self) -> Dict[int, List[int]]:
+        self._log_caching("expressing_cells_per_gene_dict")
         expressing_cells_per_gene_dict: Dict[int, List[int]] = dict()
         if self.allow_dense_int_ndarray:
             for i_gene in range(self.n_genes):
@@ -413,6 +437,7 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def silent_cells_per_gene_dict(self) -> Dict[int, List[int]]:
+        self._log_caching("silent_cells_per_gene_dict")
         silent_cells_per_gene_dict: Dict[int, List[int]] = dict()
         if self.allow_dense_int_ndarray:
             for i_gene in range(self.n_genes):
@@ -433,18 +458,21 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def n_expressing_cells_per_gene(self) -> List[int]:
+        self._log_caching("n_expressing_cells_per_gene")
         num_expressing_cells = [
             len(self.get_expressing_cell_indices(i_gene)) for i_gene in range(self.n_genes)]
         return num_expressing_cells
 
     @cachedproperty
     def n_silent_cells_per_gene(self) -> List[int]:
+        self._log_caching("n_silent_cells_per_gene")
         num_silent_cells = [
             self.n_cells - self.n_expressing_cells_per_gene[i_gene] for i_gene in range(self.n_genes)]
         return num_silent_cells
 
     @cachedproperty
     def total_obs_reads_per_cell(self) -> np.ndarray:
+        self._log_caching("total_obs_reads_per_cell")
         total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
         family_size_vector = np.arange(1, self.max_family_size + 1)
         for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
@@ -453,6 +481,7 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def total_obs_molecules_per_cell(self) -> np.ndarray:
+        self._log_caching("total_obs_molecules_per_cell")
         total_obs_molecules_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
         for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
             total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint_base[barcode])
@@ -460,14 +489,17 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def total_obs_expr_per_gene(self) -> np.ndarray:
+        self._log_caching("total_obs_expr_per_gene")
         return np.asarray(self.sparse_count_matrix_csr.sum(0)).squeeze(0)
 
     @cachedproperty
     def mean_obs_expr_per_gene(self) -> np.ndarray:
+        self._log_caching("total_obs_expr_per_gene")
         return self.total_obs_expr_per_gene.astype(np.float) / self.n_cells
 
     @cachedproperty
     def pca_features_per_cell(self) -> np.ndarray:
+        self._log_caching("pca_features_per_cell")
         # transformed and family-size-truncated count matrix
         trunc_sparse_count_matrix_csr = self.sparse_family_size_truncated_count_matrix_csr
         trans_trunc_sparse_count_matrix_csr = sp.csr_matrix(
@@ -486,6 +518,7 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def total_obs_molecules_features_per_cell(self) -> np.ndarray:
+        self._log_caching("total_obs_molecules_features_per_cell")
         raw_counts = self.total_obs_molecules_per_cell.astype(np.float)
         log1p_counts = np.log1p(raw_counts)
         raw_mean, raw_std = np.mean(raw_counts), np.std(raw_counts)
@@ -496,12 +529,14 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def all_features_per_cell(self) -> np.ndarray:
+        self._log_caching("all_features_per_cell")
         return np.hstack(
             (self.pca_features_per_cell,
              self.total_obs_molecules_features_per_cell))
 
     @cachedproperty
     def gene_groups_dict(self) -> Dict[int, List[int]]:
+        self._log_caching("gene_groups_dict")
         # the "weight" of each gene is a monotonic (approximately logarithmic) function of its
         # total observed expression
         weights = self.gene_grouping_trans(self.total_obs_expr_per_gene)
@@ -528,6 +563,7 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def empirical_fsd_params(self) -> np.ndarray:
+        self._log_caching("empirical_fsd_params")
         empirical_fsd_params = np.zeros((self.n_genes, 3))
         for gene_index in range(self.n_genes):
             collapsed_slice = gene_index + self.n_genes * np.arange(self.n_cells)
@@ -560,6 +596,7 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def empirical_e_hi_params(self) -> np.ndarray:
+        self._log_caching("empirical_e_hi_params")
         # estimated probability of observing real molecules
         p_obs_g = self.empirical_fsd_params[:, 2]
 
@@ -580,26 +617,32 @@ class SingleCellFingerprintDTM:
 
     @cachedproperty
     def empirical_mu_e_hi(self) -> np.ndarray:
+        self._log_caching("empirical_mu_e_hi")
         return self.empirical_e_hi_params[:, 0]
 
     @cachedproperty
     def empirical_phi_e_hi(self) -> np.ndarray:
+        self._log_caching("empirical_phi_e_hi")
         return self.empirical_e_hi_params[:, 1]
 
     @cachedproperty
     def empirical_p_zero_e_hi(self) -> np.ndarray:
+        self._log_caching("empirical_p_zero_e_hi")
         return self.empirical_e_hi_params[:, 2]
 
     @cachedproperty
     def empirical_fsd_mu_hi(self) -> np.ndarray:
+        self._log_caching("empirical_fsd_mu_hi")
         return self.empirical_fsd_params[:, 0]
 
     @cachedproperty
     def empirical_fsd_phi_hi(self) -> np.ndarray:
+        self._log_caching("empirical_fsd_phi_hi")
         return self.empirical_fsd_params[:, 1]
 
     @cachedproperty
     def empirical_fsd_p_obs(self) -> np.ndarray:
+        self._log_caching("empirical_fsd_p_obs")
         return self.empirical_fsd_params[:, 2]
 
     def _generate_stratified_sample(
