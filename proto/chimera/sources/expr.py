@@ -85,7 +85,8 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  hidden_dims: Tuple[int] = (100, 100),
                  init_cell_feature_weight: float = 0.1,
-                 activation=torch.nn.Softplus(),
+                 initial_transform=torch.nn.Tanh(),
+                 hidden_activation=torch.nn.Sigmoid(),
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
         super(SingleCellFeaturePredictedGeneExpressionPrior, self).__init__(
@@ -93,7 +94,8 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
             device=device,
             dtype=dtype)
         self.hidden_dims = hidden_dims
-        self.activation = activation
+        self.initial_transform = initial_transform
+        self.hidden_activation = hidden_activation
 
         # setup the hidden layers
         self.layers = torch.nn.ModuleList()
@@ -123,9 +125,9 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         """Estimate cell-specific ZINB expression parameters."""
         bias_nr = self.readout_bias_gr[gene_index_tensor_n, :]
-        processed_features_nf = cell_features_nf
+        processed_features_nf = self.initial_transform(cell_features_nf)
         for layer in self.layers:
-            processed_features_nf = self.activation(layer.forward(processed_features_nf))
+            processed_features_nf = self.hidden_activation(layer.forward(processed_features_nf))
         cell_specific_correction_nr = torch.einsum(
             "nf,fnr->nr",
             [processed_features_nf,
