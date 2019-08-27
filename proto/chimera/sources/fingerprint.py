@@ -674,16 +674,22 @@ class SingleCellFingerprintDTM:
         fingerprint_array = np.asarray(
             self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_index_array, :].todense())
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
+        empirical_mean_obs_expr_per_gene_array = self.mean_obs_expr_per_gene[gene_index_array]
+        cell_features_array = self.all_features_per_cell[cell_index_array, :]
 
         return {
             'cell_index_tensor': torch.tensor(cell_index_array, device=self.device),
             'gene_index_tensor': torch.tensor(gene_index_array, device=self.device),
             'total_obs_reads_per_cell_tensor': torch.tensor(
                 total_obs_reads_per_cell_array.astype(np.int), device=self.device, dtype=self.dtype),
+            'empirical_mean_obs_expr_per_gene_tensor': torch.tensor(
+                empirical_mean_obs_expr_per_gene_array, device=self.device, dtype=self.dtype),
             'fingerprint_tensor': torch.tensor(
                 fingerprint_array.astype(np.int), device=self.device, dtype=self.dtype),
             'empirical_fsd_mu_hi_tensor': torch.tensor(
                 empirical_fsd_mu_hi_array, device=self.device, dtype=self.dtype),
+            'cell_features_tensor': torch.tensor(
+                cell_features_array, device=self.device, dtype=self.dtype),
             'cell_sampling_site_scale_factor_tensor': torch.tensor(
                 cell_sampling_site_scale_factor_array, device=self.device, dtype=self.dtype),
             'gene_sampling_site_scale_factor_tensor': torch.tensor(
@@ -731,47 +737,47 @@ def downsample_single_fingerprint_numpy(fingerprint_array: np.ndarray, downsampl
     return downsampled_fingerprint_array
 
 
-def generate_downsampled_minibatch(original_data_dict: Dict[str, torch.Tensor],
-                                   min_downsampling_rate: float,
-                                   max_downsampling_rate: float) -> Dict[str, torch.Tensor]:
-    downsampled_data_dict = dict()
-
-    # copy unchanged data
-    downsampled_data_dict['cell_index_tensor'] = \
-        original_data_dict['cell_index_tensor']
-    downsampled_data_dict['gene_index_tensor'] = \
-        original_data_dict['gene_index_tensor']
-    downsampled_data_dict['cell_sampling_site_scale_factor_tensor'] = \
-        original_data_dict['cell_sampling_site_scale_factor_tensor']
-    downsampled_data_dict['gene_sampling_site_scale_factor_tensor'] = \
-        original_data_dict['gene_sampling_site_scale_factor_tensor']
-
-    # downsampling rate tensor
-    downsampled_data_dict['downsampling_rate_tensor'] = min_downsampling_rate + (
-            (max_downsampling_rate - min_downsampling_rate)
-            * torch.rand_like(original_data_dict['downsampling_rate_tensor']))
-
-    # downsample the total observed reads per cell
-    downsampled_data_dict['total_obs_reads_per_cell_tensor'] = torch.distributions.Binomial(
-        original_data_dict['total_obs_reads_per_cell_tensor'],
-        probs=downsampled_data_dict['downsampling_rate_tensor']).sample()
-
-    # downsample the fingerprint
-    downsampling_rate_numpy = downsampled_data_dict['downsampling_rate_tensor'].cpu().numpy()
-    fingerprint_numpy = original_data_dict['fingerprint_tensor'].cpu().numpy().astype(np.int)
-    downsampled_fingerprint_numpy = np.zeros_like(fingerprint_numpy)
-    for i_cell in range(fingerprint_numpy.shape[0]):
-        downsampled_fingerprint_numpy[i_cell, :] = downsample_single_fingerprint_numpy(
-            fingerprint_numpy[i_cell, :],
-            downsampling_rate_numpy[i_cell])
-    downsampled_data_dict['fingerprint_tensor'] = torch.tensor(
-        downsampled_fingerprint_numpy,
-        dtype=original_data_dict['fingerprint_tensor'].dtype,
-        device=original_data_dict['fingerprint_tensor'].device)
-
-    # downsample the empirical fsd mu hi
-    downsampled_data_dict['empirical_fsd_mu_hi_tensor'] = (
-            downsampled_data_dict['downsampling_rate_tensor'] *
-            original_data_dict['empirical_fsd_mu_hi_tensor'])
-
-    return downsampled_data_dict
+# def generate_downsampled_minibatch(original_data_dict: Dict[str, torch.Tensor],
+#                                    min_downsampling_rate: float,
+#                                    max_downsampling_rate: float) -> Dict[str, torch.Tensor]:
+#     downsampled_data_dict = dict()
+#
+#     # copy unchanged data
+#     downsampled_data_dict['cell_index_tensor'] = \
+#         original_data_dict['cell_index_tensor']
+#     downsampled_data_dict['gene_index_tensor'] = \
+#         original_data_dict['gene_index_tensor']
+#     downsampled_data_dict['cell_sampling_site_scale_factor_tensor'] = \
+#         original_data_dict['cell_sampling_site_scale_factor_tensor']
+#     downsampled_data_dict['gene_sampling_site_scale_factor_tensor'] = \
+#         original_data_dict['gene_sampling_site_scale_factor_tensor']
+#
+#     # downsampling rate tensor
+#     downsampled_data_dict['downsampling_rate_tensor'] = min_downsampling_rate + (
+#             (max_downsampling_rate - min_downsampling_rate)
+#             * torch.rand_like(original_data_dict['downsampling_rate_tensor']))
+#
+#     # downsample the total observed reads per cell
+#     downsampled_data_dict['total_obs_reads_per_cell_tensor'] = torch.distributions.Binomial(
+#         original_data_dict['total_obs_reads_per_cell_tensor'],
+#         probs=downsampled_data_dict['downsampling_rate_tensor']).sample()
+#
+#     # downsample the fingerprint
+#     downsampling_rate_numpy = downsampled_data_dict['downsampling_rate_tensor'].cpu().numpy()
+#     fingerprint_numpy = original_data_dict['fingerprint_tensor'].cpu().numpy().astype(np.int)
+#     downsampled_fingerprint_numpy = np.zeros_like(fingerprint_numpy)
+#     for i_cell in range(fingerprint_numpy.shape[0]):
+#         downsampled_fingerprint_numpy[i_cell, :] = downsample_single_fingerprint_numpy(
+#             fingerprint_numpy[i_cell, :],
+#             downsampling_rate_numpy[i_cell])
+#     downsampled_data_dict['fingerprint_tensor'] = torch.tensor(
+#         downsampled_fingerprint_numpy,
+#         dtype=original_data_dict['fingerprint_tensor'].dtype,
+#         device=original_data_dict['fingerprint_tensor'].device)
+#
+#     # downsample the empirical fsd mu hi
+#     downsampled_data_dict['empirical_fsd_mu_hi_tensor'] = (
+#             downsampled_data_dict['downsampling_rate_tensor'] *
+#             original_data_dict['empirical_fsd_mu_hi_tensor'])
+#
+#     return downsampled_data_dict

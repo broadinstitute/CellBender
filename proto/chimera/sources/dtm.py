@@ -10,12 +10,11 @@ import torch
 from torch.distributions import constraints
 from torch.nn.parameter import Parameter
 
-from pyro_extras import CustomLogProbTerm, ZeroInflatedNegativeBinomial, \
-    MixtureDistribution, logit, logaddexp, get_log_prob_compl, \
+from pyro_extras import CustomLogProbTerm, MixtureDistribution, logaddexp, get_log_prob_compl, \
     get_binomial_samples_sparse_counts
 from fingerprint import SingleCellFingerprintDTM
 from fsd import FSDCodec, SortByComponentWeights
-from expr import SingleCellFeaturePredictedGeneExpressionPrior
+from expr import GeneExpressionPrior
 from sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 from stats import int_ndarray_mode
 
@@ -31,6 +30,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                  init_params_dict: Dict[str, Union[int, float, bool]],
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
+                 gene_expression_prior: GeneExpressionPrior,
                  fsd_codec: FSDCodec,
                  guide_spec_dict: Dict[str, str],
                  device=torch.device('cuda'),
@@ -39,6 +39,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         self.model_constraint_params_dict = model_constraint_params_dict
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
+        self.gene_expression_prior = gene_expression_prior
         self.fsd_codec = fsd_codec
         self.guide_spec_dict = guide_spec_dict
 
@@ -70,18 +71,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.init_alpha_c: float = init_params_dict['chimera.alpha_c']
         self.init_beta_c: float = init_params_dict['chimera.beta_c']
 
-        # initial parameters for e_hi
-        init_log_mu_e_hi_g = np.log(self.EPS + sc_fingerprint_dtm.empirical_mu_e_hi)
-        init_log_phi_e_hi_g = np.log(self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi)
-        init_logit_p_zero_e_hi_g = logit(torch.tensor(sc_fingerprint_dtm.empirical_p_zero_e_hi)).numpy()
-        self.init_e_hi_zeta_gr = np.stack((
-            init_log_mu_e_hi_g,
-            init_log_phi_e_hi_g,
-            init_logit_p_zero_e_hi_g)).T
-        self.init_e_hi_zeta_loc_r = np.mean(self.init_e_hi_zeta_gr, axis=0)
-        self.init_e_hi_zeta_scale = init_params_dict['e_hi.init_zeta_scale']
-        self.e_hi_zeta_cov_f_norm_constraint: Union[None, float] = init_params_dict['e_hi.zeta_cov_f_norm_constraint']
-
         # logging
         self._logger = logging.getLogger()
                 
@@ -89,7 +78,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         raise NotImplementedError
 
     def model(self,
-              data,
+              data: Dict[str, torch.Tensor],
               posterior_sampling_mode: bool = False):
         """
         .. note:: in the variables, we use prefix ``n`` for batch index, ``k`` for mixture component index,
@@ -103,9 +92,11 @@ class DropletTimeMachineModel(torch.nn.Module):
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
         downsampling_rate_tensor_n = data['downsampling_rate_tensor']
         empirical_fsd_mu_hi_tensor_n = data['empirical_fsd_mu_hi_tensor']
+        empirical_mean_obs_expr_per_gene_tensor_n = data['empirical_mean_obs_expr_per_gene_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_index_tensor_n = data['cell_index_tensor']
         total_obs_reads_per_cell_tensor_n = data['total_obs_reads_per_cell_tensor']
+        cell_features_tensor_nf = data['cell_features_tensor']
 
         # sizes
         mb_size = fingerprint_tensor_nr.shape[0]
@@ -114,6 +105,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # register the parameters of the family size distribution codec
         pyro.module("fsd_codec", self.fsd_codec)
+        pyro.module("gene_expression_prior", self.gene_expression_prior)
         
         # GMM prior for family size distribution parameters
         fsd_xi_prior_locs_kq = pyro.param(
@@ -145,15 +137,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             torch.tensor(self.init_beta_c, device=self.device, dtype=self.dtype),
             constraint=constraints.positive)
 
-        # gene expression prior
-        e_hi_zeta_loc_r = pyro.param(
-            "e_hi_zeta_loc_r",
-            torch.tensor(self.init_e_hi_zeta_loc_r, device=self.device, dtype=self.dtype))
-        e_hi_zeta_scale_tril_rr = pyro.param(
-            "e_hi_zeta_scale_tril_rr",
-            self.init_e_hi_zeta_scale * torch.eye(3, device=self.device, dtype=self.dtype),
-            constraint=constraints.lower_cholesky)
-
         # useful auxiliary quantities
         family_size_vector_obs_r = torch.arange(
             1, max_family_size + 1, device=self.device, dtype=self.dtype)
@@ -170,19 +153,11 @@ class DropletTimeMachineModel(torch.nn.Module):
             fsd_xi_prior_locs_kq,
             fsd_xi_prior_scales_kq)
 
-        # e_hi zeta prior distribution
-        e_hi_zeta_prior_dist = self._get_hi_zeta_prior_dist(
-            e_hi_zeta_loc_r,
-            e_hi_zeta_scale_tril_rr)
-
         with pyro.plate("collapsed_gene_cell", size=mb_size):
 
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 # sample gene family size distribution parameters
                 fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_prior_dist)
-
-                # sample e_hi expression parameters
-                e_hi_zeta_nr = pyro.sample("e_hi_zeta_nr", e_hi_zeta_prior_dist)
 
             # transform fsd xi to the constrained space
             fsd_params_dict = self.fsd_codec.decode(fsd_xi_nq)
@@ -192,8 +167,16 @@ class DropletTimeMachineModel(torch.nn.Module):
                 fsd_params_dict,
                 downsampling_rate_tensor=downsampling_rate_tensor_n)
 
-            # transform e_hi zeta to ZINB parameters
-            mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n = self._decode_e_hi_zeta(e_hi_zeta_nr)
+            # extract e_hi prior parameters (per cell)
+            zeta_nr = self.gene_expression_prior.forward(
+                gene_index_tensor_n=gene_index_tensor_n,
+                cell_index_tensor_n=cell_index_tensor_n,
+                downsampling_rate_tensor_n=downsampling_rate_tensor_n,
+                total_obs_reads_per_cell_tensor_n=total_obs_reads_per_cell_tensor_n,
+                cell_features_nf=cell_features_tensor_nf)
+
+            # decode to ZINB parameters
+            mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n = self.gene_expression_prior.decode(zeta_nr)
 
             # extract required quantities from the distributions
             mu_fsd_lo_n = fsd_lo_dist.mean.squeeze(-1)
@@ -238,15 +221,18 @@ class DropletTimeMachineModel(torch.nn.Module):
             log_prob_fsd_lo_obs_nr = log_prob_fsd_lo_full_nr[..., 1:]
             log_prob_fsd_hi_obs_nr = log_prob_fsd_hi_full_nr[..., 1:]
 
+            # total observed molecules per cell
+            e_obs_n = fingerprint_tensor_nr.sum(-1)
+
             # calculate the (poisson) rate of chimeric molecule formation
             mu_e_lo_n = self._get_mu_e_lo_n(
                 alpha_c=alpha_c,
                 beta_c=beta_c,
                 cell_size_scale_n=cell_size_scale_n,
                 read_depth_scale=self.read_depth_scale,
-                mu_e_hi_n=mu_e_hi_n,
-                phi_e_hi_n=phi_e_hi_n,
-                logit_p_zero_e_hi_n=logit_p_zero_e_hi_n,
+                empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
+                p_obs_lo_n=p_obs_lo_n,
+                p_obs_hi_n=p_obs_hi_n,
                 mu_fsd_hi_n=mu_fsd_hi_n,
                 downsampling_rate_tensor_n=downsampling_rate_tensor_n)
 
@@ -330,9 +316,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             beta_c: torch.Tensor,
             cell_size_scale_n: torch.Tensor,
             read_depth_scale: float,
-            mu_e_hi_n: torch.Tensor,
-            phi_e_hi_n: torch.Tensor,
-            logit_p_zero_e_hi_n: torch.Tensor,
+            empirical_mean_obs_expr_per_gene_tensor_n: torch.Tensor,
+            p_obs_lo_n: torch.Tensor,
+            p_obs_hi_n: torch.Tensor,
             mu_fsd_hi_n: torch.Tensor,
             downsampling_rate_tensor_n: torch.Tensor) -> torch.Tensor:
         """Calculates the Poisson rate of chimeric molecule formation
@@ -341,21 +327,17 @@ class DropletTimeMachineModel(torch.nn.Module):
         :param beta_c: cell-size-dependent chimera formation coefficient
         :param cell_size_scale_n: (relative) cell size scale factor
         :param read_depth_scale: empirical dataset-wide read-depth scale
+        :param empirical_mean_obs_expr_per_gene_tensor_n: empirical mean gene expression per cell
+        :param p_obs_lo_n: probability of observing a chimeric molecule
+        :param p_obs_hi_n: probability of observing a real molecule
         :param mu_fsd_hi_n: mean family size per real molecule
-        :param mu_e_hi_n: prior rate of real gene expression
-        :param phi_e_hi_n: prior over-dispersion of real gene expression
-        :param logit_p_zero_e_hi_n: prior log odds of zero-inflation of the real gene expression
         :param downsampling_rate_tensor_n: downsampling scale-factor of raw counts (applicable
             only if downsampling regularization is used -- deprecated)
         :return: Poisson rate of chimeric molecule formation
         """
-        e_hi_prior_dist_global = ZeroInflatedNegativeBinomial(
-            logit_zero=logit_p_zero_e_hi_n,
-            mu=mu_e_hi_n,
-            phi=phi_e_hi_n)
-        mean_e_hi_n = e_hi_prior_dist_global.mean
-        scaled_mu_fsd_hi_n = mu_fsd_hi_n / read_depth_scale
-        scaled_total_fragments_n = mean_e_hi_n * scaled_mu_fsd_hi_n / downsampling_rate_tensor_n
+        estimated_mean_e_hi_n = empirical_mean_obs_expr_per_gene_tensor_n / p_obs_hi_n
+        scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * read_depth_scale)
+        scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
         mu_e_lo_n = (alpha_c + beta_c * cell_size_scale_n) * scaled_total_fragments_n
         return mu_e_lo_n
 
@@ -422,13 +404,6 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         return log_like_n
 
-    @staticmethod
-    def _get_hi_zeta_prior_dist(e_hi_zeta_loc_r: torch.Tensor,
-                                e_hi_zeta_scale_tril_rr: torch.Tensor) -> TorchDistribution:
-        return dist.MultivariateNormal(
-            loc=e_hi_zeta_loc_r,
-            scale_tril=e_hi_zeta_scale_tril_rr)
-
     def _get_fsd_xi_prior_dist(self,
                                fsd_xi_prior_locs_kq: torch.Tensor,
                                fsd_xi_prior_scales_kq: torch.Tensor) -> TorchDistribution:
@@ -462,13 +437,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                 fsd_xi_prior_scales_kq[0, :]).to_event(1)
 
         return fsd_xi_prior_dist
-
-    @staticmethod
-    def _decode_e_hi_zeta(e_hi_zeta_nr) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mu_e_hi_n = e_hi_zeta_nr[..., 0].exp()
-        phi_e_hi_n = e_hi_zeta_nr[..., 1].exp()
-        logit_p_zero_e_hi_n = e_hi_zeta_nr[..., 2]
-        return mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n
 
     @staticmethod
     def _sample_gene_plate_soft_constraints(
@@ -597,11 +565,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             "fsd_xi_posterior_loc_gq",
             self.fsd_codec.get_sorted_fsd_xi(self.fsd_codec.init_fsd_xi_loc_posterior))
 
-        # point estimate for e_hi zeta ( per gene)
-        e_hi_zeta_posterior_loc_gr = pyro.param(
-            "e_hi_zeta_posterior_loc_gr",
-            torch.tensor(self.init_e_hi_zeta_gr, device=self.device, dtype=self.dtype))
-
         # base posterior distribution for fsd xi
         if self.guide_spec_dict['fsd_xi'] == 'map':
 
@@ -623,27 +586,6 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         else:
             raise Exception("Unknown guide specification for fsd_xi: allowed values are 'map' and 'gaussian'")
-        
-        # base posterior distribution for e_hi
-        if self.guide_spec_dict['e_hi'] == 'map':
-
-            e_hi_zeta_posterior_dist = dist.Delta(
-                v=e_hi_zeta_posterior_loc_gr[gene_index_tensor_n, :]).to_event(1)
-
-        elif self.guide_spec_dict['e_hi'] == 'gaussian':
-
-            # scale for e_hi zeta (per gene)
-            e_hi_zeta_posterior_scale_gr = pyro.param(
-                "e_hi_zeta_posterior_scale_gr",
-                self.init_e_hi_zeta_scale * torch.ones(
-                    (self.sc_fingerprint_dtm.n_genes, 3), device=self.device, dtype=self.dtype),
-                constraint=constraints.positive)
-            e_hi_zeta_posterior_dist = dist.Normal(
-                loc=e_hi_zeta_posterior_loc_gr[gene_index_tensor_n, :],
-                scale=e_hi_zeta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1)
-
-        else:
-            raise Exception("Unknown guide specification for e_hi: allowed values are 'map' and 'gaussian'")
 
         # apply a pseudo-bijective transformation to sort xi by component weights
         fsd_xi_sort_trans = SortByComponentWeights(self.fsd_codec)
@@ -653,7 +595,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         with pyro.plate("collapsed_gene_cell", size=mb_size):
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
-                pyro.sample("e_hi_zeta_nr", e_hi_zeta_posterior_dist)
 
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()

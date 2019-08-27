@@ -22,6 +22,12 @@ class GeneExpressionPrior(torch.nn.Module):
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         raise NotImplementedError
 
+    def decode(self, zeta_nr: torch.Tensor):
+        mu_e_hi_n = zeta_nr[..., 0].exp()
+        phi_e_hi_n = zeta_nr[..., 1].exp()
+        logit_p_zero_e_hi_n = zeta_nr[..., 2]
+        return mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n
+
 
 class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
     EPS = 1e-6
@@ -54,6 +60,9 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
                 init_log_mu_e_hi_g,
                 init_log_phi_e_hi_g,
                 init_logit_p_zero_e_hi_g)).transpose(-1, -2))
+
+        # send parameters to device
+        self.to(device)
 
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
