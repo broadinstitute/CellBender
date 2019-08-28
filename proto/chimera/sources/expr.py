@@ -82,7 +82,6 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                  intermediate_dim: int = 5,
                  final_hidden_dims: Tuple[int] = (5,),
                  init_cell_feature_weight: float = 0.1,
-                 initial_transform=lambda x: x,
                  hidden_activation=torch.nn.LeakyReLU(),
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
@@ -90,7 +89,6 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
             sc_fingerprint_dtm=sc_fingerprint_dtm,
             device=device,
             dtype=dtype)
-        self.initial_transform = initial_transform
         self.hidden_activation = hidden_activation
 
         # setup the initial hidden layers
@@ -114,6 +112,19 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                 device=device,
                 dtype=dtype))
 
+        # initialize the first channel to SVD components
+        svd_components_fg = sc_fingerprint_dtm.svd_feature_components
+        svd_loadings_nf = sc_fingerprint_dtm.svd_feature_loadings_per_cell
+        svd_mean_loadings_f = np.mean(svd_loadings_nf, 0)
+        svd_std_loadings_f = np.std(svd_loadings_nf, 0)
+        svd_decoder_weights_fg = svd_std_loadings_f[:, None] * svd_components_fg
+        svd_decoder_bias_g = np.dot(svd_components_fg.T, svd_mean_loadings_f)
+
+        # Note: assuming that features (SVD, size, etc.)
+        self.intermediate_gene_readout_weight_fgh.data[
+            :sc_fingerprint_dtm.n_pca_features, :, 0] = svd_decoder_weights_fg
+        self.intermediate_gene_readout_bias_gh[:, 0] = svd_decoder_bias_g
+
         final_hidden_dims += (3,)
         self.final_layers = torch.nn.ModuleList()
         last_dim = intermediate_dim + 3
@@ -134,7 +145,7 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
         """Estimate cell-specific ZINB expression parameters."""
 
         # process universally
-        processed_features_nf = self.initial_transform(cell_features_nf)
+        processed_features_nf = cell_features_nf
         for layer in self.initial_layers:
             processed_features_nf = self.hidden_activation(layer.forward(processed_features_nf))
 
@@ -154,4 +165,3 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
 
         # output residual
         return gene_specific_bias_nr + hidden_nh
-
