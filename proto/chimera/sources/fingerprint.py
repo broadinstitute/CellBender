@@ -293,14 +293,6 @@ def random_choice(a: List[int], size: int) -> List[int]:
     return random.sample(a, size)
 
 
-def scaled_log1p_transform(
-        nnz_umi_counts: np.ndarray,
-        total_umi_scale: float = 10_000,
-        eps: float = 1e-6) -> np.ndarray:
-    normed_nnz_umi_counts = total_umi_scale * nnz_umi_counts / (eps + np.sum(nnz_umi_counts))
-    return np.log1p(normed_nnz_umi_counts)
-
-
 class SingleCellFingerprintDTM:
     """This class extends the functionality of SingleCellFingerprintBase for Droplet Time Machine (TM)
     training."""
@@ -315,7 +307,7 @@ class SingleCellFingerprintDTM:
                  low_family_size_cdf_threshold: float = 0.05,
                  n_pca_features: int = 50,
                  n_pca_iters: int = 20,
-                 count_trans_feature_extraction: Callable[[np.ndarray], np.ndarray] = scaled_log1p_transform,
+                 count_trans_feature_extraction: Callable[[np.ndarray], np.ndarray] = np.log1p,
                  zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
