@@ -56,7 +56,7 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
             sc_fingerprint_dtm.empirical_p_zero_e_hi,
             device=device,
             dtype=dtype))
-        self.readout_bias_gr = torch.nn.Parameter(
+        self.global_prior_params_gr = torch.nn.Parameter(
             torch.stack((
                 init_log_mu_e_hi_g,
                 init_log_phi_e_hi_g,
@@ -71,9 +71,10 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 intermediate_dim: int = 5,
-                 final_hidden_dims: Tuple[int] = (5,),
+                 intermediate_dim: int = 1,
+                 final_hidden_dims: Tuple[int] = (3, 3, 3),
                  init_cell_feature_weight: float = 0.1,
+                 max_correction_zeta_space: float = 5.0,
                  hidden_activation=torch.nn.LeakyReLU(),
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
@@ -81,13 +82,15 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
             sc_fingerprint_dtm=sc_fingerprint_dtm,
             device=device,
             dtype=dtype)
-        assert intermediate_dim > 1
+        assert intermediate_dim >= 1
+        assert max_correction_zeta_space > 0
 
         self.hidden_activation = hidden_activation
+        self.max_correction_zeta_space = max_correction_zeta_space
+        self.inv_max_correction_zeta_space = 1.0 / max_correction_zeta_space
 
         # initial batch norm layer
         n_input_features = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
-        self.input_batch_norm = torch.nn.BatchNorm1d(n_input_features)
 
         # setup the intermediate cell-feature-based readout weight
         xavier_scale = 1. / np.sqrt(n_input_features)
@@ -102,20 +105,20 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                 device=device,
                 dtype=dtype))
 
-        # # initialize the first channel to the truncated SVD decoder (of the transformed empirical expression)
-        # svd_components_fg = sc_fingerprint_dtm.svd_feature_components
-        # svd_loadings_nf = sc_fingerprint_dtm.svd_feature_loadings_per_cell
-        # svd_mean_loadings_f = np.mean(svd_loadings_nf, 0)
-        # svd_std_loadings_f = np.std(svd_loadings_nf, 0)
-        # svd_decoder_bias_g = init_cell_feature_weight * np.dot(svd_components_fg.T, svd_mean_loadings_f)
-        # svd_decoder_weights_hg = np.zeros((n_input_features, sc_fingerprint_dtm.n_genes))
-        # svd_decoder_weights_hg[:sc_fingerprint_dtm.n_pca_features, :] = init_cell_feature_weight * (
-        #         svd_std_loadings_f[:, None] * svd_components_fg)
-        #
-        # self.intermediate_gene_readout_weight_fgh.data[:, :, 0].copy_(
-        #     torch.tensor(svd_decoder_weights_hg, device=device, dtype=dtype))
-        # self.intermediate_gene_readout_bias_gh.data[:, 0].copy_(
-        #     torch.tensor(svd_decoder_bias_g, device=device, dtype=dtype))
+        # initialize the first channel to the truncated SVD decoder (of the transformed empirical expression)
+        svd_components_fg = sc_fingerprint_dtm.svd_feature_components
+        svd_loadings_nf = sc_fingerprint_dtm.svd_feature_loadings_per_cell
+        svd_mean_loadings_f = np.mean(svd_loadings_nf, 0)
+        svd_std_loadings_f = np.std(svd_loadings_nf, 0)
+        svd_decoder_bias_g = init_cell_feature_weight * np.dot(svd_components_fg.T, svd_mean_loadings_f)
+        svd_decoder_weights_hg = np.zeros((n_input_features, sc_fingerprint_dtm.n_genes))
+        svd_decoder_weights_hg[:sc_fingerprint_dtm.n_pca_features, :] = init_cell_feature_weight * (
+                svd_std_loadings_f[:, None] * svd_components_fg)
+
+        self.intermediate_gene_readout_weight_fgh.data[:, :, 0].copy_(
+            torch.tensor(svd_decoder_weights_hg, device=device, dtype=dtype))
+        self.intermediate_gene_readout_bias_gh.data[:, 0].copy_(
+            torch.tensor(svd_decoder_bias_g, device=device, dtype=dtype))
 
         final_hidden_dims += (3,)
         self.final_layers = torch.nn.ModuleList()
@@ -136,22 +139,23 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         """Estimate cell-specific ZINB expression parameters."""
 
-        # batch normalize the input
-        normed_cell_features_nf = self.input_batch_norm.forward(cell_features_nf)
-
         # apply the gene-specific linear transformation
         intermediate_nh = (
                 torch.einsum(
                     "nf,fnh->nh",
-                    [normed_cell_features_nf,
+                    [cell_features_nf,
                      self.intermediate_gene_readout_weight_fgh[:, gene_index_tensor_n, :]])
                 + self.intermediate_gene_readout_bias_gh[gene_index_tensor_n, :])
 
         # stack the intermediate result and the bias
-        gene_specific_bias_nr = self.readout_bias_gr[gene_index_tensor_n, :]
-        hidden_nh = torch.cat((intermediate_nh, gene_specific_bias_nr), dim=-1)
+        global_prior_params_nr = self.global_prior_params_gr[gene_index_tensor_n, :]
+        cell_specific_correction_nh = torch.cat((intermediate_nh, global_prior_params_nr), dim=-1)
         for layer in self.final_layers:
-            hidden_nh = layer.forward(self.hidden_activation(hidden_nh))
+            cell_specific_correction_nh = layer.forward(self.hidden_activation(cell_specific_correction_nh))
+
+        # soft clamp on the correction strength
+        clamped_cell_specific_correction_nh = self.max_correction_zeta_space * torch.tanh(
+            self.inv_max_correction_zeta_space * cell_specific_correction_nh)
 
         # output residual
-        return gene_specific_bias_nr + hidden_nh
+        return global_prior_params_nr + clamped_cell_specific_correction_nh
