@@ -113,12 +113,11 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
         svd_loadings_nf = sc_fingerprint_dtm.svd_feature_loadings_per_cell
         svd_mean_loadings_f = np.mean(svd_loadings_nf, 0)
         svd_std_loadings_f = np.std(svd_loadings_nf, 0)
-        svd_decoder_bias_g = np.dot(svd_components_fg.T, svd_mean_loadings_f)
+        svd_decoder_bias_g = init_cell_feature_weight * np.dot(svd_components_fg.T, svd_mean_loadings_f)
         svd_decoder_weights_hg = np.zeros((n_input_features, sc_fingerprint_dtm.n_genes))
-        svd_decoder_weights_hg[:sc_fingerprint_dtm.n_pca_features, :] = (
+        svd_decoder_weights_hg[:sc_fingerprint_dtm.n_pca_features, :] = init_cell_feature_weight * (
                 svd_std_loadings_f[:, None] * svd_components_fg)
 
-        # Note: assuming that features (SVD, size, etc.)
         self.intermediate_gene_readout_weight_fgh.data[:, :, 0].copy_(
             torch.tensor(svd_decoder_weights_hg, device=device, dtype=dtype))
         self.intermediate_gene_readout_bias_gh.data[:, 0].copy_(
