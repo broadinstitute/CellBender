@@ -5,7 +5,7 @@ from abc import abstractmethod
 import torch
 from torch.nn.parameter import Parameter
 
-from pyro_extras import logit
+from pyro_extras import logit, get_log_prob_compl, logaddexp
 from fingerprint import SingleCellFingerprintDTM
 
 
@@ -72,10 +72,9 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  intermediate_dim: int = 1,
-                 final_hidden_dims: Tuple[int] = (3, 3, 3),
+                 final_hidden_dims: Tuple[int] = (),
                  init_cell_feature_weight: float = 0.1,
-                 max_correction_zeta_space: float = 5.0,
-                 hidden_activation=torch.nn.LeakyReLU(),
+                 hidden_activation: torch.nn.Module = torch.nn.SELU(),
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
         super(SingleCellFeaturePredictedGeneExpressionPrior, self).__init__(
@@ -83,11 +82,8 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
             device=device,
             dtype=dtype)
         assert intermediate_dim >= 1
-        assert max_correction_zeta_space > 0
 
         self.hidden_activation = hidden_activation
-        self.max_correction_zeta_space = max_correction_zeta_space
-        self.inv_max_correction_zeta_space = 1.0 / max_correction_zeta_space
 
         # initial batch norm layer
         n_input_features = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
@@ -95,12 +91,12 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
         # setup the intermediate cell-feature-based readout weight
         xavier_scale = 1. / np.sqrt(n_input_features)
         self.intermediate_gene_readout_weight_fgh = torch.nn.Parameter(
-            init_cell_feature_weight * xavier_scale * torch.randn(
+            xavier_scale * torch.randn(
                 (n_input_features, sc_fingerprint_dtm.n_genes, intermediate_dim),
                 device=device,
                 dtype=dtype))
         self.intermediate_gene_readout_bias_gh = torch.nn.Parameter(
-            init_cell_feature_weight * xavier_scale * torch.randn(
+            xavier_scale * torch.randn(
                 (sc_fingerprint_dtm.n_genes, intermediate_dim),
                 device=device,
                 dtype=dtype))
@@ -110,9 +106,9 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
         svd_loadings_nf = sc_fingerprint_dtm.svd_feature_loadings_per_cell
         svd_mean_loadings_f = np.mean(svd_loadings_nf, 0)
         svd_std_loadings_f = np.std(svd_loadings_nf, 0)
-        svd_decoder_bias_g = init_cell_feature_weight * np.dot(svd_components_fg.T, svd_mean_loadings_f)
+        svd_decoder_bias_g = np.dot(svd_components_fg.T, svd_mean_loadings_f)
         svd_decoder_weights_hg = np.zeros((n_input_features, sc_fingerprint_dtm.n_genes))
-        svd_decoder_weights_hg[:sc_fingerprint_dtm.n_pca_features, :] = init_cell_feature_weight * (
+        svd_decoder_weights_hg[:sc_fingerprint_dtm.n_pca_features, :] = (
                 svd_std_loadings_f[:, None] * svd_components_fg)
 
         self.intermediate_gene_readout_weight_fgh.data[:, :, 0].copy_(
@@ -120,16 +116,56 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
         self.intermediate_gene_readout_bias_gh.data[:, 0].copy_(
             torch.tensor(svd_decoder_bias_g, device=device, dtype=dtype))
 
-        final_hidden_dims += (3,)
+        final_hidden_dims += (1,)
         self.final_layers = torch.nn.ModuleList()
-        last_dim = intermediate_dim + 3
+        last_dim = intermediate_dim
         for hidden_dim in final_hidden_dims:
             layer = torch.nn.Linear(last_dim, hidden_dim, bias=True)
             last_dim = hidden_dim
             self.final_layers.append(layer)
 
+        # global parameters
+
+        # initialize according to init_cell_feature_weight
+        init_logit_p_conf = np.log(init_cell_feature_weight) - np.log(1 - init_cell_feature_weight)
+        self.logit_p_conf_g = torch.nn.Parameter(
+            init_logit_p_conf * torch.ones(
+                (sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype))
+
+        # initialize to the global value
+        self.log_pred_phi_g = torch.nn.Parameter(self.global_prior_params_gr[:, 1].clone())
+
         # send parameters to device
         self.to(device)
+
+    @staticmethod
+    def interp_global_predicted(log_global_mu_n: torch.Tensor,
+                                log_global_phi_n: torch.Tensor,
+                                logit_global_p_zero_n: torch.Tensor,
+                                log_pred_mu_n: torch.Tensor,
+                                log_pred_phi_n: torch.Tensor,
+                                logit_p_conf_n: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # calculate aux quantities
+        log_global_p_zero_n = torch.nn.functional.logsigmoid(logit_global_p_zero_n)
+        log_global_p_nonzero_n = get_log_prob_compl(log_global_p_zero_n)
+        log_p_conf_n = torch.nn.functional.logsigmoid(logit_p_conf_n)
+        log_p_nonconf_n = get_log_prob_compl(log_p_conf_n)
+
+        # numerically stable interpolation between ZIG and G parameters
+        log_mu_eff_n = (
+                logaddexp(
+                    log_p_nonconf_n + log_global_p_nonzero_n + log_global_mu_n,
+                    log_p_conf_n + log_pred_mu_n)
+                - logaddexp(
+                    log_global_p_nonzero_n,
+                    log_p_conf_n + log_global_p_zero_n))
+        log_phi_eff_n = logaddexp(
+            log_p_conf_n + log_pred_phi_n,
+            log_p_nonconf_n + log_global_phi_n)
+        logit_p_zero_eff_n = logit_global_p_zero_n - torch.log1p(
+            logit_p_conf_n.exp() * (1 + logit_global_p_zero_n.exp()))
+
+        return log_mu_eff_n, log_phi_eff_n, logit_p_zero_eff_n
 
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
@@ -147,15 +183,32 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                      self.intermediate_gene_readout_weight_fgh[:, gene_index_tensor_n, :]])
                 + self.intermediate_gene_readout_bias_gh[gene_index_tensor_n, :])
 
-        # stack the intermediate result and the bias
-        global_prior_params_nr = self.global_prior_params_gr[gene_index_tensor_n, :]
-        cell_specific_correction_nh = torch.cat((intermediate_nh, global_prior_params_nr), dim=-1)
+        # get a prediction and confidence
+        pred_nh = intermediate_nh
         for layer in self.final_layers:
-            cell_specific_correction_nh = layer.forward(self.hidden_activation(cell_specific_correction_nh))
+            pred_nh = layer.forward(self.hidden_activation(pred_nh))
 
-        # soft clamp on the correction strength
-        clamped_cell_specific_correction_nh = self.max_correction_zeta_space * torch.tanh(
-            self.inv_max_correction_zeta_space * cell_specific_correction_nh)
+        log_pred_mu_n = pred_nh[:, 0]
+        log_pred_phi_n = self.log_pred_phi_g[gene_index_tensor_n]
+        logit_p_conf_n = self.logit_p_conf_g[gene_index_tensor_n]
 
-        # output residual
-        return global_prior_params_nr + clamped_cell_specific_correction_nh
+        log_global_mu_n = self.global_prior_params_gr[gene_index_tensor_n, 0]
+        log_global_phi_n = self.global_prior_params_gr[gene_index_tensor_n, 1]
+        logit_global_p_zero_n = self.global_prior_params_gr[gene_index_tensor_n, 2]
+
+        log_mu_eff_n, log_phi_eff_n, logit_p_zero_eff_n = self.interp_global_predicted(
+            log_global_mu_n=log_global_mu_n,
+            log_global_phi_n=log_global_phi_n,
+            logit_global_p_zero_n=logit_global_p_zero_n,
+            log_pred_mu_n=log_pred_mu_n,
+            log_pred_phi_n=log_pred_phi_n,
+            logit_p_conf_n=logit_p_conf_n)
+
+        # stack
+        zeta_nr = torch.cat((
+            log_mu_eff_n.unsqueeze(-1),
+            log_phi_eff_n.unsqueeze(-1),
+            logit_p_zero_eff_n.unsqueeze(-1)), dim=-1)
+
+        return zeta_nr
+
