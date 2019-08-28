@@ -122,8 +122,10 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
 
         # Note: assuming that features (SVD, size, etc.)
         self.intermediate_gene_readout_weight_fgh.data[
-            :sc_fingerprint_dtm.n_pca_features, :, 0] = svd_decoder_weights_fg
-        self.intermediate_gene_readout_bias_gh[:, 0] = svd_decoder_bias_g
+            :sc_fingerprint_dtm.n_pca_features, :, 0].copy_(
+            torch.tensor(svd_decoder_weights_fg, device=device, dtype=dtype))
+        self.intermediate_gene_readout_bias_gh.data[:, 0].copy_(
+            torch.tensor(svd_decoder_bias_g, device=device, dtype=dtype))
 
         final_hidden_dims += (3,)
         self.final_layers = torch.nn.ModuleList()
