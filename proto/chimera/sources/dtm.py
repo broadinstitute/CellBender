@@ -366,6 +366,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         p_lo_obs_nr = log_prob_fsd_lo_obs_nr.exp()
         total_obs_rate_lo_n = mu_e_lo_n * p_lo_obs_nr.sum(-1)
         log_rate_e_lo_nr = mu_e_lo_n.log().unsqueeze(-1) + log_prob_fsd_lo_obs_nr
+        fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
 
         p_hi_obs_nr = log_prob_fsd_hi_obs_nr.exp()
         total_obs_rate_hi_n = mu_e_hi_n * p_hi_obs_nr.sum(-1)
@@ -378,7 +379,8 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         log_poisson_zero_e_hi_contrib_n = (
                 (fingerprint_tensor_nr * log_rate_e_lo_nr).sum(-1)
-                - total_obs_rate_lo_n)  # data-dependent norm factor is dropped
+                - total_obs_rate_lo_n
+                - fingerprint_log_norm_factor_n)  # data-dependent norm factor can be dropped
 
         # non-zero-inflated contribution
 
@@ -392,7 +394,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1))
         log_poisson_nonzero_e_hi_contrib_mn = (
             (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
-            - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn))  # data-dependent norm factor is dropped
+            - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn)
+            - fingerprint_log_norm_factor_n)  # data-dependent norm factor can be dropped
 
         # step 3. average over the Gamma particles
         log_poisson_nonzero_e_hi_contrib_n = log_poisson_nonzero_e_hi_contrib_mn.logsumexp(0) - np.log(n_particles)
