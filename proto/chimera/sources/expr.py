@@ -95,7 +95,7 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
 
         # setup the initial hidden layers
         self.initial_layers = torch.nn.ModuleList()
-        last_dim = sc_fingerprint_dtm.all_features_per_cell.shape[1]
+        last_dim = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
         for hidden_dim in initial_hidden_dims:
             layer = torch.nn.Linear(last_dim, hidden_dim, bias=True)
             last_dim = hidden_dim

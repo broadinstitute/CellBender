@@ -527,7 +527,12 @@ class SingleCellFingerprintDTM:
     def svd_feature_loadings_per_cell(self) -> np.ndarray:
         self._log_caching("svd_feature_loadings_per_cell")
         svd = self.trans_trunc_count_matrix_features_truncated_svd_object
-        features = svd.transform(self.trans_trunc_sparse_count_matrix_csr)
+        return svd.transform(self.trans_trunc_sparse_count_matrix_csr)
+
+    @cachedproperty
+    def svd_feature_z_scores_per_cell(self) -> np.ndarray:
+        self._log_caching("svd_feature_z_scores_per_cell")
+        features = self.svd_feature_loadings_per_cell
         features_mean, features_std = np.mean(features, 0), np.std(features, 0)
         features_z_score = (features - features_mean[None, :]) / (self._eps + features_std[None, :])
         return features_z_score
@@ -537,8 +542,8 @@ class SingleCellFingerprintDTM:
         return self.trans_trunc_count_matrix_features_truncated_svd_object.components_
 
     @cachedproperty
-    def total_obs_molecules_features_per_cell(self) -> np.ndarray:
-        self._log_caching("total_obs_molecules_features_per_cell")
+    def total_obs_molecules_feature_z_scores_per_cell(self) -> np.ndarray:
+        self._log_caching("total_obs_molecules_feature_z_scores_per_cell")
         raw_counts = self.total_obs_molecules_per_cell.astype(np.float)
         log1p_counts = np.log1p(raw_counts)
         raw_mean, raw_std = np.mean(raw_counts), np.std(raw_counts)
@@ -548,11 +553,11 @@ class SingleCellFingerprintDTM:
         return np.hstack((raw_z_score[:, None], log1p_z_score[:, None]))
 
     @cachedproperty
-    def all_features_per_cell(self) -> np.ndarray:
-        self._log_caching("all_features_per_cell")
+    def feature_z_scores_per_cell(self) -> np.ndarray:
+        self._log_caching("feature_z_scores_per_cell")
         return np.hstack(
-            (self.svd_feature_loadings_per_cell,
-             self.total_obs_molecules_features_per_cell))
+            (self.svd_feature_z_scores_per_cell,
+             self.total_obs_molecules_feature_z_scores_per_cell))
 
     @cachedproperty
     def gene_groups_dict(self) -> Dict[int, List[int]]:
@@ -738,7 +743,7 @@ class SingleCellFingerprintDTM:
             self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_index_array, :].todense())
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
         empirical_mean_obs_expr_per_gene_array = self.mean_obs_expr_per_gene[gene_index_array]
-        cell_features_array = self.all_features_per_cell[cell_index_array, :]
+        cell_features_array = self.feature_z_scores_per_cell[cell_index_array, :]
 
         return {
             'cell_index_tensor': torch.tensor(cell_index_array, device=self.device),
