@@ -293,6 +293,14 @@ def random_choice(a: List[int], size: int) -> List[int]:
     return random.sample(a, size)
 
 
+def scaled_log1p_transform(
+        nnz_umi_counts: np.ndarray,
+        total_umi_scale: float = 10_000,
+        eps: float = 1e-6) -> np.ndarray:
+    normed_nnz_umi_counts = total_umi_scale * nnz_umi_counts / (eps + np.sum(nnz_umi_counts))
+    return np.log1p(normed_nnz_umi_counts)
+
+
 class SingleCellFingerprintDTM:
     """This class extends the functionality of SingleCellFingerprintBase for Droplet Time Machine (TM)
     training."""
@@ -304,10 +312,10 @@ class SingleCellFingerprintDTM:
     def __init__(self,
                  sc_fingerprint_base: SingleCellFingerprintBase,
                  max_estimated_chimera_family_size: int = 0,
-                 low_family_size_cdf_threshold: float = 0.1,
-                 n_pca_features: int = 100,
-                 n_pca_iters: int = 100,
-                 count_trans_feature_extraction: Callable[[np.ndarray], np.ndarray] = np.log1p,
+                 low_family_size_cdf_threshold: float = 0.05,
+                 n_pca_features: int = 50,
+                 n_pca_iters: int = 20,
+                 count_trans_feature_extraction: Callable[[np.ndarray], np.ndarray] = scaled_log1p_transform,
                  zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
@@ -498,23 +506,35 @@ class SingleCellFingerprintDTM:
         return self.total_obs_expr_per_gene.astype(np.float) / self.n_cells
 
     @cachedproperty
-    def pca_features_per_cell(self) -> np.ndarray:
-        self._log_caching("pca_features_per_cell")
+    def trans_trunc_sparse_count_matrix_csr(self) -> sp.csr_matrix:
+        self._log_caching("trans_trunc_sparse_count_matrix_csr")
         # transformed and family-size-truncated count matrix
         trunc_sparse_count_matrix_csr = self.sparse_family_size_truncated_count_matrix_csr
-        trans_trunc_sparse_count_matrix_csr = sp.csr_matrix(
+        return sp.csr_matrix(
             (self.count_trans_feature_extraction(trunc_sparse_count_matrix_csr.data),
              trunc_sparse_count_matrix_csr.indices,
              trunc_sparse_count_matrix_csr.indptr),
             shape=trunc_sparse_count_matrix_csr.shape,
             dtype=np.float)
 
-        # randomized SVD features
+    @cachedproperty
+    def trans_trunc_count_matrix_features_truncated_svd_object(self) -> TruncatedSVD:
+        self._log_caching("trans_trunc_count_matrix_features_truncated_svd_object")
         svd = TruncatedSVD(n_components=self.n_pca_features, n_iter=self.n_pca_iters)
-        features = svd.fit_transform(trans_trunc_sparse_count_matrix_csr)
+        return svd.fit(self.trans_trunc_sparse_count_matrix_csr)
+
+    @cachedproperty
+    def svd_feature_loadings_per_cell(self) -> np.ndarray:
+        self._log_caching("svd_feature_loadings_per_cell")
+        svd = self.trans_trunc_count_matrix_features_truncated_svd_object
+        features = svd.transform(self.trans_trunc_sparse_count_matrix_csr)
         features_mean, features_std = np.mean(features, 0), np.std(features, 0)
         features_z_score = (features - features_mean[None, :]) / (self._eps + features_std[None, :])
         return features_z_score
+
+    @cachedproperty
+    def svd_feature_components(self) -> np.ndarray:
+        return self.trans_trunc_count_matrix_features_truncated_svd_object.components_
 
     @cachedproperty
     def total_obs_molecules_features_per_cell(self) -> np.ndarray:
@@ -531,7 +551,7 @@ class SingleCellFingerprintDTM:
     def all_features_per_cell(self) -> np.ndarray:
         self._log_caching("all_features_per_cell")
         return np.hstack(
-            (self.pca_features_per_cell,
+            (self.svd_feature_loadings_per_cell,
              self.total_obs_molecules_features_per_cell))
 
     @cachedproperty
