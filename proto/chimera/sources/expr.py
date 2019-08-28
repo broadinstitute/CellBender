@@ -10,7 +10,7 @@ from fingerprint import SingleCellFingerprintDTM
 
 
 class GeneExpressionPrior(torch.nn.Module):
-    UNCONSTRAINED_SPACE_CLIPPING = 10.
+    UNCONSTRAINED_SPACE_CLIPPING = 8.
 
     def __init__(self):
         super(GeneExpressionPrior, self).__init__()
@@ -78,7 +78,6 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 initial_hidden_dims: Tuple[int] = (),
                  intermediate_dim: int = 5,
                  final_hidden_dims: Tuple[int] = (5,),
                  init_cell_feature_weight: float = 0.1,
@@ -89,21 +88,18 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
             sc_fingerprint_dtm=sc_fingerprint_dtm,
             device=device,
             dtype=dtype)
+        assert intermediate_dim > 1
+
         self.hidden_activation = hidden_activation
 
         # setup the initial hidden layers
-        self.initial_layers = torch.nn.ModuleList()
-        last_dim = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
-        for hidden_dim in initial_hidden_dims:
-            layer = torch.nn.Linear(last_dim, hidden_dim, bias=True)
-            last_dim = hidden_dim
-            self.initial_layers.append(layer)
+        n_input_features = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
 
         # setup the intermediate cell-feature-based readout weight
-        xavier_scale = 1. / np.sqrt(last_dim)
+        xavier_scale = 1. / np.sqrt(n_input_features)
         self.intermediate_gene_readout_weight_fgh = torch.nn.Parameter(
             init_cell_feature_weight * xavier_scale * torch.randn(
-                (last_dim, sc_fingerprint_dtm.n_genes, intermediate_dim),
+                (n_input_features, sc_fingerprint_dtm.n_genes, intermediate_dim),
                 device=device,
                 dtype=dtype))
         self.intermediate_gene_readout_bias_gh = torch.nn.Parameter(
@@ -117,13 +113,14 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
         svd_loadings_nf = sc_fingerprint_dtm.svd_feature_loadings_per_cell
         svd_mean_loadings_f = np.mean(svd_loadings_nf, 0)
         svd_std_loadings_f = np.std(svd_loadings_nf, 0)
-        svd_decoder_weights_fg = svd_std_loadings_f[:, None] * svd_components_fg
         svd_decoder_bias_g = np.dot(svd_components_fg.T, svd_mean_loadings_f)
+        svd_decoder_weights_hg = np.zeros((n_input_features, sc_fingerprint_dtm.n_genes))
+        svd_decoder_weights_hg[:sc_fingerprint_dtm.n_pca_features, :] = (
+                svd_std_loadings_f[:, None] * svd_components_fg)
 
         # Note: assuming that features (SVD, size, etc.)
-        self.intermediate_gene_readout_weight_fgh.data[
-            :sc_fingerprint_dtm.n_pca_features, :, 0].copy_(
-            torch.tensor(svd_decoder_weights_fg, device=device, dtype=dtype))
+        self.intermediate_gene_readout_weight_fgh.data[:, :, 0].copy_(
+            torch.tensor(svd_decoder_weights_hg, device=device, dtype=dtype))
         self.intermediate_gene_readout_bias_gh.data[:, 0].copy_(
             torch.tensor(svd_decoder_bias_g, device=device, dtype=dtype))
 
@@ -146,16 +143,11 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         """Estimate cell-specific ZINB expression parameters."""
 
-        # process universally
-        processed_features_nf = cell_features_nf
-        for layer in self.initial_layers:
-            processed_features_nf = self.hidden_activation(layer.forward(processed_features_nf))
-
-        # select by gene
+        # select the gene-specific linear transformation
         intermediate_nh = (
                 torch.einsum(
                     "nf,fnh->nh",
-                    [processed_features_nf,
+                    [cell_features_nf,
                      self.intermediate_gene_readout_weight_fgh[:, gene_index_tensor_n, :]])
                 + self.intermediate_gene_readout_bias_gh[gene_index_tensor_n, :])
 
