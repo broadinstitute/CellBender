@@ -57,13 +57,25 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
             device=device,
             dtype=dtype))
         self.global_prior_params_gr = torch.nn.Parameter(
-            torch.stack((
-                init_log_mu_e_hi_g,
-                init_log_phi_e_hi_g,
-                init_logit_p_zero_e_hi_g)).transpose(-1, -2))
+            torch.cat((
+                init_log_mu_e_hi_g.unsqueeze(-1),
+                init_log_phi_e_hi_g.unsqueeze(-1),
+                init_logit_p_zero_e_hi_g.unsqueeze(-1)), dim=-1))
 
         # send parameters to device
         self.to(device)
+
+    def forward(self,
+                gene_index_tensor_n: torch.Tensor,
+                cell_index_tensor_n: torch.Tensor,
+                downsampling_rate_tensor_n: torch.Tensor,
+                total_obs_reads_per_cell_tensor_n: torch.Tensor,
+                cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
+        zeta_nr = torch.cat(
+            (self.init_log_mu_e_hi_g[gene_index_tensor_n].unsqueeze(-1),
+             self.log_phi_e_hi_g[gene_index_tensor_n].unsqueeze(-1),
+             self.logit_p_zero_e_hi_g[gene_index_tensor_n].unsqueeze(-1)), dim=-1)
+        return zeta_nr
 
 
 class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior):
@@ -212,3 +224,78 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
 
         return zeta_nr
 
+
+class SingleCellFeaturePredictedGeneExpressionPriorNew(GeneExpressionPrior):
+    EPS = 1e-6
+
+    def __init__(self,
+                 sc_fingerprint_dtm: SingleCellFingerprintDTM,
+                 hidden_dims: Tuple[int] = (50,),
+                 hidden_activation: torch.nn.Module = torch.nn.SELU(),
+                 device: torch.device = torch.device('cuda'),
+                 dtype: torch.dtype = torch.float):
+        super(SingleCellFeaturePredictedGeneExpressionPriorNew, self).__init__()
+
+        self.sc_fingerprint_dtm = sc_fingerprint_dtm
+        self.hidden_activation = hidden_activation
+        self.device = device
+        self.dtype = dtype
+
+        # hidden layers
+        n_input_features = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
+        self.hidden_layers = torch.nn.ModuleList()
+        last_dim = n_input_features
+        for hidden_dim in hidden_dims:
+            layer = torch.nn.Linear(last_dim, hidden_dim, bias=True)
+            last_dim = hidden_dim
+            self.hidden_layers.append(layer)
+
+        # setup the final cell-feature-based readout weight
+        xavier_scale = 1. / np.sqrt(n_input_features)
+        self.readout_weight_hg = torch.nn.Parameter(
+            xavier_scale * torch.randn(
+                (last_dim, sc_fingerprint_dtm.n_genes),
+                device=device, dtype=dtype))
+        self.readout_bias_g = torch.nn.Parameter(
+            xavier_scale * torch.randn(
+                (sc_fingerprint_dtm.n_genes,),
+                device=device, dtype=dtype))
+
+        # global parameters
+        self.log_phi_e_hi_g = torch.nn.Parameter(
+            self.unc_to_pos_trans_backward(torch.tensor(
+                self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
+                device=device, dtype=dtype)))
+        self.logit_p_zero_e_hi_g = torch.nn.Parameter(
+            logit(torch.tensor(
+                sc_fingerprint_dtm.empirical_p_zero_e_hi,
+                device=device, dtype=dtype)))
+
+        self.to(device)
+
+    def forward(self,
+                gene_index_tensor_n: torch.Tensor,
+                cell_index_tensor_n: torch.Tensor,
+                downsampling_rate_tensor_n: torch.Tensor,
+                total_obs_reads_per_cell_tensor_n: torch.Tensor,
+                cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
+        """Estimate cell-specific ZINB expression parameters."""
+
+        activations_nh = cell_features_nf
+        for layer in self.hidden_layers:
+            activations_nh = self.hidden_activation(layer.forward(activations_nh))
+
+        # gene-specific linear readout of expression rate
+        log_pred_mu_n = (
+                torch.einsum(
+                    "nh,hn->n",
+                    [activations_nh,
+                     self.readout_weight_hg[:, gene_index_tensor_n]])
+                + self.readout_bias_g[gene_index_tensor_n])
+
+        zeta_nr = torch.cat(
+            (log_pred_mu_n.unsqueeze(-1),
+             self.log_phi_e_hi_g[gene_index_tensor_n].unsqueeze(-1),
+             self.logit_p_zero_e_hi_g[gene_index_tensor_n].unsqueeze(-1)), dim=-1)
+
+        return zeta_nr
