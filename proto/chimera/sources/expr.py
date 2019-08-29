@@ -19,8 +19,6 @@ class GeneExpressionPrior(torch.nn.Module):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                downsampling_rate_tensor_n: torch.Tensor,
-                total_obs_reads_per_cell_tensor_n: torch.Tensor,
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         raise NotImplementedError
 
@@ -68,8 +66,6 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                downsampling_rate_tensor_n: torch.Tensor,
-                total_obs_reads_per_cell_tensor_n: torch.Tensor,
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         zeta_nr = torch.cat(
             (self.init_log_mu_e_hi_g[gene_index_tensor_n].unsqueeze(-1),
@@ -182,8 +178,6 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                downsampling_rate_tensor_n: torch.Tensor,
-                total_obs_reads_per_cell_tensor_n: torch.Tensor,
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         """Estimate cell-specific ZINB expression parameters."""
 
@@ -276,8 +270,6 @@ class SingleCellFeaturePredictedGeneExpressionPriorNew(GeneExpressionPrior):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                downsampling_rate_tensor_n: torch.Tensor,
-                total_obs_reads_per_cell_tensor_n: torch.Tensor,
                 cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
         """Estimate cell-specific ZINB expression parameters."""
 

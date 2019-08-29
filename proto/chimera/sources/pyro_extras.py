@@ -191,7 +191,7 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
     
     @lazy_property
     def log_prob_zero(self):
-        return torch.nn.LogSigmoid()(self.logit_zero)
+        return torch.nn.functional.logsigmoid(self.logit_zero)
     
     @lazy_property
     def log_prob_nonzero(self):
@@ -223,11 +223,11 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
     
     def log_prob(self, value):
         if self._validate_args:
-            self._validate_sample(value)        
+            self._validate_sample(value)
         log_prob_zero, log_prob_nonzero, mu, phi, value = broadcast_all(
             self.log_prob_zero, self.log_prob_nonzero, self.mu, self.phi, value)
         z_mask = (value == 0)
-        nnz_mask = 1 - z_mask
+        nnz_mask = torch.bitwise_not(z_mask)
         out = torch.zeros_like(value)
         alpha = (self.EPS + phi).reciprocal()
         log_prob_nb_zero = alpha * (alpha.log() - (alpha + mu).log())

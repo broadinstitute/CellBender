@@ -171,8 +171,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             zeta_nr = self.gene_expression_prior.forward(
                 gene_index_tensor_n=gene_index_tensor_n,
                 cell_index_tensor_n=cell_index_tensor_n,
-                downsampling_rate_tensor_n=downsampling_rate_tensor_n,
-                total_obs_reads_per_cell_tensor_n=total_obs_reads_per_cell_tensor_n,
                 cell_features_nf=cell_features_tensor_nf)
 
             # decode to ZINB parameters
