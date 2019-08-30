@@ -10,36 +10,15 @@ from fingerprint import SingleCellFingerprintDTM
 
 
 class GeneExpressionPrior(torch.nn.Module):
-    max_logit_p_zero = +5.0
-    min_logit_p_zero = -5.0
-    max_log_phi = +2.0
-    min_log_phi = -5.0
-    max_log_mu = +8.0
-    min_log_mu = -8.0
-
     def __init__(self):
         super(GeneExpressionPrior, self).__init__()
-        self.unc_to_pos_trans_forward = torch.exp
-        self.unc_to_pos_trans_backward = torch.log
 
     @abstractmethod
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
+                cell_features_nf: Union[None, torch.Tensor]) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
-
-    def decode(self, zeta_nr: torch.Tensor):
-        mu_e_hi_n = self.unc_to_pos_trans_forward(zeta_nr[..., 0])
-        phi_e_hi_n = self.unc_to_pos_trans_forward(zeta_nr[..., 1])
-        logit_p_zero_e_hi_n = zeta_nr[..., 2]
-        print(f"min(log_mu_e_hi): {torch.min(zeta_nr[..., 0]).item()}, "
-              f"max(mu_e_hi): {torch.max(zeta_nr[..., 0]).item()}")
-        print(f"min(log_phi_e_hi): {torch.min(zeta_nr[..., 1]).item()}, "
-              f"max(log_phi_e_hi): {torch.max(zeta_nr[..., 1]).item()}")
-        print(f"min(logit_p_zero_e_hi): {torch.min(zeta_nr[..., 2]).item()}, "
-              f"max(logit_p_zero_e_hi): {torch.max(zeta_nr[..., 2]).item()}")
-        return mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n
 
 
 class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
@@ -55,11 +34,11 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
         self.dtype = dtype
         self.mean_total_reads_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_reads_per_cell).item()
 
-        init_log_mu_e_hi_g = self.unc_to_pos_trans_backward(torch.tensor(
+        init_log_mu_e_hi_g = self.log(torch.tensor(
             self.EPS + sc_fingerprint_dtm.empirical_mu_e_hi,
             device=device,
             dtype=dtype))
-        init_log_phi_e_hi_g = self.unc_to_pos_trans_backward(torch.tensor(
+        init_log_phi_e_hi_g = self.log(torch.tensor(
             self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
             device=device,
             dtype=dtype))
@@ -79,12 +58,11 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
-        zeta_nr = torch.cat(
-            (self.init_log_mu_e_hi_g[gene_index_tensor_n].unsqueeze(-1),
-             self.log_phi_e_hi_g[gene_index_tensor_n].unsqueeze(-1),
-             self.logit_p_zero_e_hi_g[gene_index_tensor_n].unsqueeze(-1)), dim=-1)
-        return zeta_nr
+                cell_features_nf: Union[None, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        return {
+            'log_mu_e_hi_n': self.global_prior_params_gr[gene_index_tensor_n, 0],
+            'log_phi_e_hi_n': self.global_prior_params_gr[gene_index_tensor_n, 1],
+            'logit_p_zero_e_hi_n': self.global_prior_params_gr[gene_index_tensor_n, 2]}
 
 
 class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior):
@@ -191,7 +169,7 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
+                cell_features_nf: Union[None, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Estimate cell-specific ZINB expression parameters."""
 
         # apply the gene-specific linear transformation
@@ -223,13 +201,10 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior
             log_pred_phi_n=log_pred_phi_n,
             logit_p_conf_n=logit_p_conf_n)
 
-        # stack
-        zeta_nr = torch.cat((
-            log_mu_eff_n.unsqueeze(-1),
-            log_phi_eff_n.unsqueeze(-1),
-            logit_p_zero_eff_n.unsqueeze(-1)), dim=-1)
-
-        return zeta_nr
+        return {
+            'log_mu_e_hi_n': log_mu_eff_n,
+            'log_phi_e_hi_n': log_phi_eff_n,
+            'logit_p_zero_e_hi_n': logit_global_p_zero_n}
 
 
 class SingleCellFeaturePredictedGeneExpressionPriorNew(GeneExpressionPrior):
@@ -270,7 +245,7 @@ class SingleCellFeaturePredictedGeneExpressionPriorNew(GeneExpressionPrior):
 
         # global parameters
         self.log_phi_e_hi_g = torch.nn.Parameter(
-            self.unc_to_pos_trans_backward(torch.tensor(
+            self.log(torch.tensor(
                 self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
                 device=device, dtype=dtype)))
         self.logit_p_zero_e_hi_g = torch.nn.Parameter(
@@ -283,7 +258,7 @@ class SingleCellFeaturePredictedGeneExpressionPriorNew(GeneExpressionPrior):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                cell_features_nf: Union[None, torch.Tensor]) -> torch.Tensor:
+                cell_features_nf: Union[None, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Estimate cell-specific ZINB expression parameters."""
 
         activations_nh = cell_features_nf
@@ -298,9 +273,7 @@ class SingleCellFeaturePredictedGeneExpressionPriorNew(GeneExpressionPrior):
                      self.readout_weight_hg[:, gene_index_tensor_n]])
                 + self.readout_bias_g[gene_index_tensor_n])
 
-        zeta_nr = torch.cat(
-            (log_pred_mu_n.unsqueeze(-1),
-             self.log_phi_e_hi_g[gene_index_tensor_n].unsqueeze(-1),
-             self.logit_p_zero_e_hi_g[gene_index_tensor_n].unsqueeze(-1)), dim=-1)
-
-        return zeta_nr
+        return {
+            'log_mu_e_hi_n': log_pred_mu_n,
+            'log_phi_e_hi_n': self.log_phi_e_hi_g[gene_index_tensor_n],
+            'logit_p_zero_e_hi_n': self.logit_p_zero_e_hi_g[gene_index_tensor_n]}
