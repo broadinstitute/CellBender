@@ -10,6 +10,13 @@ from fingerprint import SingleCellFingerprintDTM
 
 
 class GeneExpressionPrior(torch.nn.Module):
+    max_logit_p_zero = +5.0
+    min_logit_p_zero = -5.0
+    max_log_phi = +2.0
+    min_log_phi = -5.0
+    max_log_mu = +8.0
+    min_log_mu = -8.0
+
     def __init__(self):
         super(GeneExpressionPrior, self).__init__()
         self.unc_to_pos_trans_forward = torch.exp
@@ -26,6 +33,12 @@ class GeneExpressionPrior(torch.nn.Module):
         mu_e_hi_n = self.unc_to_pos_trans_forward(zeta_nr[..., 0])
         phi_e_hi_n = self.unc_to_pos_trans_forward(zeta_nr[..., 1])
         logit_p_zero_e_hi_n = zeta_nr[..., 2]
+        print(f"min(log_mu_e_hi): {torch.min(zeta_nr[..., 0]).item()}, "
+              f"max(mu_e_hi): {torch.max(zeta_nr[..., 0]).item()}")
+        print(f"min(log_phi_e_hi): {torch.min(zeta_nr[..., 1]).item()}, "
+              f"max(log_phi_e_hi): {torch.max(zeta_nr[..., 1]).item()}")
+        print(f"min(logit_p_zero_e_hi): {torch.min(zeta_nr[..., 2]).item()}, "
+              f"max(logit_p_zero_e_hi): {torch.max(zeta_nr[..., 2]).item()}")
         return mu_e_hi_n, phi_e_hi_n, logit_p_zero_e_hi_n
 
 
