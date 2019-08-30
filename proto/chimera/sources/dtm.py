@@ -168,18 +168,19 @@ class DropletTimeMachineModel(torch.nn.Module):
                 downsampling_rate_tensor=downsampling_rate_tensor_n)
 
             # extract e_hi prior parameters (per cell)
-            e_hi_prior_params_dict = self.gene_expression_prior.forward(
-                gene_index_tensor_n=gene_index_tensor_n,
-                cell_index_tensor_n=cell_index_tensor_n,
-                cell_features_nf=cell_features_tensor_nf,
-                total_obs_reads_per_cell_tensor_n=total_obs_reads_per_cell_tensor_n,
-                downsampling_rate_tensor_n=downsampling_rate_tensor_n)
-            log_mu_e_hi_n = e_hi_prior_params_dict['log_mu_e_hi_n']
-            log_phi_e_hi_n = e_hi_prior_params_dict['log_phi_e_hi_n']
-            logit_p_zero_e_hi_n = e_hi_prior_params_dict['logit_p_zero_e_hi_n']
+            with torch.no_grad():
+                e_hi_prior_params_dict = self.gene_expression_prior.forward(
+                    gene_index_tensor_n=gene_index_tensor_n,
+                    cell_index_tensor_n=cell_index_tensor_n,
+                    cell_features_nf=cell_features_tensor_nf,
+                    total_obs_reads_per_cell_tensor_n=total_obs_reads_per_cell_tensor_n,
+                    downsampling_rate_tensor_n=downsampling_rate_tensor_n)
+                log_mu_e_hi_n = e_hi_prior_params_dict['log_mu_e_hi_n']
+                log_phi_e_hi_n = e_hi_prior_params_dict['log_phi_e_hi_n']
+                logit_p_zero_e_hi_n = e_hi_prior_params_dict['logit_p_zero_e_hi_n']
 
-            mu_e_hi_n = log_mu_e_hi_n.exp()
-            phi_e_hi_n = log_phi_e_hi_n.exp()
+                mu_e_hi_n = log_mu_e_hi_n.exp()
+                phi_e_hi_n = log_phi_e_hi_n.exp()
 
             # extract required quantities from the distributions
             mu_fsd_lo_n = fsd_lo_dist.mean.squeeze(-1)
