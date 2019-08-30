@@ -297,7 +297,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
             log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
             mu_e_lo_n=mu_e_lo_n,
-            mu_e_hi_n=mu_e_hi_n * cell_size_scale_n,
+            mu_e_hi_n=mu_e_hi_n,
             phi_e_hi_n=phi_e_hi_n,
             logit_p_zero_e_hi_n=logit_p_zero_e_hi_n,
             n_particles=n_particles)
