@@ -34,11 +34,11 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
         self.dtype = dtype
         self.mean_total_reads_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_reads_per_cell).item()
 
-        init_log_mu_e_hi_g = self.log(torch.tensor(
+        init_log_mu_e_hi_g = torch.log(torch.tensor(
             self.EPS + sc_fingerprint_dtm.empirical_mu_e_hi,
             device=device,
             dtype=dtype))
-        init_log_phi_e_hi_g = self.log(torch.tensor(
+        init_log_phi_e_hi_g = torch.log(torch.tensor(
             self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
             device=device,
             dtype=dtype))
@@ -245,7 +245,7 @@ class SingleCellFeaturePredictedGeneExpressionPriorNew(GeneExpressionPrior):
 
         # global parameters
         self.log_phi_e_hi_g = torch.nn.Parameter(
-            self.log(torch.tensor(
+            torch.log(torch.tensor(
                 self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
                 device=device, dtype=dtype)))
         self.logit_p_zero_e_hi_g = torch.nn.Parameter(
