@@ -1,4 +1,3 @@
-%%cython
 # distutils: language = c++
 
 cimport cython
@@ -13,8 +12,7 @@ from libc.stdint cimport uint32_t
 from libcpp.unordered_set cimport unordered_set as unordered_set
 from libcpp.vector cimport vector as vector
 
-@cython.boundscheck(False)
-@cython.wraparound(False)
+
 cdef class CSRBinaryMatrix:
     cdef uint32_t n_rows
     cdef uint32_t n_cols

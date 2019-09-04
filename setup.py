@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 
 import os
-import setuptools
+import sys
+
+from distutils.core import setup, Extension
+from Cython.Build import cythonize
 
 
 def readme():
     with open('README.md') as f:
         return f.read()
-
 
 def get_requirements_filename():
     if 'READTHEDOCS' in os.environ:
@@ -20,7 +22,24 @@ install_requires = [
     line.rstrip() for line in open(os.path.join(os.path.dirname(__file__), get_requirements_filename()))
 ]
 
-setuptools.setup(
+extra_compile_args = ["-std=c++11"]
+extra_link_args = ['-std=c++11']
+
+if sys.platform == "darwin":
+    extra_compile_args.append("-mmacosx-version-min=10.9")
+    extra_link_args.append("-mmacosx-version-min=10.9")
+
+extensions = [
+    Extension(
+        'cellbender.fingerprint_sampler',
+        sources=['proto/chimera/sources/sampling/fingerprint_sampler.pyx'],
+        language='c++',
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args
+    )
+]
+
+setup(
     name='cellbender',
     version='0.1',
     description='A software package for pre-processing and denoising '
@@ -39,6 +58,7 @@ setuptools.setup(
     author_email='sfleming@broadinstitute.org',
     license='MIT',
     packages=['cellbender'],
+    ext_modules=cythonize(extensions),
     install_requires=install_requires,
     entry_points={
         'console_scripts': ['cellbender=cellbender.base_cli:main'],

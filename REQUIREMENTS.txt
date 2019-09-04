@@ -11,3 +11,5 @@ sphinx-rtd-theme
 sphinx-autodoc-typehints
 sphinxcontrib-programoutput
 sphinx-argparse
+cython
+cyrandom
