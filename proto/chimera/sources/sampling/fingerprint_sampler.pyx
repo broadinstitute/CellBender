@@ -196,6 +196,7 @@ cdef class SingleCellFingerprintStratifiedSampler:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.nonecheck(False)
+    @cython.cdivision(True)
     cpdef uint32_t draw(self,
                         uint32_t genes_per_gene_group,
                         uint32_t expressing_cells_per_gene,
@@ -241,7 +242,7 @@ cdef class SingleCellFingerprintStratifiedSampler:
                 c_gene_indices = self.csr_row_sampler.draw(
                     self.gene_groups_csr, i_gene_group, c_n_genes)
                 # weight of randomly drawn genes
-                c_gene_scale_factor = c_gene_group_sz / c_n_genes
+                c_gene_scale_factor = (<double> c_gene_group_sz) / c_n_genes
                 
                 # select silent and expressing cells from each gene
                 i_gene_it = c_gene_indices.begin()
@@ -256,7 +257,7 @@ cdef class SingleCellFingerprintStratifiedSampler:
                         c_expressing_cell_indices = self.csr_row_sampler.draw(
                             self.expressing_cells_csr, i_gene, c_n_expressing_cells)
                         c_expressing_cell_scale_factor = (
-                            c_gene_scale_factor * c_expressing_cells_sz / c_n_expressing_cells)
+                            (c_gene_scale_factor * c_expressing_cells_sz) / c_n_expressing_cells)
                         i_expressing_cell_it = c_expressing_cell_indices.begin()
                         while i_expressing_cell_it != c_expressing_cell_indices.end():
                             cell_index_memview[cell_ptr] = deref(i_expressing_cell_it)
@@ -272,7 +273,7 @@ cdef class SingleCellFingerprintStratifiedSampler:
                         c_silent_cell_indices = self.csr_row_sampler.draw(
                             self.silent_cells_csr, i_gene, c_n_silent_cells)
                         c_silent_cell_scale_factor = (
-                            c_gene_scale_factor * c_silent_cells_sz / c_n_silent_cells)
+                            (c_gene_scale_factor * c_silent_cells_sz) / c_n_silent_cells)
                         i_silent_cell_it = c_silent_cell_indices.begin()
                         while i_silent_cell_it != c_silent_cell_indices.end():
                             cell_index_memview[cell_ptr] = deref(i_silent_cell_it)
