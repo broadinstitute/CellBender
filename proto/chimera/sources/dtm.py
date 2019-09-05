@@ -15,7 +15,7 @@ from pyro_extras import CustomLogProbTerm, MixtureDistribution, logaddexp, get_l
 from fingerprint import SingleCellFingerprintDTM
 from fsd import FSDCodec, SortByComponentWeights
 from expr import GeneExpressionPrior
-from sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
+from importance_sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 from stats import int_ndarray_mode
 
 import logging
