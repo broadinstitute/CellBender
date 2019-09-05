@@ -239,8 +239,10 @@ cdef class SingleCellFingerprintStratifiedSampler:
             c_n_genes = min(genes_per_gene_group, c_gene_group_sz)
             
             if c_n_genes > 0:
+
                 c_gene_indices = self.csr_row_sampler.draw(
                     self.gene_groups_csr, i_gene_group, c_n_genes)
+
                 # weight of randomly drawn genes
                 c_gene_scale_factor = (<double> c_gene_group_sz) / c_n_genes
                 
@@ -253,11 +255,15 @@ cdef class SingleCellFingerprintStratifiedSampler:
                     # draw expressing cells from "i_gene"
                     c_expressing_cells_sz = self.expressing_cells_csr.get_non_zero_cols(i_gene)
                     c_n_expressing_cells = min(expressing_cells_per_gene, c_expressing_cells_sz)
+
                     if c_n_expressing_cells > 0:
+
                         c_expressing_cell_indices = self.csr_row_sampler.draw(
                             self.expressing_cells_csr, i_gene, c_n_expressing_cells)
+
                         c_expressing_cell_scale_factor = (
                             (c_gene_scale_factor * c_expressing_cells_sz) / c_n_expressing_cells)
+
                         i_expressing_cell_it = c_expressing_cell_indices.begin()
                         while i_expressing_cell_it != c_expressing_cell_indices.end():
                             cell_index_memview[cell_ptr] = deref(i_expressing_cell_it)
@@ -269,11 +275,15 @@ cdef class SingleCellFingerprintStratifiedSampler:
                     # draw silent cells from "i_gene"
                     c_silent_cells_sz = self.silent_cells_csr.get_non_zero_cols(i_gene)
                     c_n_silent_cells = min(silent_cells_per_gene, c_silent_cells_sz)
+
                     if c_n_silent_cells > 0:
+
                         c_silent_cell_indices = self.csr_row_sampler.draw(
                             self.silent_cells_csr, i_gene, c_n_silent_cells)
+
                         c_silent_cell_scale_factor = (
                             (c_gene_scale_factor * c_silent_cells_sz) / c_n_silent_cells)
+
                         i_silent_cell_it = c_silent_cell_indices.begin()
                         while i_silent_cell_it != c_silent_cell_indices.end():
                             cell_index_memview[cell_ptr] = deref(i_silent_cell_it)
@@ -284,13 +294,17 @@ cdef class SingleCellFingerprintStratifiedSampler:
 
                     # gene sampling site effective ("fractionalized") scale factor
                     c_total_cells_for_gene = c_n_expressing_cells + c_n_silent_cells
+
                     if c_total_cells_for_gene > 0:
+
                         c_fractionalized_gene_scale_factor = \
                             c_gene_scale_factor / c_total_cells_for_gene
+
                         for i in range(c_total_cells_for_gene):
                             gene_index_memview[gene_ptr + i] = i_gene
                             gene_sampling_site_scale_factor_memview[gene_ptr + i] = \
                                 c_fractionalized_gene_scale_factor
+
                         gene_ptr += c_total_cells_for_gene
 
         return cell_ptr

@@ -31,7 +31,7 @@ if sys.platform == "darwin":
 
 extensions = [
     Extension(
-        'cellbender.fingerprint_sampler',
+        'cellbender.sampling.fingerprint_sampler',
         sources=['proto/chimera/sources/sampling/fingerprint_sampler.pyx'],
         language='c++',
         extra_compile_args=extra_compile_args,

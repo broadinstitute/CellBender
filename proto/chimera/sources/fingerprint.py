@@ -1,15 +1,23 @@
 import numpy as np
 import scipy.sparse as sp
+import torch
+
 import operator
 import pickle
 import logging
-from boltons.cacheutils import cachedproperty
 from typing import Tuple, List, Union, Dict, Callable
-import torch
+
+from boltons.cacheutils import cachedproperty, cachedmethod
+
 from tqdm import tqdm
+
 from sklearn.decomposition import TruncatedSVD
+
 from stats import ApproximateZINBFit
-import random
+from cellbender.sampling.fingerprint_sampler import CSRBinaryMatrix, SingleCellFingerprintStratifiedSampler
+
+# module-level cache for memoization
+_global_cache_dict = dict()
 
 
 class SingleCellFingerprintBase:
@@ -287,10 +295,6 @@ class SingleCellFingerprintBase:
         return self.keep_top_k_genes_by_expression(
             first_rank=0,
             last_rank=self.n_genes)
-
-
-def random_choice(a: List[int], size: int) -> List[int]:
-    return random.sample(a, size)
 
 
 class SingleCellFingerprintDTM:
@@ -662,58 +666,96 @@ class SingleCellFingerprintDTM:
         self._log_caching("empirical_fsd_p_obs")
         return self.empirical_fsd_params[:, 2]
 
-    def _generate_stratified_sample(
-            self,
-            mb_genes_per_gene_group: int,
-            mb_expressing_cells_per_gene: int,
-            mb_silent_cells_per_gene: int) -> Dict[str, np.ndarray]:
-        mb_cell_indices_per_gene = []
-        mb_cell_scale_factors_per_gene = []
-        mb_effective_gene_scale_factors_per_cell = []
-        mb_gene_indices_per_cell = []
+    @cachedmethod(_global_cache_dict)
+    def _get_minibatch_ndarray_buffers(self,
+                                       genes_per_gene_group: int,
+                                       expressing_cells_per_gene: int,
+                                       silent_cells_per_gene: int) -> Dict[str, np.ndarray]:
+        assert genes_per_gene_group > 0
+        assert expressing_cells_per_gene > 0
+        assert silent_cells_per_gene > 0
 
-        # select genes
-        for i_gene_group in range(self.n_gene_groups):
-            gene_size = min(mb_genes_per_gene_group, len(self.gene_groups_dict[i_gene_group]))
-            gene_indices = random_choice(self.gene_groups_dict[i_gene_group], gene_size)
-            gene_scale_factor = len(self.gene_groups_dict[i_gene_group]) / gene_size
+        max_buffer_size = genes_per_gene_group * self.n_gene_groups * (
+                expressing_cells_per_gene + silent_cells_per_gene)
+        gene_index_array = np.zeros((max_buffer_size,), dtype=np.uint32, order='c')
+        cell_index_array = np.zeros((max_buffer_size,), dtype=np.uint32, order='c')
+        gene_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=np.float64, order='c')
+        cell_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=np.float64, order='c')
 
-            # select cells
-            for gene_index in gene_indices:
-                # sample from expressing cells
-                size_expressing = min(mb_expressing_cells_per_gene, self.n_expressing_cells_per_gene[gene_index])
-                expressing_cell_indices = random_choice(
-                    self.get_expressing_cell_indices(gene_index), size_expressing)
-                expressing_scale_factor = gene_scale_factor * (
-                        self.n_expressing_cells_per_gene[gene_index] / size_expressing)
-
-                # sample from silent cells
-                size_silent = min(mb_silent_cells_per_gene, self.n_silent_cells_per_gene[gene_index])
-                silent_cell_indices = random_choice(self.get_silent_cell_indices(gene_index), size_silent)
-                silent_scale_factor = gene_scale_factor * (
-                        self.n_silent_cells_per_gene[gene_index] / size_silent)
-
-                mb_cell_indices_per_gene.append(np.asarray(expressing_cell_indices))
-                mb_cell_indices_per_gene.append(np.asarray(silent_cell_indices))
-                mb_cell_scale_factors_per_gene.append(expressing_scale_factor * np.ones((size_expressing,)))
-                mb_cell_scale_factors_per_gene.append(silent_scale_factor * np.ones((size_silent,)))
-
-                # the effective scale factor for a collapsed gene sampling site is scaled down by the number of cells
-                total_cells_per_gene = size_expressing + size_silent
-                effective_gene_scale_factor = gene_scale_factor / total_cells_per_gene
-                mb_effective_gene_scale_factors_per_cell.append(
-                    effective_gene_scale_factor * np.ones((total_cells_per_gene,)))
-                mb_gene_indices_per_cell.append(gene_index * np.ones((total_cells_per_gene,), dtype=np.int))
-
-        gene_index_array = np.concatenate(mb_gene_indices_per_cell)
-        cell_index_array = np.concatenate(mb_cell_indices_per_gene)
-        cell_sampling_site_scale_factor_array = np.concatenate(mb_cell_scale_factors_per_gene)
-        gene_sampling_site_scale_factor_array = np.concatenate(mb_effective_gene_scale_factors_per_cell)
+        assert gene_index_array.flags['C_CONTIGUOUS']
+        assert cell_index_array.flags['C_CONTIGUOUS']
+        assert gene_sampling_site_scale_factor_array.flags['C_CONTIGUOUS']
+        assert cell_sampling_site_scale_factor_array.flags['C_CONTIGUOUS']
 
         return {'gene_index_array': gene_index_array,
                 'cell_index_array': cell_index_array,
-                'cell_sampling_site_scale_factor_array': cell_sampling_site_scale_factor_array,
-                'gene_sampling_site_scale_factor_array': gene_sampling_site_scale_factor_array}
+                'gene_sampling_site_scale_factor_array': gene_sampling_site_scale_factor_array,
+                'cell_sampling_site_scale_factor_array': cell_sampling_site_scale_factor_array}
+
+    @cachedproperty
+    def gene_expression_csr_binary_matrix(self) -> CSRBinaryMatrix:
+        """Returns the (gene, cell) binary expression matrix as :class:`CSRBinaryMatrix`.
+
+        .. note:: we can get the required indptr and indices from the CSC representation of the
+            (cell, gene) sparse count matrix.
+        """
+        return CSRBinaryMatrix(
+            n_rows=self.n_genes,
+            n_cols=self.n_cells,
+            indices_sz=len(self.sparse_count_matrix_csc.indices),
+            indptr=self.sparse_count_matrix_csc.indptr.astype(np.uint32),
+            indices=self.sparse_count_matrix_csc.indices.astype(np.uint32))
+
+    @cachedproperty
+    def gene_groups_csr_binary_matrix(self) -> CSRBinaryMatrix:
+        indptr = [0]
+        indices = []
+        for i_gene_group in range(self.n_gene_groups):
+            indices += sorted(self.gene_groups_dict[i_gene_group])
+            indptr.append(len(indices))
+        return CSRBinaryMatrix(
+            n_rows=self.n_gene_groups,
+            n_cols=self.n_genes,
+            indices_sz=len(indices),
+            indptr=np.asarray(indptr, dtype=np.uint32),
+            indices=np.asarray(indices, dtype=np.uint32))
+
+    @cachedmethod
+    def stratified_sampler(self, sampling_strategy: str = 'with_replacement'):
+        assert sampling_strategy in ['with_replacement', 'without_replacement']
+        return SingleCellFingerprintStratifiedSampler(
+            gene_groups_csr=self.gene_groups_csr_binary_matrix,
+            expressing_cells_csr=self.gene_expression_csr_binary_matrix,
+            sampling_strategy=sampling_strategy)
+
+    def generate_stratified_sample_torch(
+                self,
+                genes_per_gene_group: int,
+                expressing_cells_per_gene: int,
+                silent_cells_per_gene: int,
+                sampling_strategy: str) -> Dict[str, torch.Tensor]:
+
+        np_buff_dict = self._get_minibatch_ndarray_buffers(
+            genes_per_gene_group=genes_per_gene_group,
+            expressing_cells_per_gene=expressing_cells_per_gene,
+            silent_cells_per_gene=silent_cells_per_gene)
+
+        sampler = self.stratified_sampler(sampling_strategy)
+
+        n_samples = sampler.draw(
+            genes_per_gene_group=genes_per_gene_group,
+            expressing_cells_per_gene=expressing_cells_per_gene,
+            silent_cells_per_gene=silent_cells_per_gene,
+            gene_index_memview=np_buff_dict['gene_index_array'],
+            cell_index_memview=np_buff_dict['gene_index_array'],
+            gene_sampling_site_scale_factor_memview=np_buff_dict['gene_sampling_site_scale_factor_array'],
+            cell_sampling_site_scale_factor_memview=np_buff_dict['cell_sampling_site_scale_factor_array'])
+
+        return self.generate_torch_minibatch_data(
+            cell_index_array=np_buff_dict['cell_index_array'][:n_samples],
+            gene_index_array=np_buff_dict['gene_index_array'][:n_samples],
+            cell_sampling_site_scale_factor_array=np_buff_dict['cell_sampling_site_scale_factor_array'][:n_samples],
+            gene_sampling_site_scale_factor_array=np_buff_dict['gene_sampling_site_scale_factor_array'][:n_samples])
 
     def generate_torch_minibatch_data(self,
                                       cell_index_array: np.ndarray,
@@ -756,22 +798,6 @@ class SingleCellFingerprintDTM:
                 gene_sampling_site_scale_factor_array, device=self.device, dtype=self.dtype),
             'downsampling_rate_tensor': torch.ones(mb_size, device=self.device, dtype=self.dtype),
             'fingerprint_obs_log_prob_prefactor': 1.0}
-
-    def generate_stratified_sample_torch(
-            self,
-            mb_genes_per_gene_group: int,
-            mb_expressing_cells_per_gene: int,
-            mb_silent_cells_per_gene: int) -> Dict[str, torch.Tensor]:
-        sample_dict = self._generate_stratified_sample(
-            mb_genes_per_gene_group,
-            mb_expressing_cells_per_gene,
-            mb_silent_cells_per_gene)
-        return self.generate_torch_minibatch_data(
-            cell_index_array=sample_dict['cell_index_array'],
-            gene_index_array=sample_dict['gene_index_array'],
-            cell_sampling_site_scale_factor_array=sample_dict['cell_sampling_site_scale_factor_array'],
-            gene_sampling_site_scale_factor_array=sample_dict['gene_sampling_site_scale_factor_array'])
-
 
 def downsample_single_fingerprint_numpy(fingerprint_array: np.ndarray, downsampling_rate: float):
     assert fingerprint_array.ndim == 1
