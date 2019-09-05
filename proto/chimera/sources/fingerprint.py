@@ -95,7 +95,7 @@ class SingleCellFingerprintBase:
 
     def _log_caching(self, name: str):
         if self.verbose:
-            self._logger.warning(f"Calculating and caching {name}...")
+            self._logger.warning(f"Calculating and caching \"SingleCellFingerprintBase.{name}\"...")
 
     def __getitem__(self, barcode: int) -> sp.csr_matrix:
         """Returns the fingerprint for a given barcode (NOTE: not barcode index!)"""
@@ -347,7 +347,7 @@ class SingleCellFingerprintDTM:
 
     def _log_caching(self, name: str):
         if self.verbose:
-            self._logger.warning(f"Calculating and caching {name}...")
+            self._logger.warning(f"Calculating and caching \"SingleCellFingerprintDTM.{name}\"...")
 
     @cachedproperty
     def n_cells(self):

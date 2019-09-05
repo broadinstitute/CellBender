@@ -8,16 +8,16 @@ from cpython cimport bool
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from cython.operator cimport dereference as deref, preincrement as inc
 
-from libc.stdint cimport uint32_t
+from libc.stdint cimport int32_t
 from libcpp.unordered_set cimport unordered_set as unordered_set
 from libcpp.vector cimport vector as vector
 
 
 cdef class CSRBinaryMatrix:
-    cdef uint32_t n_rows
-    cdef uint32_t n_cols
-    cdef uint32_t* indptr
-    cdef uint32_t* indices
+    cdef int32_t n_rows
+    cdef int32_t n_cols
+    cdef int32_t* indptr
+    cdef int32_t* indices
     
     def __cinit__(
             self,
@@ -29,15 +29,15 @@ cdef class CSRBinaryMatrix:
         self.n_cols = n_cols
 
         # allocate memory
-        self.indptr = <uint32_t*> PyMem_Malloc((n_rows + 1) * sizeof(uint32_t))
-        self.indices = <uint32_t*> PyMem_Malloc(indices_sz * sizeof(uint32_t))
+        self.indptr = <int32_t*> PyMem_Malloc((n_rows + 1) * sizeof(int32_t))
+        self.indices = <int32_t*> PyMem_Malloc(indices_sz * sizeof(int32_t))
     
     def __init__(self,
             size_t n_rows,
             size_t n_cols,
             size_t indices_sz,
-            uint32_t[:] indptr,
-            uint32_t[:] indices,
+            int32_t[:] indptr,
+            int32_t[:] indices,
             bool skip_copy = False,
             bool skip_validation = False):
         
@@ -66,13 +66,13 @@ cdef class CSRBinaryMatrix:
             for i in range(indices_sz):
                 self.indices[i] = indices[i]
                 
-    cdef uint32_t get_non_zero_cols(self, uint32_t i_row) nogil:
+    cdef int32_t get_non_zero_cols(self, int32_t i_row) nogil:
         return self.indptr[i_row + 1] - self.indptr[i_row]
 
     def __invert__(self) -> CSRBinaryMatrix:
         """Returns the bitwise not of the matrix."""
         # allocate memory
-        cdef uint32_t inv_indices_sz = self.n_rows * self.n_cols - self.indptr[self.n_rows]
+        cdef int32_t inv_indices_sz = self.n_rows * self.n_cols - self.indptr[self.n_rows]
         inv_array = CSRBinaryMatrix(
             n_rows=self.n_rows,
             n_cols=self.n_cols,
@@ -83,9 +83,9 @@ cdef class CSRBinaryMatrix:
             skip_validation=True)
 
         cdef:
-            uint32_t first_index, last_index
-            uint32_t n_values, n_compl_values
-            uint32_t i_row, i_col, c_index, inv_indices_loc
+            int32_t first_index, last_index
+            int32_t n_values, n_compl_values
+            int32_t i_row, i_col, c_index, inv_indices_loc
         
         inv_indices_loc = 0
         inv_array.indptr[0] = 0
@@ -116,15 +116,15 @@ cdef class CSRBinaryMatrix:
 
 
 cdef class CSRBinaryMatrixRowSampler:
-    cpdef vector[uint32_t] draw(self, CSRBinaryMatrix mat, uint32_t i_row, uint32_t n_samples) except *:
+    cpdef vector[int32_t] draw(self, CSRBinaryMatrix mat, int32_t i_row, int32_t n_samples) except *:
         raise NotImplementedError
 
 
 cdef class CSRBinaryMatrixRowSamplerWithReplacement(CSRBinaryMatrixRowSampler):
-    cpdef vector[uint32_t] draw(self, CSRBinaryMatrix mat, uint32_t i_row, uint32_t n_samples) except *:
-        cdef vector[uint32_t] samples_vec
-        cdef uint32_t first_index = mat.indptr[i_row]
-        cdef uint32_t n_values = mat.indptr[i_row + 1] - first_index
+    cpdef vector[int32_t] draw(self, CSRBinaryMatrix mat, int32_t i_row, int32_t n_samples) except *:
+        cdef vector[int32_t] samples_vec
+        cdef int32_t first_index = mat.indptr[i_row]
+        cdef int32_t n_values = mat.indptr[i_row + 1] - first_index
         cdef Py_ssize_t i
         for i in range(n_samples):
             samples_vec.push_back(mat.indices[first_index + randint(0, n_values - 1)])
@@ -132,11 +132,11 @@ cdef class CSRBinaryMatrixRowSamplerWithReplacement(CSRBinaryMatrixRowSampler):
 
 
 cdef class CSRBinaryMatrixRowSamplerWithoutReplacement(CSRBinaryMatrixRowSampler):
-    cpdef vector[uint32_t] draw(self, CSRBinaryMatrix mat, uint32_t i_row, uint32_t n_samples) except *:
-        cdef unordered_set[uint32_t] samples_set
-        cdef uint32_t first_index = mat.indptr[i_row]
-        cdef uint32_t n_values = mat.indptr[i_row + 1] - first_index
-        cdef uint32_t i, pos, item
+    cpdef vector[int32_t] draw(self, CSRBinaryMatrix mat, int32_t i_row, int32_t n_samples) except *:
+        cdef unordered_set[int32_t] samples_set
+        cdef int32_t first_index = mat.indptr[i_row]
+        cdef int32_t n_values = mat.indptr[i_row + 1] - first_index
+        cdef int32_t i, pos, item
         for i in range(n_values - n_samples, n_values):
             pos = randint(0, i)
             item = mat.indices[first_index + pos]
@@ -144,7 +144,7 @@ cdef class CSRBinaryMatrixRowSamplerWithoutReplacement(CSRBinaryMatrixRowSampler
                 samples_set.insert(mat.indices[first_index + i])
             else:
                 samples_set.insert(item)
-        cdef vector[uint32_t] samples_vec
+        cdef vector[int32_t] samples_vec
         samples_vec.insert(samples_vec.end(), samples_set.begin(), samples_set.end())
         return samples_vec
 
@@ -159,13 +159,13 @@ cdef class SingleCellFingerprintStratifiedSampler:
     # (n_genes, n_cells)
     cdef CSRBinaryMatrix silent_cells_csr
 
-    cdef uint32_t n_genes
-    cdef uint32_t n_cells
-    cdef uint32_t n_gene_groups
+    cdef int32_t n_genes
+    cdef int32_t n_cells
+    cdef int32_t n_gene_groups
 
-    cdef uint32_t genes_per_gene_group
-    cdef uint32_t expressing_cells_per_gene
-    cdef uint32_t silent_cells_per_gene
+    cdef int32_t genes_per_gene_group
+    cdef int32_t expressing_cells_per_gene
+    cdef int32_t silent_cells_per_gene
     
     cdef CSRBinaryMatrixRowSampler csr_row_sampler
     
@@ -197,35 +197,35 @@ cdef class SingleCellFingerprintStratifiedSampler:
     @cython.wraparound(False)
     @cython.nonecheck(False)
     @cython.cdivision(True)
-    cpdef uint32_t draw(self,
-                        uint32_t genes_per_gene_group,
-                        uint32_t expressing_cells_per_gene,
-                        uint32_t silent_cells_per_gene,
-                        uint32_t[::1] gene_index_memview,
-                        uint32_t[::1] cell_index_memview,
+    cpdef int32_t draw(self,
+                        int32_t genes_per_gene_group,
+                        int32_t expressing_cells_per_gene,
+                        int32_t silent_cells_per_gene,
+                        int32_t[::1] gene_index_memview,
+                        int32_t[::1] cell_index_memview,
                         double[::1] gene_sampling_site_scale_factor_memview,
                         double[::1] cell_sampling_site_scale_factor_memview):
 
-        cdef uint32_t i_gene_group, i_gene, c_n_genes, c_gene_group_sz
+        cdef int32_t i_gene_group, i_gene, c_n_genes, c_gene_group_sz
         cdef double c_gene_scale_factor
 
-        cdef uint32_t c_expressing_cells_sz, c_n_expressing_cells
+        cdef int32_t c_expressing_cells_sz, c_n_expressing_cells
         cdef double c_expressing_cell_scale_factor
                 
-        cdef uint32_t c_silent_cells_sz, c_n_silent_cells
+        cdef int32_t c_silent_cells_sz, c_n_silent_cells
         cdef double c_silent_cell_scale_factor
 
-        cdef uint32_t c_total_cells_for_gene
+        cdef int32_t c_total_cells_for_gene
         cdef double c_fractionalized_gene_scale_factor
         
-        cdef vector[uint32_t] c_gene_indices
-        cdef vector[uint32_t].iterator i_gene_it
+        cdef vector[int32_t] c_gene_indices
+        cdef vector[int32_t].iterator i_gene_it
 
-        cdef vector[uint32_t] c_expressing_cell_indices
-        cdef vector[uint32_t].iterator i_expressing_cell_it
+        cdef vector[int32_t] c_expressing_cell_indices
+        cdef vector[int32_t].iterator i_expressing_cell_it
 
-        cdef vector[uint32_t] c_silent_cell_indices
-        cdef vector[uint32_t].iterator i_silent_cell_it
+        cdef vector[int32_t] c_silent_cell_indices
+        cdef vector[int32_t].iterator i_silent_cell_it
         
         cdef Py_ssize_t cell_ptr = 0
         cdef Py_ssize_t gene_ptr = 0
