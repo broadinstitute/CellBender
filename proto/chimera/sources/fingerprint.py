@@ -747,7 +747,7 @@ class SingleCellFingerprintDTM:
             expressing_cells_per_gene=expressing_cells_per_gene,
             silent_cells_per_gene=silent_cells_per_gene,
             gene_index_memview=np_buff_dict['gene_index_array'],
-            cell_index_memview=np_buff_dict['gene_index_array'],
+            cell_index_memview=np_buff_dict['cell_index_array'],
             gene_sampling_site_scale_factor_memview=np_buff_dict['gene_sampling_site_scale_factor_array'],
             cell_sampling_site_scale_factor_memview=np_buff_dict['cell_sampling_site_scale_factor_array'])
 
