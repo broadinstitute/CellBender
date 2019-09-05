@@ -13,6 +13,75 @@ from libcpp.unordered_set cimport unordered_set as unordered_set
 from libcpp.vector cimport vector as vector
 
 
+# TODO refactor out
+cdef class CSRIntegerMatrix:
+    cdef int32_t n_rows
+    cdef int32_t n_cols
+    cdef int32_t* indptr
+    cdef int32_t* indices
+    cdef int32_t* data
+
+    def __cinit__(
+            self,
+            size_t n_rows,
+            size_t n_cols,
+            int32_t[:] indptr,
+            int32_t[:] indices,
+            int32_t[:] data):
+        self.n_rows = n_rows
+        self.n_cols = n_cols
+
+        # allocate memory
+        self.indptr = <int32_t*> PyMem_Malloc((n_rows + 1) * sizeof(int32_t))
+        self.indices = <int32_t*> PyMem_Malloc(len(indices) * sizeof(int32_t))
+        self.data = <int32_t*> PyMem_Malloc(len(indices) * sizeof(int32_t))
+
+        cdef size_t i, j
+        assert len(indptr) == n_rows + 1, \
+            f"The length of indptr ({len(indptr)}) does not match match n_rows + 1 ({n_rows + 1})"
+        assert len(indices) == len(data), \
+            f"The length of indices ({len(indices)}) does not match the length of data ({len(data)})"
+        assert indptr[0] == 0, \
+            "The first entry in indptr must be 0"
+        assert indptr[n_rows] == len(indices), \
+            "The last entry in indptr must be equal to the length of indices"
+        for i in range(n_rows):
+            assert indptr[i + 1] >= indptr[i], \
+                "indptr must be ascending"
+            for j in range(indptr[i], indptr[i + 1] - 1):
+                assert indices[j + 1] > indices[j], \
+                    "for each row, indices must be unique and sorted in ascending order"
+            assert indices[indptr[i + 1] - 1] < n_cols, \
+                f"indices must be in range [0, {n_cols})"
+
+        for i in range(n_rows + 1):
+            self.indptr[i] = indptr[i]
+        for i in range(len(indices)):
+            self.indices[i] = indices[i]
+        for i in range(len(indices)):
+            self.data[i] = data[i]
+
+    cdef int32_t get_non_zero_cols(self, int32_t i_row) nogil:
+        return self.indptr[i_row + 1] - self.indptr[i_row]
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.nonecheck(False)
+    cpdef void copy_rows_to_dense(self, int32_t[:] selected_row_indices, int32_t[:, ::1] out):
+        cdef Py_ssize_t i, j, n
+        cdef Py_ssize_t n_selected_row_indices = len(selected_row_indices)
+        for i in range(n_selected_row_indices):
+            n = selected_row_indices[i]
+            for j in range(self.indptr[n], self.indptr[n + 1]):
+                out[i, self.indices[j]] = self.data[j]
+
+    def __dealloc__(self):
+        PyMem_Free(self.indptr)
+        PyMem_Free(self.indices)
+        PyMem_Free(self.data)
+
+
+# TODO refactor out
 cdef class CSRBinaryMatrix:
     cdef int32_t n_rows
     cdef int32_t n_cols
@@ -52,8 +121,8 @@ cdef class CSRBinaryMatrix:
             assert indptr[n_rows] == indices_sz, \
                 "The last entry in indptr must be equal to the length of indices"        
             for i in range(n_rows):
-                assert indptr[i + 1] > indptr[i], \
-                    "indptr must be strictly ascending"
+                assert indptr[i + 1] >= indptr[i], \
+                    "indptr must be ascending"
                 for j in range(indptr[i], indptr[i + 1] - 1):
                     assert indices[j + 1] > indices[j], \
                         "for each row, indices must be unique and sorted in ascending order"
