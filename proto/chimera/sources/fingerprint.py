@@ -677,8 +677,8 @@ class SingleCellFingerprintDTM:
 
         max_buffer_size = genes_per_gene_group * self.n_gene_groups * (
                 expressing_cells_per_gene + silent_cells_per_gene)
-        gene_index_array = np.zeros((max_buffer_size,), dtype=np.uint32, order='c')
-        cell_index_array = np.zeros((max_buffer_size,), dtype=np.uint32, order='c')
+        gene_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
+        cell_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
         gene_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=np.float64, order='c')
         cell_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=np.float64, order='c')
 
@@ -703,8 +703,8 @@ class SingleCellFingerprintDTM:
             n_rows=self.n_genes,
             n_cols=self.n_cells,
             indices_sz=len(self.sparse_count_matrix_csc.indices),
-            indptr=self.sparse_count_matrix_csc.indptr.astype(np.uint32),
-            indices=self.sparse_count_matrix_csc.indices.astype(np.uint32))
+            indptr=self.sparse_count_matrix_csc.indptr.astype(np.int32),
+            indices=self.sparse_count_matrix_csc.indices.astype(np.int32))
 
     @cachedproperty
     def gene_groups_csr_binary_matrix(self) -> CSRBinaryMatrix:
@@ -717,8 +717,8 @@ class SingleCellFingerprintDTM:
             n_rows=self.n_gene_groups,
             n_cols=self.n_genes,
             indices_sz=len(indices),
-            indptr=np.asarray(indptr, dtype=np.uint32),
-            indices=np.asarray(indices, dtype=np.uint32))
+            indptr=np.asarray(indptr, dtype=np.int32),
+            indices=np.asarray(indices, dtype=np.int32))
 
     @cachedmethod(_global_cache_dict)
     def stratified_sampler(self, sampling_strategy: str = 'with_replacement'):
