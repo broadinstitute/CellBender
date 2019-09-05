@@ -720,7 +720,7 @@ class SingleCellFingerprintDTM:
             indptr=np.asarray(indptr, dtype=np.uint32),
             indices=np.asarray(indices, dtype=np.uint32))
 
-    @cachedmethod
+    @cachedmethod(_global_cache_dict)
     def stratified_sampler(self, sampling_strategy: str = 'with_replacement'):
         assert sampling_strategy in ['with_replacement', 'without_replacement']
         return SingleCellFingerprintStratifiedSampler(
