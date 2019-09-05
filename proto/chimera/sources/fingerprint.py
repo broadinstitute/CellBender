@@ -779,13 +779,15 @@ class SingleCellFingerprintDTM:
             cell_index_array=np_buff_dict['cell_index_array'][:n_samples],
             gene_index_array=np_buff_dict['gene_index_array'][:n_samples],
             cell_sampling_site_scale_factor_array=np_buff_dict['cell_sampling_site_scale_factor_array'][:n_samples],
-            gene_sampling_site_scale_factor_array=np_buff_dict['gene_sampling_site_scale_factor_array'][:n_samples])
+            gene_sampling_site_scale_factor_array=np_buff_dict['gene_sampling_site_scale_factor_array'][:n_samples],
+            fingerprint_array=np_buff_dict['fingerprint_array'])
 
     def generate_torch_minibatch_data(self,
                                       cell_index_array: np.ndarray,
                                       gene_index_array: np.ndarray,
                                       cell_sampling_site_scale_factor_array: np.ndarray,
-                                      gene_sampling_site_scale_factor_array: np.ndarray) -> Dict[str, Optional[torch.Tensor]]:
+                                      gene_sampling_site_scale_factor_array: np.ndarray,
+                                      fingerprint_array: np.ndarray) -> Dict[str, Optional[torch.Tensor]]:
         mb_size = len(cell_index_array)
         assert cell_index_array.ndim == 1
         assert gene_index_array.ndim == 1
@@ -794,6 +796,9 @@ class SingleCellFingerprintDTM:
         assert len(gene_index_array) == mb_size
         assert len(cell_sampling_site_scale_factor_array) == mb_size
         assert len(gene_sampling_site_scale_factor_array) == mb_size
+        assert fingerprint_array.ndim == 2
+        assert fingerprint_array.shape[0] >= mb_size
+        assert fingerprint_array.shape[1] == self.max_family_size
 
         total_obs_reads_per_cell_array = self.total_obs_reads_per_cell[cell_index_array]
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
@@ -801,11 +806,11 @@ class SingleCellFingerprintDTM:
 
         # fast slicing of the collapsed fingerprint csr matrix using Cython
         collapsed_index_array = cell_index_array * self.n_genes + gene_index_array
-        fingerprint_array = self._get_minibatch_ndarray_buffers['fingerprint_array']
         fingerprint_array.fill(0)
         self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix_cython.copy_rows_to_dense(
             collapsed_index_array, fingerprint_array)
-        fingerprint_tensor = torch.tensor(fingerprint_array[:mb_size, :], device=self.device, dtype=self.dtype)
+        fingerprint_tensor = torch.tensor(
+            fingerprint_array[:mb_size, :], device=self.device, dtype=self.dtype)
 
         # fingerprint_array = np.asarray(
         #     self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_index_array, :].todense())

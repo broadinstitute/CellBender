@@ -672,12 +672,16 @@ class PosteriorGeneExpressionSampler(object):
         gene_index_array = gene_index * np.ones_like(cell_index_array)
         cell_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
         gene_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
+        fingerprint_array = np.zeros(
+            (len(cell_index_list), self.dtm_model.sc_fingerprint_dtm.max_family_size),
+            dtype=np.int32)
 
         return self.dtm_model.sc_fingerprint_dtm.generate_torch_minibatch_data(
-            cell_index_array,
-            gene_index_array,
-            cell_sampling_site_scale_factor_array,
-            gene_sampling_site_scale_factor_array)
+            cell_index_array=cell_index_array,
+            gene_index_array=gene_index_array,
+            cell_sampling_site_scale_factor_array=cell_sampling_site_scale_factor_array,
+            gene_sampling_site_scale_factor_array=gene_sampling_site_scale_factor_array,
+            fingerprint_array=fingerprint_array)
 
     def _sharded_cell_index_generator(
             self,
