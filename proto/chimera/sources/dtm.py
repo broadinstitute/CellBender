@@ -609,7 +609,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             torch.tensor(
                 self.sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
                 device=self.device,
-                dtype=self.dtype))
+                dtype=self.dtype),
+            constraints=constraints.positive)
 
         # apply a pseudo-bijective transformation to sort xi by component weights
         fsd_xi_sort_trans = SortByComponentWeights(self.fsd_codec)
