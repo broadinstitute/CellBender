@@ -267,7 +267,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                     mu_e_hi_n=mu_e_hi_n,
                     phi_e_hi_n=phi_e_hi_n,
                     logit_p_zero_e_hi_n=logit_p_zero_e_hi_n,
-                    cell_size_scale_n=cell_size_scale_n,
                     n_particles=self.n_particles_fingerprint_log_like)
 
                 # sample fsd sparsity regularization
@@ -300,7 +299,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                             mu_e_hi_n: torch.Tensor,
                             phi_e_hi_n: torch.Tensor,
                             logit_p_zero_e_hi_n: torch.Tensor,
-                            cell_size_scale_n: torch.Tensor,
                             n_particles: int):
 
         # calculate the fingerprint log likelihood
