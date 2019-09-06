@@ -62,7 +62,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.train_chimera_rate_params: bool = init_params_dict['chimera.enable_hyperparameter_optimization']
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
-        self.eta_concentration: float = init_params_dict['global.eta_concentration']
+        self.eta_rate: float = init_params_dict['global.eta_rate']
 
         # empirical normalization factors
         self.mean_total_molecules_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_molecules_per_cell).item()
@@ -144,8 +144,10 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # droplet efficiency hyperparameters
         eta_concentration_scalar = torch.tensor(
-            self.eta_concentration, device=self.device, dtype=self.dtype)
-        
+            self.eta_rate + 1., device=self.device, dtype=self.dtype)
+        eta_rate_scalar = torch.tensor(
+            self.eta_rate, device=self.device, dtype=self.dtype)
+
         # chimera parameters
         alpha_c = pyro.param(
             "alpha_c",
@@ -177,7 +179,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 # sample droplet efficiency
                 eta_n = pyro.sample(
                     "eta_n",
-                    dist.Gamma(concentration=eta_concentration_scalar, rate=eta_concentration_scalar))
+                    dist.Gamma(concentration=eta_concentration_scalar, rate=eta_rate_scalar))
 
             # transform fsd xi to the constrained space
             fsd_params_dict = self.fsd_codec.decode(fsd_xi_nq)
