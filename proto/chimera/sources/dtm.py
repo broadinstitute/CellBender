@@ -683,8 +683,8 @@ class PosteriorGeneExpressionSampler(object):
             sites (because they are not necessary for our purposes here). As such, the minibatches
             produced by this method should not be used for training.
         """
-        cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell)
-        gene_index_array = gene_index * np.ones_like(cell_index_array)
+        cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell).astype(np.int32)
+        gene_index_array = gene_index * np.ones_like(cell_index_array).astype(np.int32)
         cell_sampling_site_scale_factor_array = np.ones_like(
             cell_index_array, dtype=self.dtm_model.sc_fingerprint_dtm.numpy_dtype)
         gene_sampling_site_scale_factor_array = np.ones_like(
