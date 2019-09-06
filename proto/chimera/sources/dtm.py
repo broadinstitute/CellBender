@@ -141,6 +141,10 @@ class DropletTimeMachineModel(torch.nn.Module):
                 (self.fsd_gmm_num_components, self.fsd_codec.total_fsd_params),
                 dtype=self.dtype, device=self.device),
             constraint=fsd_xi_prior_scales_constraint)
+
+        # droplet efficiency hyperparameters
+        eta_concentration_scalar = torch.tensor(
+            self.eta_concentration, device=self.device, dtype=self.dtype)
         
         # chimera parameters
         alpha_c = pyro.param(
@@ -173,7 +177,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 # sample droplet efficiency
                 eta_n = pyro.sample(
                     "eta_n",
-                    dist.Gamma(concentration=self.eta_concentration, rate=self.eta_concentration))
+                    dist.Gamma(concentration=eta_concentration_scalar, rate=eta_concentration_scalar))
 
             # transform fsd xi to the constrained space
             fsd_params_dict = self.fsd_codec.decode(fsd_xi_nq)
