@@ -245,15 +245,16 @@ class DropletTimeMachineModel(torch.nn.Module):
             e_obs_n = fingerprint_tensor_nr.sum(-1)
 
             # calculate the (poisson) rate of chimeric molecule formation
-            mu_e_lo_n = self._get_mu_e_lo_n(
-                alpha_c=alpha_c,
-                eta_n=eta_n,
-                mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
-                empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
-                p_obs_lo_n=p_obs_lo_n,
-                p_obs_hi_n=p_obs_hi_n,
-                mu_fsd_hi_n=mu_fsd_hi_n,
-                downsampling_rate_tensor_n=downsampling_rate_tensor_n)
+            with torch.no_grad():
+                mu_e_lo_n = self._get_mu_e_lo_n(
+                    alpha_c=alpha_c,
+                    eta_n=eta_n,
+                    mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
+                    empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
+                    p_obs_lo_n=p_obs_lo_n,
+                    p_obs_hi_n=p_obs_hi_n,
+                    mu_fsd_hi_n=mu_fsd_hi_n,
+                    downsampling_rate_tensor_n=downsampling_rate_tensor_n)
 
             if posterior_sampling_mode:
 
