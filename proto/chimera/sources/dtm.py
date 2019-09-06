@@ -685,11 +685,13 @@ class PosteriorGeneExpressionSampler(object):
         """
         cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell)
         gene_index_array = gene_index * np.ones_like(cell_index_array)
-        cell_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
-        gene_sampling_site_scale_factor_array = np.ones_like(cell_index_array)
+        cell_sampling_site_scale_factor_array = np.ones_like(
+            cell_index_array, dtype=self.dtm_model.sc_fingerprint_dtm.numpy_dtype)
+        gene_sampling_site_scale_factor_array = np.ones_like(
+            cell_index_array, dtype=self.dtm_model.sc_fingerprint_dtm.numpy_dtype)
         fingerprint_array = np.zeros(
-            (len(cell_index_list), self.dtm_model.sc_fingerprint_dtm.max_family_size),
-            dtype=np.int32)
+            (len(cell_index_array), self.dtm_model.sc_fingerprint_dtm.max_family_size),
+            dtype=self.dtm_model.sc_fingerprint_dtm.numpy_dtype)
 
         return self.dtm_model.sc_fingerprint_dtm.generate_torch_minibatch_data(
             cell_index_array=cell_index_array,
