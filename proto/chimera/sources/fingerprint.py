@@ -805,7 +805,8 @@ class SingleCellFingerprintDTM:
                                       gene_index_array: np.ndarray,
                                       cell_sampling_site_scale_factor_array: np.ndarray,
                                       gene_sampling_site_scale_factor_array: np.ndarray,
-                                      fingerprint_array: np.ndarray) -> Dict[str, Optional[torch.Tensor]]:
+                                      fingerprint_array: Optional[np.ndarray] = None) \
+            -> Dict[str, Optional[torch.Tensor]]:
         mb_size = len(cell_index_array)
         assert cell_index_array.ndim == 1
         assert gene_index_array.ndim == 1
@@ -823,6 +824,8 @@ class SingleCellFingerprintDTM:
         empirical_mean_obs_expr_per_gene_array = self.mean_obs_expr_per_gene[gene_index_array]
 
         collapsed_index_array = cell_index_array * self.n_genes + gene_index_array
+        if fingerprint_array is None:
+            fingerprint_array = np.zeros((mb_size, self.max_family_size), dtype=self.numpy_dtype)
         fingerprint_array.fill(0)
         self.collapsed_csr_fingerprint_matrix_cython.copy_rows_to_dense(
             collapsed_index_array, fingerprint_array)
