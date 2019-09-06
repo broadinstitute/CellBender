@@ -815,9 +815,12 @@ class SingleCellFingerprintDTM:
         assert len(gene_index_array) == mb_size
         assert len(cell_sampling_site_scale_factor_array) == mb_size
         assert len(gene_sampling_site_scale_factor_array) == mb_size
-        assert fingerprint_array.ndim == 2
-        assert fingerprint_array.shape[0] >= mb_size
-        assert fingerprint_array.shape[1] == self.max_family_size
+
+        # if a pre-allocated buffer is provided, assert its properties
+        if fingerprint_array is not None:
+            assert fingerprint_array.ndim == 2
+            assert fingerprint_array.shape[0] >= mb_size
+            assert fingerprint_array.shape[1] == self.max_family_size
 
         total_obs_reads_per_cell_array = self.total_obs_reads_per_cell[cell_index_array]
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
