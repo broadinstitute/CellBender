@@ -148,7 +148,8 @@ class NBMixtureFSDCodec(FSDCodec):
             xi_tuple += (self.stick.inv(fsd_params_dict['w_lo']),)
         return torch.cat(xi_tuple, -1)
 
-    def get_sorted_params_dict(self, fsd_params_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    @staticmethod
+    def get_sorted_params_dict(fsd_params_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         fsd_lo_sort_order = torch.argsort(fsd_params_dict['w_lo'], dim=-1, descending=True)
         fsd_hi_sort_order = torch.argsort(fsd_params_dict['w_hi'], dim=-1, descending=True)
         sorted_fsd_params_dict = {

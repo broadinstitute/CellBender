@@ -65,7 +65,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # empirical normalization factors
         self.mean_total_reads_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_reads_per_cell).item()
-        self.read_depth_scale: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
+        self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # initial parameters for e_lo
         self.init_alpha_c: float = init_params_dict['chimera.alpha_c']
@@ -214,10 +214,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             mu_fsd_hi_comps_nj = fsd_params_dict['mu_hi']
             w_fsd_lo_comps_nj = fsd_params_dict['w_lo']
             w_fsd_hi_comps_nj = fsd_params_dict['w_hi']
-            mu_fsd_lo_comps_to_mu_empirical_ratio_nj = mu_fsd_lo_comps_nj / (
-                self.eps + empirical_fsd_mu_hi_tensor_n.unsqueeze(-1))
-            mu_fsd_hi_comps_to_mu_empirical_ratio_nj = mu_fsd_hi_comps_nj / (
-                self.eps + empirical_fsd_mu_hi_tensor_n.unsqueeze(-1))
+            mu_fsd_lo_comps_to_mu_empirical_ratio_nj = mu_fsd_lo_comps_nj / self.mean_empirical_fsd_mu_hi
+            mu_fsd_hi_comps_to_mu_empirical_ratio_nj = mu_fsd_hi_comps_nj / self.mean_empirical_fsd_mu_hi
 
             # observation probability for each component of the distribution
             alpha_fsd_lo_comps_nj = (self.eps + phi_fsd_lo_comps_nj).reciprocal()
@@ -247,7 +245,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 alpha_c=alpha_c,
                 beta_c=beta_c,
                 cell_size_scale_n=cell_size_scale_n,
-                read_depth_scale=self.read_depth_scale,
+                mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
                 empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
                 p_obs_lo_n=p_obs_lo_n,
                 p_obs_hi_n=p_obs_hi_n,
@@ -333,7 +331,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             alpha_c: torch.Tensor,
             beta_c: torch.Tensor,
             cell_size_scale_n: torch.Tensor,
-            read_depth_scale: float,
+            mean_empirical_fsd_mu_hi: float,
             empirical_mean_obs_expr_per_gene_tensor_n: torch.Tensor,
             p_obs_lo_n: torch.Tensor,
             p_obs_hi_n: torch.Tensor,
@@ -344,7 +342,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         :param alpha_c: baseline chimera formation coefficient
         :param beta_c: cell-size-dependent chimera formation coefficient
         :param cell_size_scale_n: (relative) cell size scale factor
-        :param read_depth_scale: empirical dataset-wide read-depth scale
+        :param mean_empirical_fsd_mu_hi: empirical dataset-wide mean reads-per-molecule
         :param empirical_mean_obs_expr_per_gene_tensor_n: empirical mean gene expression per cell
         :param p_obs_lo_n: probability of observing a chimeric molecule
         :param p_obs_hi_n: probability of observing a real molecule
@@ -354,7 +352,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         :return: Poisson rate of chimeric molecule formation
         """
         estimated_mean_e_hi_n = empirical_mean_obs_expr_per_gene_tensor_n / p_obs_hi_n
-        scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * read_depth_scale)
+        scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * mean_empirical_fsd_mu_hi)
         scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
         mu_e_lo_n = (alpha_c + beta_c * cell_size_scale_n) * scaled_total_fragments_n
         return mu_e_lo_n
