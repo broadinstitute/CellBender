@@ -17,7 +17,8 @@ class GeneExpressionPrior(torch.nn.Module):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                cell_features_nf: Optional[torch.Tensor],
+                eta_n: torch.Tensor,
+                cell_features_tensor_nf: Optional[torch.Tensor],
                 total_obs_reads_per_cell_tensor_n: Optional[torch.Tensor],
                 downsampling_rate_tensor_n: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
@@ -28,7 +29,6 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 init_cell_size_beta: float = 0.5,
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
         super(GeneLevelGeneExpressionPrior, self).__init__()
@@ -55,9 +55,6 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
                 init_log_mu_e_hi_g.unsqueeze(-1),
                 init_log_phi_e_hi_g.unsqueeze(-1),
                 init_logit_p_zero_e_hi_g.unsqueeze(-1)), dim=-1))
-        init_logit_cell_size_beta = np.log(init_cell_size_beta) - np.log(1 - init_cell_size_beta)
-        self.logit_cell_size_beta = torch.nn.Parameter(
-            torch.tensor([init_logit_cell_size_beta], device=device, dtype=dtype))
 
         # send parameters to device
         self.to(device)
@@ -65,21 +62,13 @@ class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                cell_features_nf: Optional[torch.Tensor],
+                eta_n: torch.Tensor,
+                cell_features_tensor_nf: Optional[torch.Tensor],
                 total_obs_reads_per_cell_tensor_n: Optional[torch.Tensor],
                 downsampling_rate_tensor_n: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
-        # calculate cell size correction strength
-        log_cell_size_beta = torch.nn.functional.logsigmoid(self.logit_cell_size_beta)
-        log_cell_size_alpha = torch.nn.functional.logsigmoid(-self.logit_cell_size_beta)
-        log_mu_prefactor_n = logaddexp(
-            log_cell_size_alpha,
-            log_cell_size_beta
-            + total_obs_reads_per_cell_tensor_n.log()
-            - self.log_mean_total_reads_per_cell
-            - downsampling_rate_tensor_n.log())
 
         return {
-            'log_mu_e_hi_n': log_mu_prefactor_n + self.global_prior_params_gr[gene_index_tensor_n, 0],
+            'log_mu_e_hi_n': eta_n.log() + self.global_prior_params_gr[gene_index_tensor_n, 0],
             'log_phi_e_hi_n': self.global_prior_params_gr[gene_index_tensor_n, 1],
             'logit_p_zero_e_hi_n': self.global_prior_params_gr[gene_index_tensor_n, 2]}
 
@@ -135,12 +124,13 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneExpressionPrior):
     def forward(self,
                 gene_index_tensor_n: torch.Tensor,
                 cell_index_tensor_n: torch.Tensor,
-                cell_features_nf: Optional[torch.Tensor],
+                eta_n: torch.Tensor,
+                cell_features_tensor_nf: Optional[torch.Tensor],
                 total_obs_reads_per_cell_tensor_n: Optional[torch.Tensor],
                 downsampling_rate_tensor_n: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Estimate cell-specific ZINB expression parameters."""
 
-        activations_nh = cell_features_nf
+        activations_nh = cell_features_tensor_nf
         for layer in self.hidden_layers:
             activations_nh = self.hidden_activation(layer.forward(activations_nh))
 
@@ -153,7 +143,7 @@ class SingleCellFeaturePredictedGeneExpressionPrior(GeneExpressionPrior):
                 + self.readout_bias_g[gene_index_tensor_n])
 
         return {
-            'log_mu_e_hi_n': log_pred_mu_n,
+            'log_mu_e_hi_n': log_pred_mu_n + eta_n.log(),
             'log_phi_e_hi_n': self.log_phi_e_hi_g[gene_index_tensor_n],
             'logit_p_zero_e_hi_n': self.logit_p_zero_e_hi_g[gene_index_tensor_n]}
 

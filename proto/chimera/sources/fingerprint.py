@@ -298,7 +298,6 @@ class SingleCellFingerprintDTM:
 
     def __init__(self,
                  sc_fingerprint_base: SingleCellFingerprintBase,
-                 max_estimated_chimera_family_size: int = 0,
                  low_family_size_cdf_threshold: float = 0.05,
                  n_pca_features: int = 50,
                  n_pca_iters: int = 20,
@@ -315,7 +314,6 @@ class SingleCellFingerprintDTM:
             zinb_fitter_kwargs = dict()
 
         self.sc_fingerprint_base = sc_fingerprint_base
-        self.max_estimated_chimera_family_size = max_estimated_chimera_family_size
         self.low_family_size_cdf_threshold = low_family_size_cdf_threshold
         self.n_pca_features = n_pca_features
         self.n_pca_iters = n_pca_iters
@@ -380,7 +378,6 @@ class SingleCellFingerprintDTM:
 
     @property
     def sparse_count_matrix_csr(self) -> sp.csr_matrix:
-        self._log_caching("sparse_count_matrix_csr")
         return self.sc_fingerprint_base.sparse_count_matrix_csr
 
     @cachedproperty
@@ -621,6 +618,7 @@ class SingleCellFingerprintDTM:
                     sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index]))
         return gene_groups_dict
 
+    # TODO use truncated count matrix
     @cachedproperty
     def empirical_fsd_params(self) -> np.ndarray:
         self._log_caching("empirical_fsd_params")
@@ -630,10 +628,10 @@ class SingleCellFingerprintDTM:
             counts_per_family_size = np.asarray(
                 self.collapsed_csr_fingerprint_matrix_scipy[collapsed_slice, :].sum(0)).squeeze(0)
 
-            # "cap" the empirical histogram as a heuristic for attenuating chimeric counts
-            if self.max_estimated_chimera_family_size >= 1:
-                counts_per_family_size[:self.max_estimated_chimera_family_size] = counts_per_family_size[
-                    self.max_estimated_chimera_family_size]
+            # # "cap" the empirical histogram as a heuristic for attenuating chimeric counts
+            # if self.max_estimated_chimera_family_size >= 1:
+            #     counts_per_family_size[:self.max_estimated_chimera_family_size] = counts_per_family_size[
+            #         self.max_estimated_chimera_family_size]
 
             family_size_array = np.arange(1, self.max_family_size + 1)
             family_size_pmf = counts_per_family_size / np.sum(counts_per_family_size)
@@ -800,6 +798,7 @@ class SingleCellFingerprintDTM:
             gene_sampling_site_scale_factor_array=np_buff_dict['gene_sampling_site_scale_factor_array'][:n_samples],
             fingerprint_array=np_buff_dict['fingerprint_array'])
 
+    # TODO get rid of the unused tensors
     def generate_torch_minibatch_data(self,
                                       cell_index_array: np.ndarray,
                                       gene_index_array: np.ndarray,

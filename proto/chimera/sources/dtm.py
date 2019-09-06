@@ -62,14 +62,14 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.train_chimera_rate_params: bool = init_params_dict['chimera.enable_hyperparameter_optimization']
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
+        self.eta_concentration: float = init_params_dict['global.eta_concentration']
 
         # empirical normalization factors
-        self.mean_total_reads_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_reads_per_cell).item()
+        self.mean_total_molecules_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_molecules_per_cell).item()
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # initial parameters for e_lo
-        self.init_alpha_c: float = init_params_dict['chimera.alpha_c']
-        self.init_beta_c: float = init_params_dict['chimera.beta_c']
+        self.init_alpha_c: float = init_params_dict['global.chimera_alpha_c']
 
         # logging
         self._logger = logging.getLogger()
@@ -147,10 +147,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             "alpha_c",
             torch.tensor(self.init_alpha_c, device=self.device, dtype=self.dtype),
             constraint=constraints.positive)
-        beta_c = pyro.param(
-            "beta_c",
-            torch.tensor(self.init_beta_c, device=self.device, dtype=self.dtype),
-            constraint=constraints.positive)
 
         # useful auxiliary quantities
         family_size_vector_obs_r = torch.arange(
@@ -161,7 +157,6 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         if not self.train_chimera_rate_params:
             alpha_c = alpha_c.detach()
-            beta_c = beta_c.detach()
 
         # fsd xi prior distribution
         fsd_xi_prior_dist = self._get_fsd_xi_prior_dist(
@@ -174,6 +169,12 @@ class DropletTimeMachineModel(torch.nn.Module):
                 # sample gene family size distribution parameters
                 fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_prior_dist)
 
+            with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
+                # sample droplet efficiency
+                eta_n = pyro.sample(
+                    "eta_n",
+                    dist.Gamma(concentration=self.eta_concentration, rate=self.eta_concentration))
+
             # transform fsd xi to the constrained space
             fsd_params_dict = self.fsd_codec.decode(fsd_xi_nq)
 
@@ -185,8 +186,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             # extract e_hi prior parameters (per cell)
             e_hi_prior_params_dict = self.gene_expression_prior.forward(
                 gene_index_tensor_n=gene_index_tensor_n,
+                eta_n=eta_n,
                 cell_index_tensor_n=cell_index_tensor_n,
-                cell_features_nf=cell_features_tensor_nf,
+                cell_features_tensor_nf=cell_features_tensor_nf,
                 total_obs_reads_per_cell_tensor_n=total_obs_reads_per_cell_tensor_n,
                 downsampling_rate_tensor_n=downsampling_rate_tensor_n)
             log_mu_e_hi_n = e_hi_prior_params_dict['log_mu_e_hi_n']
@@ -226,10 +228,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             log_p_unobs_hi_comps_nj = alpha_fsd_hi_comps_nj * (
                     alpha_fsd_hi_comps_nj.log() - (alpha_fsd_hi_comps_nj + mu_fsd_hi_comps_nj).log())
             p_obs_hi_comps_nj = get_log_prob_compl(log_p_unobs_hi_comps_nj).exp()
-            
-            # empirical "cell size" scale estimate
-            cell_size_scale_n = total_obs_reads_per_cell_tensor_n / (
-                    self.mean_total_reads_per_cell * downsampling_rate_tensor_n)
 
             # calculate p_lo and p_hi on all observable family sizes
             log_prob_fsd_lo_full_nr = fsd_lo_dist.log_prob(family_size_vector_full_r)
@@ -243,8 +241,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             # calculate the (poisson) rate of chimeric molecule formation
             mu_e_lo_n = self._get_mu_e_lo_n(
                 alpha_c=alpha_c,
-                beta_c=beta_c,
-                cell_size_scale_n=cell_size_scale_n,
+                eta_n=eta_n,
                 mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
                 empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
                 p_obs_lo_n=p_obs_lo_n,
@@ -329,8 +326,7 @@ class DropletTimeMachineModel(torch.nn.Module):
     @staticmethod
     def _get_mu_e_lo_n(
             alpha_c: torch.Tensor,
-            beta_c: torch.Tensor,
-            cell_size_scale_n: torch.Tensor,
+            eta_n: torch.Tensor,
             mean_empirical_fsd_mu_hi: float,
             empirical_mean_obs_expr_per_gene_tensor_n: torch.Tensor,
             p_obs_lo_n: torch.Tensor,
@@ -340,8 +336,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         """Calculates the Poisson rate of chimeric molecule formation
 
         :param alpha_c: baseline chimera formation coefficient
-        :param beta_c: cell-size-dependent chimera formation coefficient
-        :param cell_size_scale_n: (relative) cell size scale factor
+        :param eta_n: (relative) cell size scale factor
         :param mean_empirical_fsd_mu_hi: empirical dataset-wide mean reads-per-molecule
         :param empirical_mean_obs_expr_per_gene_tensor_n: empirical mean gene expression per cell
         :param p_obs_lo_n: probability of observing a chimeric molecule
@@ -354,7 +349,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         estimated_mean_e_hi_n = empirical_mean_obs_expr_per_gene_tensor_n / p_obs_hi_n
         scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * mean_empirical_fsd_mu_hi)
         scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
-        mu_e_lo_n = (alpha_c + beta_c * cell_size_scale_n) * scaled_total_fragments_n
+        mu_e_lo_n = alpha_c * eta_n * scaled_total_fragments_n
         return mu_e_lo_n
 
     @staticmethod
@@ -559,7 +554,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         # input tensors
         fingerprint_tensor_nr = data['fingerprint_tensor']
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+        cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
+        cell_index_tensor_n = data['cell_index_tensor']
 
         # sizes
         mb_size = fingerprint_tensor_nr.shape[0]
@@ -606,14 +603,26 @@ class DropletTimeMachineModel(torch.nn.Module):
         else:
             raise Exception("Unknown guide specification for fsd_xi: allowed values are 'map' and 'gaussian'")
 
+        # droplet efficiency factors
+        eta_loc_c = pyro.param(
+            "eta_loc_c",
+            torch.tensor(
+                self.sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
+                device=self.device,
+                dtype=self.dtype))
+
         # apply a pseudo-bijective transformation to sort xi by component weights
         fsd_xi_sort_trans = SortByComponentWeights(self.fsd_codec)
         fsd_xi_posterior_dist = dist.TransformedDistribution(
             fsd_xi_posterior_base_dist, [fsd_xi_sort_trans])
         
         with pyro.plate("collapsed_gene_cell", size=mb_size):
+
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
+
+            with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
+                pyro.sample("eta_n", dist.Delta(v=eta_loc_c[cell_index_tensor_n]))
 
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()
