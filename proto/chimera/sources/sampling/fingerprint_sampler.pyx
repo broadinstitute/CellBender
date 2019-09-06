@@ -50,9 +50,6 @@ cdef class CSRFloatMatrix:
         for i in range(n_rows):
             assert indptr[i + 1] >= indptr[i], \
                 "indptr must be ascending"
-            for j in range(indptr[i], indptr[i + 1] - 1):
-                assert indices[j + 1] > indices[j], \
-                    "for each row, indices must be unique and sorted in ascending order"
             assert indices[indptr[i + 1] - 1] < n_cols, \
                 f"indices must be in range [0, {n_cols})"
 
