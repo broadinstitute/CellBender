@@ -717,8 +717,8 @@ class SingleCellFingerprintDTM:
         max_buffer_size = genes_per_gene_group * self.n_gene_groups * (
                 expressing_cells_per_gene + silent_cells_per_gene)
         fingerprint_array = np.zeros((max_buffer_size, self.max_family_size), dtype=self.numpy_dtype, order='c')
-        gene_index_array = np.zeros((max_buffer_size,), dtype=np.int64, order='c')
-        cell_index_array = np.zeros((max_buffer_size,), dtype=np.int64, order='c')
+        gene_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
+        cell_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
         gene_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
         cell_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
 
@@ -838,11 +838,11 @@ class SingleCellFingerprintDTM:
         return {
             'cell_index_tensor': torch.tensor(
                 cell_index_array,
-                device=self.device),
+                device=self.device).long(),
 
             'gene_index_tensor': torch.tensor(
                 gene_index_array,
-                device=self.device),
+                device=self.device).long(),
 
             'total_obs_reads_per_cell_tensor': torch.tensor(
                 total_obs_reads_per_cell_array,
