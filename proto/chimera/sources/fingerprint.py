@@ -14,7 +14,7 @@ from tqdm import tqdm
 from sklearn.decomposition import TruncatedSVD
 
 from stats import ApproximateZINBFit
-from cellbender.sampling.fingerprint_sampler import CSRIntegerMatrix, CSRBinaryMatrix, \
+from cellbender.sampling.fingerprint_sampler import CSRFloatMatrix, CSRBinaryMatrix, \
     SingleCellFingerprintStratifiedSampler
 
 # module-level cache for memoization
@@ -27,7 +27,6 @@ class SingleCellFingerprintBase:
         only be used for quantities that scale either as O(n_cells) or O(n_genes). In particular, the count
         matrix and the fingerprint tensor is stored as sparse matrices.
     """
-    _eps = np.finfo(np.float).eps
 
     def __init__(self,
                  gene_idx_list: List[int],
@@ -131,34 +130,8 @@ class SingleCellFingerprintBase:
         return len(self.barcode_list)
 
     @cachedproperty
-    def collapsed_csr_fingerprint_matrix_scipy(self) -> sp.csr_matrix:
-        """Returns the collapsed fingerprint matrix.
-
-        .. note:: The collapsed fingerprint matrix is simply the vertically stacked fingerprint matrix
-            of each barcode in the order of addition to the collection (i.e. in the same order as
-            ``barcode_list``).
-        """
-        self._finalize()
-        self._log_caching("collapsed_csr_fingerprint_matrix_scipy")
-        return sp.vstack(list(map(self.csr_fingerprint_dict.get, self.barcode_list)))
-
-    @cachedproperty
-    def collapsed_csr_fingerprint_matrix_cython(self) -> CSRIntegerMatrix:
-        """Returns the collapsed fingerprint matrix.
-
-        .. note:: The collapsed fingerprint matrix is simply the vertically stacked fingerprint matrix
-            of each barcode in the order of addition to the collection (i.e. in the same order as
-            ``barcode_list``).
-        """
-        self._finalize()
-        self._log_caching("collapsed_csr_fingerprint_matrix_cython")
-
-        return CSRIntegerMatrix(
-            n_rows=self.collapsed_csr_fingerprint_matrix_scipy.shape[0],
-            n_cols=self.collapsed_csr_fingerprint_matrix_scipy.shape[1],
-            indptr=self.collapsed_csr_fingerprint_matrix_scipy.indptr,
-            indices=self.collapsed_csr_fingerprint_matrix_scipy.indices,
-            data=self.collapsed_csr_fingerprint_matrix_scipy.data.astype(np.int32))
+    def eps(self):
+        return np.finfo(np.float).eps
 
     @cachedproperty
     def good_turing_estimator_g(self) -> np.ndarray:
@@ -174,7 +147,7 @@ class SingleCellFingerprintBase:
         for csr_fingerprint in self.csr_fingerprint_dict.values():
             orphan_reads += np.asarray(csr_fingerprint[:, 0].todense()).flatten()
             all_reads += csr_fingerprint.dot(read_counter)
-        good_turing_estimator = orphan_reads / (SingleCellFingerprintBase._eps + all_reads)
+        good_turing_estimator = orphan_reads / (self.eps + all_reads)
         good_turing_estimator[all_reads == 0] = np.nan
         return good_turing_estimator
 
@@ -319,7 +292,6 @@ class SingleCellFingerprintBase:
 class SingleCellFingerprintDTM:
     """This class extends the functionality of SingleCellFingerprintBase for Droplet Time Machine (TM)
     training."""
-    _eps = np.finfo(np.float).eps
 
     # minimum over-dispersion of an estimated negative binomial fit
     _min_nb_phi = 1e-2
@@ -383,6 +355,21 @@ class SingleCellFingerprintDTM:
         return self.sc_fingerprint_base.max_family_size
 
     @cachedproperty
+    def numpy_dtype(self):
+        if self.dtype == torch.float16:
+            return np.float16
+        if self.dtype == torch.float32:
+            return np.float32
+        if self.dtype == torch.float64:
+            return np.float64
+        else:
+            raise ValueError("Bad torch dtype -- allowed values are: float16, float32, float64")
+
+    @cachedproperty
+    def eps(self):
+        return np.finfo(self.numpy_dtype).eps
+
+    @cachedproperty
     def dense_fingerprint_ndarray(self) -> np.ndarray:
         self._log_caching("dense_fingerprint_ndarray")
         assert self.allow_dense_int_ndarray
@@ -401,6 +388,37 @@ class SingleCellFingerprintDTM:
         self._log_caching("sparse_count_matrix_csc")
         return sp.csc_matrix(self.sc_fingerprint_base.sparse_count_matrix_csr)
 
+    # TODO remove in favor of the cython version
+    @cachedproperty
+    def collapsed_csr_fingerprint_matrix_scipy(self) -> sp.csr_matrix:
+        """Returns the collapsed fingerprint matrix.
+
+        .. note:: The collapsed fingerprint matrix is simply the vertically stacked fingerprint matrix
+            of each barcode in the order of addition to the collection (i.e. in the same order as
+            ``barcode_list``).
+        """
+        self._log_caching("collapsed_csr_fingerprint_matrix_scipy")
+        return sp.vstack(list(
+            map(self.sc_fingerprint_base.csr_fingerprint_dict.get,
+                self.sc_fingerprint_base.barcode_list)))
+
+    @cachedproperty
+    def collapsed_csr_fingerprint_matrix_cython(self) -> CSRFloatMatrix:
+        """Returns the collapsed fingerprint matrix.
+
+        .. note:: The collapsed fingerprint matrix is simply the vertically stacked fingerprint matrix
+            of each barcode in the order of addition to the collection (i.e. in the same order as
+            ``barcode_list``).
+        """
+        self._log_caching("collapsed_csr_fingerprint_matrix_cython")
+
+        return CSRFloatMatrix(
+            n_rows=self.collapsed_csr_fingerprint_matrix_scipy.shape[0],
+            n_cols=self.collapsed_csr_fingerprint_matrix_scipy.shape[1],
+            indptr=self.collapsed_csr_fingerprint_matrix_scipy.indptr,
+            indices=self.collapsed_csr_fingerprint_matrix_scipy.indices,
+            data=self.collapsed_csr_fingerprint_matrix_scipy.data.astype(self.numpy_dtype))
+
     @cachedproperty
     def family_size_threshold_per_gene(self) -> np.ndarray:
         """Estimates per-gene family size cut-off given a lower CDF threshold on the empirical
@@ -411,7 +429,7 @@ class SingleCellFingerprintDTM:
         for gene_index in range(self.n_genes):
             collapsed_slice = gene_index + self.n_genes * np.arange(self.n_cells)
             counts_per_family_size = np.asarray(
-                self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix_scipy[collapsed_slice, :].sum(0)).squeeze(0)
+                self.collapsed_csr_fingerprint_matrix_scipy[collapsed_slice, :].sum(0)).squeeze(0)
             family_size_cdf = np.cumsum(counts_per_family_size) / np.sum(counts_per_family_size)
             try:
                 family_size_threshold_g[gene_index] = np.where(
@@ -498,7 +516,7 @@ class SingleCellFingerprintDTM:
     @cachedproperty
     def total_obs_reads_per_cell(self) -> np.ndarray:
         self._log_caching("total_obs_reads_per_cell")
-        total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
+        total_obs_reads_per_cell = np.zeros((self.n_cells,), dtype=self.numpy_dtype)
         family_size_vector = np.arange(1, self.max_family_size + 1)
         for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
             total_obs_reads_per_cell[i_cell] = np.sum(self.sc_fingerprint_base[barcode].dot(family_size_vector))
@@ -507,7 +525,7 @@ class SingleCellFingerprintDTM:
     @cachedproperty
     def total_obs_molecules_per_cell(self) -> np.ndarray:
         self._log_caching("total_obs_molecules_per_cell")
-        total_obs_molecules_per_cell = np.zeros((self.n_cells,), dtype=np.uint64)
+        total_obs_molecules_per_cell = np.zeros((self.n_cells,), dtype=self.numpy_dtype)
         for i_cell, barcode in enumerate(self.sc_fingerprint_base.barcode_list):
             total_obs_molecules_per_cell[i_cell] = np.sum(self.sc_fingerprint_base[barcode])
         return total_obs_molecules_per_cell
@@ -520,7 +538,7 @@ class SingleCellFingerprintDTM:
     @cachedproperty
     def mean_obs_expr_per_gene(self) -> np.ndarray:
         self._log_caching("total_obs_expr_per_gene")
-        return self.total_obs_expr_per_gene.astype(np.float) / self.n_cells
+        return self.total_obs_expr_per_gene.astype(self.numpy_dtype) / self.n_cells
 
     @cachedproperty
     def trans_trunc_sparse_count_matrix_csr(self) -> sp.csr_matrix:
@@ -544,37 +562,37 @@ class SingleCellFingerprintDTM:
     def svd_feature_loadings_per_cell(self) -> np.ndarray:
         self._log_caching("svd_feature_loadings_per_cell")
         svd = self.trans_trunc_count_matrix_features_truncated_svd_object
-        return svd.transform(self.trans_trunc_sparse_count_matrix_csr)
+        return svd.transform(self.trans_trunc_sparse_count_matrix_csr).astype(self.numpy_dtype)
 
     @cachedproperty
     def svd_feature_z_scores_per_cell(self) -> np.ndarray:
         self._log_caching("svd_feature_z_scores_per_cell")
         features = self.svd_feature_loadings_per_cell
         features_mean, features_std = np.mean(features, 0), np.std(features, 0)
-        features_z_score = (features - features_mean[None, :]) / (self._eps + features_std[None, :])
-        return features_z_score
+        features_z_score = (features - features_mean[None, :]) / (self.eps + features_std[None, :])
+        return features_z_score.astype(self.numpy_dtype)
 
     @cachedproperty
     def svd_feature_components(self) -> np.ndarray:
-        return self.trans_trunc_count_matrix_features_truncated_svd_object.components_
+        return self.trans_trunc_count_matrix_features_truncated_svd_object.components_.astype(self.numpy_dtype)
 
     @cachedproperty
     def total_obs_molecules_feature_z_scores_per_cell(self) -> np.ndarray:
         self._log_caching("total_obs_molecules_feature_z_scores_per_cell")
-        raw_counts = self.total_obs_molecules_per_cell.astype(np.float)
+        raw_counts = self.total_obs_molecules_per_cell.astype(self.numpy_dtype)
         log1p_counts = np.log1p(raw_counts)
         raw_mean, raw_std = np.mean(raw_counts), np.std(raw_counts)
         log1p_mean, log1p_std = np.mean(log1p_counts), np.std(log1p_counts)
-        raw_z_score = (raw_counts - raw_mean) / (self._eps + raw_std)
-        log1p_z_score = (log1p_counts - log1p_mean) / (self._eps + log1p_std)
-        return np.hstack((raw_z_score[:, None], log1p_z_score[:, None]))
+        raw_z_score = (raw_counts - raw_mean) / (self.eps + raw_std)
+        log1p_z_score = (log1p_counts - log1p_mean) / (self.eps + log1p_std)
+        return np.hstack((raw_z_score[:, None], log1p_z_score[:, None])).astype(self.numpy_dtype)
 
     @cachedproperty
     def feature_z_scores_per_cell(self) -> np.ndarray:
         self._log_caching("feature_z_scores_per_cell")
         return np.hstack(
             (self.svd_feature_z_scores_per_cell,
-             self.total_obs_molecules_feature_z_scores_per_cell))
+             self.total_obs_molecules_feature_z_scores_per_cell)).astype(self.numpy_dtype)
 
     @cachedproperty
     def gene_groups_dict(self) -> Dict[int, List[int]]:
@@ -606,11 +624,11 @@ class SingleCellFingerprintDTM:
     @cachedproperty
     def empirical_fsd_params(self) -> np.ndarray:
         self._log_caching("empirical_fsd_params")
-        empirical_fsd_params = np.zeros((self.n_genes, 3))
+        empirical_fsd_params = np.zeros((self.n_genes, 3), dtype=self.numpy_dtype)
         for gene_index in range(self.n_genes):
             collapsed_slice = gene_index + self.n_genes * np.arange(self.n_cells)
             counts_per_family_size = np.asarray(
-                self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix_scipy[collapsed_slice, :].sum(0)).squeeze(0)
+                self.collapsed_csr_fingerprint_matrix_scipy[collapsed_slice, :].sum(0)).squeeze(0)
 
             # "cap" the empirical histogram as a heuristic for attenuating chimeric counts
             if self.max_estimated_chimera_family_size >= 1:
@@ -644,11 +662,11 @@ class SingleCellFingerprintDTM:
 
         # fit zero-inflated negative-binomial
         self._logger.warning("Fitting approximate ZINB to UMI counts (per gene)...")
-        empirical_e_hi_params = np.zeros((self.n_genes, 3))
+        empirical_e_hi_params = np.zeros((self.n_genes, 3), dtype=self.numpy_dtype)
         for gene_index in tqdm(range(self.n_genes)):
             # inflate the counts to account for p_obs
             e_hi_est = np.asarray(self.sparse_count_matrix_csc[:, gene_index].todense()).squeeze(-1) / (
-                    p_obs_g[gene_index] + self._eps)
+                    p_obs_g[gene_index] + self.eps)
             fit = self.zinb_fitter(e_hi_est)
             if not fit['converged']:
                 self._logger.warning(f'ZINB fit to gene (internal index: {gene_index}) was not successful!')
@@ -698,11 +716,11 @@ class SingleCellFingerprintDTM:
 
         max_buffer_size = genes_per_gene_group * self.n_gene_groups * (
                 expressing_cells_per_gene + silent_cells_per_gene)
-        fingerprint_array = np.zeros((max_buffer_size, self.max_family_size), dtype=np.int32, order='c')
-        gene_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
-        cell_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
-        gene_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=np.float64, order='c')
-        cell_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=np.float64, order='c')
+        fingerprint_array = np.zeros((max_buffer_size, self.max_family_size), dtype=self.numpy_dtype, order='c')
+        gene_index_array = np.zeros((max_buffer_size,), dtype=np.int64, order='c')
+        cell_index_array = np.zeros((max_buffer_size,), dtype=np.int64, order='c')
+        gene_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
+        cell_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
 
         assert fingerprint_array.flags['C_CONTIGUOUS']
         assert gene_index_array.flags['C_CONTIGUOUS']
@@ -804,16 +822,12 @@ class SingleCellFingerprintDTM:
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
         empirical_mean_obs_expr_per_gene_array = self.mean_obs_expr_per_gene[gene_index_array]
 
-        # fast slicing of the collapsed fingerprint csr matrix using Cython
         collapsed_index_array = cell_index_array * self.n_genes + gene_index_array
         fingerprint_array.fill(0)
-        self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix_cython.copy_rows_to_dense(
+        self.collapsed_csr_fingerprint_matrix_cython.copy_rows_to_dense(
             collapsed_index_array, fingerprint_array)
         fingerprint_tensor = torch.tensor(
             fingerprint_array[:mb_size, :], device=self.device, dtype=self.dtype)
-
-        # fingerprint_array = np.asarray(
-        #     self.sc_fingerprint_base.collapsed_csr_fingerprint_matrix[collapsed_index_array, :].todense())
 
         if self.enable_cell_features:
             cell_features_array = self.feature_z_scores_per_cell[cell_index_array, :]
@@ -822,21 +836,47 @@ class SingleCellFingerprintDTM:
             cell_features_tensor = None
 
         return {
-            'cell_index_tensor': torch.tensor(cell_index_array, device=self.device),
-            'gene_index_tensor': torch.tensor(gene_index_array, device=self.device),
+            'cell_index_tensor': torch.tensor(
+                cell_index_array,
+                device=self.device),
+
+            'gene_index_tensor': torch.tensor(
+                gene_index_array,
+                device=self.device),
+
             'total_obs_reads_per_cell_tensor': torch.tensor(
-                total_obs_reads_per_cell_array.astype(np.int), device=self.device, dtype=self.dtype),
+                total_obs_reads_per_cell_array,
+                device=self.device,
+                dtype=self.dtype),
+
             'empirical_mean_obs_expr_per_gene_tensor': torch.tensor(
-                empirical_mean_obs_expr_per_gene_array, device=self.device, dtype=self.dtype),
+                empirical_mean_obs_expr_per_gene_array,
+                device=self.device,
+                dtype=self.dtype),
+
             'fingerprint_tensor': fingerprint_tensor,
+
             'empirical_fsd_mu_hi_tensor': torch.tensor(
-                empirical_fsd_mu_hi_array, device=self.device, dtype=self.dtype),
+                empirical_fsd_mu_hi_array,
+                device=self.device,
+                dtype=self.dtype),
+
             'cell_features_tensor': cell_features_tensor,
+
             'cell_sampling_site_scale_factor_tensor': torch.tensor(
-                cell_sampling_site_scale_factor_array, device=self.device, dtype=self.dtype),
+                cell_sampling_site_scale_factor_array,
+                device=self.device,
+                dtype=self.dtype),
+
             'gene_sampling_site_scale_factor_tensor': torch.tensor(
-                gene_sampling_site_scale_factor_array, device=self.device, dtype=self.dtype),
-            'downsampling_rate_tensor': torch.ones(mb_size, device=self.device, dtype=self.dtype)
+                gene_sampling_site_scale_factor_array,
+                device=self.device,
+                dtype=self.dtype),
+
+            'downsampling_rate_tensor': torch.ones(
+                mb_size,
+                device=self.device,
+                dtype=self.dtype)
         }
 
 

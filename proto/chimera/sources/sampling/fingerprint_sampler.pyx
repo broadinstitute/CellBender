@@ -12,14 +12,16 @@ from libc.stdint cimport int32_t
 from libcpp.unordered_set cimport unordered_set as unordered_set
 from libcpp.vector cimport vector as vector
 
+ctypedef int32_t INT_DTYPE
+ctypedef float FLOAT_DTYPE
 
 # TODO refactor out
-cdef class CSRIntegerMatrix:
+cdef class CSRFloatMatrix:
     cdef int32_t n_rows
     cdef int32_t n_cols
     cdef int32_t* indptr
     cdef int32_t* indices
-    cdef int32_t* data
+    cdef FLOAT_DTYPE* data
 
     def __cinit__(
             self,
@@ -27,14 +29,14 @@ cdef class CSRIntegerMatrix:
             size_t n_cols,
             int32_t[:] indptr,
             int32_t[:] indices,
-            int32_t[:] data):
+            FLOAT_DTYPE[:] data):
         self.n_rows = n_rows
         self.n_cols = n_cols
 
         # allocate memory
         self.indptr = <int32_t*> PyMem_Malloc((n_rows + 1) * sizeof(int32_t))
         self.indices = <int32_t*> PyMem_Malloc(len(indices) * sizeof(int32_t))
-        self.data = <int32_t*> PyMem_Malloc(len(indices) * sizeof(int32_t))
+        self.data = <FLOAT_DTYPE*> PyMem_Malloc(len(indices) * sizeof(FLOAT_DTYPE))
 
         cdef size_t i, j
         assert len(indptr) == n_rows + 1, \
@@ -67,7 +69,7 @@ cdef class CSRIntegerMatrix:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.nonecheck(False)
-    cpdef void copy_rows_to_dense(self, int32_t[:] selected_row_indices, int32_t[:, ::1] out):
+    cpdef void copy_rows_to_dense(self, int32_t[:] selected_row_indices, FLOAT_DTYPE[:, ::1] out):
         cdef Py_ssize_t i, j, n
         cdef Py_ssize_t n_selected_row_indices = len(selected_row_indices)
         for i in range(n_selected_row_indices):
@@ -272,20 +274,20 @@ cdef class SingleCellFingerprintStratifiedSampler:
                         int32_t silent_cells_per_gene,
                         int32_t[::1] gene_index_memview,
                         int32_t[::1] cell_index_memview,
-                        double[::1] gene_sampling_site_scale_factor_memview,
-                        double[::1] cell_sampling_site_scale_factor_memview):
+                        FLOAT_DTYPE[::1] gene_sampling_site_scale_factor_memview,
+                        FLOAT_DTYPE[::1] cell_sampling_site_scale_factor_memview):
 
         cdef int32_t i_gene_group, i_gene, c_n_genes, c_gene_group_sz
-        cdef double c_gene_scale_factor
+        cdef FLOAT_DTYPE c_gene_scale_factor
 
         cdef int32_t c_expressing_cells_sz, c_n_expressing_cells
-        cdef double c_expressing_cell_scale_factor
+        cdef FLOAT_DTYPE c_expressing_cell_scale_factor
                 
         cdef int32_t c_silent_cells_sz, c_n_silent_cells
-        cdef double c_silent_cell_scale_factor
+        cdef FLOAT_DTYPE c_silent_cell_scale_factor
 
         cdef int32_t c_total_cells_for_gene
-        cdef double c_fractionalized_gene_scale_factor
+        cdef FLOAT_DTYPE c_fractionalized_gene_scale_factor
         
         cdef vector[int32_t] c_gene_indices
         cdef vector[int32_t].iterator i_gene_it
@@ -313,7 +315,7 @@ cdef class SingleCellFingerprintStratifiedSampler:
                     self.gene_groups_csr, i_gene_group, c_n_genes)
 
                 # weight of randomly drawn genes
-                c_gene_scale_factor = (<double> c_gene_group_sz) / c_n_genes
+                c_gene_scale_factor = (<FLOAT_DTYPE> c_gene_group_sz) / c_n_genes
                 
                 # select silent and expressing cells from each gene
                 i_gene_it = c_gene_indices.begin()

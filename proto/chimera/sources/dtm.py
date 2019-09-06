@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Tuple, List, Dict, Union, Any, Callable, Generator
 
+from boltons.cacheutils import cachedproperty
+
 import pyro
 from pyro import poutine
 import pyro.distributions as dist
@@ -24,8 +26,6 @@ from collections import defaultdict
 
 class DropletTimeMachineModel(torch.nn.Module):
 
-    EPS = 1e-6
-    
     def __init__(self,
                  init_params_dict: Dict[str, Union[int, float, bool]],
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
@@ -76,6 +76,21 @@ class DropletTimeMachineModel(torch.nn.Module):
                 
     def forward(self, _):
         raise NotImplementedError
+
+    @cachedproperty
+    def numpy_dtype(self):
+        if self.dtype == torch.float16:
+            return np.float16
+        if self.dtype == torch.float32:
+            return np.float32
+        if self.dtype == torch.float64:
+            return np.float64
+        else:
+            raise ValueError("Bad torch dtype -- allowed values are: float16, float32, float64")
+
+    @cachedproperty
+    def eps(self):
+        return np.finfo(self.numpy_dtype).eps
 
     def model(self,
               data: Dict[str, torch.Tensor],
@@ -200,16 +215,16 @@ class DropletTimeMachineModel(torch.nn.Module):
             w_fsd_lo_comps_nj = fsd_params_dict['w_lo']
             w_fsd_hi_comps_nj = fsd_params_dict['w_hi']
             mu_fsd_lo_comps_to_mu_empirical_ratio_nj = mu_fsd_lo_comps_nj / (
-                self.EPS + empirical_fsd_mu_hi_tensor_n.unsqueeze(-1))
+                self.eps + empirical_fsd_mu_hi_tensor_n.unsqueeze(-1))
             mu_fsd_hi_comps_to_mu_empirical_ratio_nj = mu_fsd_hi_comps_nj / (
-                self.EPS + empirical_fsd_mu_hi_tensor_n.unsqueeze(-1))
+                self.eps + empirical_fsd_mu_hi_tensor_n.unsqueeze(-1))
 
             # observation probability for each component of the distribution
-            alpha_fsd_lo_comps_nj = (self.EPS + phi_fsd_lo_comps_nj).reciprocal()
+            alpha_fsd_lo_comps_nj = (self.eps + phi_fsd_lo_comps_nj).reciprocal()
             log_p_unobs_lo_comps_nj = alpha_fsd_lo_comps_nj * (
                     alpha_fsd_lo_comps_nj.log() - (alpha_fsd_lo_comps_nj + mu_fsd_lo_comps_nj).log())
             p_obs_lo_comps_nj = get_log_prob_compl(log_p_unobs_lo_comps_nj).exp()
-            alpha_fsd_hi_comps_nj = (self.EPS + phi_fsd_hi_comps_nj).reciprocal()
+            alpha_fsd_hi_comps_nj = (self.eps + phi_fsd_hi_comps_nj).reciprocal()
             log_p_unobs_hi_comps_nj = alpha_fsd_hi_comps_nj * (
                     alpha_fsd_hi_comps_nj.log() - (alpha_fsd_hi_comps_nj + mu_fsd_hi_comps_nj).log())
             p_obs_hi_comps_nj = get_log_prob_compl(log_p_unobs_hi_comps_nj).exp()

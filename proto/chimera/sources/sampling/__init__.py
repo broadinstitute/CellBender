@@ -1,2 +1,2 @@
-from .fingerprint_sampler import CSRIntegerMatrix, CSRBinaryMatrix, SingleCellFingerprintStratifiedSampler
+from .fingerprint_sampler import CSRFloatMatrix, CSRBinaryMatrix, SingleCellFingerprintStratifiedSampler
 
