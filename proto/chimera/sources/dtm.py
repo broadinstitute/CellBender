@@ -370,9 +370,10 @@ class DropletTimeMachineModel(torch.nn.Module):
         :return: Poisson rate of chimeric molecule formation
         """
         estimated_mean_e_hi_n = empirical_mean_obs_expr_per_gene_tensor_n / p_obs_hi_n
-        scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * mean_empirical_fsd_mu_hi)
-        scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
-        mu_e_lo_n = (alpha_c * eta_n + beta_c) * scaled_total_fragments_n
+        # scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * mean_empirical_fsd_mu_hi)
+        # scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
+        # mu_e_lo_n = (alpha_c * eta_n + beta_c) * scaled_total_fragments_n
+        mu_e_lo_n = (alpha_c * eta_n + beta_c) * estimated_mean_e_hi_n
         return mu_e_lo_n
 
     @staticmethod
