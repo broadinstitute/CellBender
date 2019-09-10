@@ -101,3 +101,14 @@ class ApproximateZINBFit:
 
 def int_ndarray_mode(arr: np.ndarray, axis: int):
     return np.apply_along_axis(lambda x: np.bincount(x).argmax(), axis=axis, arr=arr)
+
+
+def gamma_loc_scale_to_concentration_rate(loc: float, scale: float):
+    # concentration
+    alpha = (loc**2) / (scale**2)
+
+    # rate
+    beta = loc / (scale**2)
+
+    return alpha, beta
+

@@ -18,7 +18,7 @@ from fingerprint import SingleCellFingerprintDTM
 from fsd import FSDCodec, SortByComponentWeights
 from expr import GeneExpressionPrior
 from importance_sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
-from stats import int_ndarray_mode
+from stats import int_ndarray_mode, gamma_loc_scale_to_concentration_rate
 
 import logging
 from collections import defaultdict
@@ -59,17 +59,24 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.w_hi_dirichlet_reg_strength: float = init_params_dict['fsd.w_hi_dirichlet_reg_strength']
         self.w_lo_dirichlet_concentration: float = init_params_dict['fsd.w_lo_dirichlet_concentration']
         self.w_hi_dirichlet_concentration: float = init_params_dict['fsd.w_hi_dirichlet_concentration']
-        self.train_chimera_rate_params: bool = init_params_dict['chimera.enable_hyperparameter_optimization']
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
-        self.eta_rate: float = init_params_dict['global.eta_rate']
+
+        self.eta_prior_a, self.eta_prior_b = gamma_loc_scale_to_concentration_rate(
+            loc=init_params_dict['global.eta_prior_loc'],
+            scale=init_params_dict['global.eta_prior_scale'])
+
+        self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
+            loc=init_params_dict['global.chimera_alpha_c_prior_loc'],
+            scale=init_params_dict['global.chimera_alpha_c_prior_scale'])
+
+        self.beta_c_prior_a, self.beta_c_prior_b = gamma_loc_scale_to_concentration_rate(
+            loc=init_params_dict['global.chimera_beta_c_prior_loc'],
+            scale=init_params_dict['global.chimera_beta_c_prior_scale'])
 
         # empirical normalization factors
         self.mean_total_molecules_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_molecules_per_cell).item()
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
-
-        # initial parameters for e_lo
-        self.init_alpha_c: float = init_params_dict['global.chimera_alpha_c']
 
         # logging
         self._logger = logging.getLogger()
@@ -144,15 +151,19 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # droplet efficiency hyperparameters
         eta_concentration_scalar = torch.tensor(
-            self.eta_rate + 1., device=self.device, dtype=self.dtype)
+            self.eta_prior_a, device=self.device, dtype=self.dtype)
         eta_rate_scalar = torch.tensor(
-            self.eta_rate, device=self.device, dtype=self.dtype)
+            self.eta_prior_b, device=self.device, dtype=self.dtype)
 
-        # chimera parameters
-        alpha_c = pyro.param(
-            "alpha_c",
-            torch.tensor(self.init_alpha_c, device=self.device, dtype=self.dtype),
-            constraint=constraints.positive)
+        # chimera hyperparameters
+        alpha_c_concentration_scalar = torch.tensor(
+            self.alpha_c_prior_a, device=self.device, dtype=self.dtype)
+        alpha_c_rate_scalar = torch.tensor(
+            self.alpha_c_prior_b, device=self.device, dtype=self.dtype)
+        beta_c_concentration_scalar = torch.tensor(
+            self.beta_c_prior_a, device=self.device, dtype=self.dtype)
+        beta_c_rate_scalar = torch.tensor(
+            self.beta_c_prior_b, device=self.device, dtype=self.dtype)
 
         # useful auxiliary quantities
         family_size_vector_obs_r = torch.arange(
@@ -161,13 +172,18 @@ class DropletTimeMachineModel(torch.nn.Module):
             0, max_family_size + 1, device=self.device, dtype=self.dtype)
         zero = torch.tensor(0, device=self.device, dtype=self.dtype)
 
-        if not self.train_chimera_rate_params:
-            alpha_c = alpha_c.detach()
-
         # fsd xi prior distribution
         fsd_xi_prior_dist = self._get_fsd_xi_prior_dist(
             fsd_xi_prior_locs_kq,
             fsd_xi_prior_scales_kq)
+
+        # sample chimera parameters
+        alpha_c = pyro.sample(
+            "alpha_c",
+            dist.Gamma(concentration=alpha_c_concentration_scalar, rate=alpha_c_rate_scalar))
+        beta_c = pyro.sample(
+            "beta_c",
+            dist.Gamma(concentration=beta_c_concentration_scalar, rate=beta_c_rate_scalar))
 
         with pyro.plate("collapsed_gene_cell", size=mb_size):
 
@@ -245,16 +261,16 @@ class DropletTimeMachineModel(torch.nn.Module):
             e_obs_n = fingerprint_tensor_nr.sum(-1)
 
             # calculate the (poisson) rate of chimeric molecule formation
-            with torch.no_grad():
-                mu_e_lo_n = self._get_mu_e_lo_n(
-                    alpha_c=alpha_c,
-                    eta_n=eta_n,
-                    mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
-                    empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
-                    p_obs_lo_n=p_obs_lo_n,
-                    p_obs_hi_n=p_obs_hi_n,
-                    mu_fsd_hi_n=mu_fsd_hi_n,
-                    downsampling_rate_tensor_n=downsampling_rate_tensor_n)
+            mu_e_lo_n = self._get_mu_e_lo_n(
+                alpha_c=alpha_c,
+                beta_c=beta_c,
+                eta_n=eta_n,
+                mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
+                empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
+                p_obs_lo_n=p_obs_lo_n,
+                p_obs_hi_n=p_obs_hi_n,
+                mu_fsd_hi_n=mu_fsd_hi_n,
+                downsampling_rate_tensor_n=downsampling_rate_tensor_n)
 
             if posterior_sampling_mode:
 
@@ -331,6 +347,7 @@ class DropletTimeMachineModel(torch.nn.Module):
     @staticmethod
     def _get_mu_e_lo_n(
             alpha_c: torch.Tensor,
+            beta_c: torch.Tensor,
             eta_n: torch.Tensor,
             mean_empirical_fsd_mu_hi: float,
             empirical_mean_obs_expr_per_gene_tensor_n: torch.Tensor,
@@ -340,7 +357,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             downsampling_rate_tensor_n: torch.Tensor) -> torch.Tensor:
         """Calculates the Poisson rate of chimeric molecule formation
 
-        :param alpha_c: baseline chimera formation coefficient
+        :param alpha_c: chimera formation coefficient (cell-size prefactor)
+        :param beta_c: chimera formation coefficient (constant piece)
         :param eta_n: (relative) cell size scale factor
         :param mean_empirical_fsd_mu_hi: empirical dataset-wide mean reads-per-molecule
         :param empirical_mean_obs_expr_per_gene_tensor_n: empirical mean gene expression per cell
@@ -354,7 +372,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         estimated_mean_e_hi_n = empirical_mean_obs_expr_per_gene_tensor_n / p_obs_hi_n
         scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * mean_empirical_fsd_mu_hi)
         scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
-        mu_e_lo_n = alpha_c * eta_n * scaled_total_fragments_n
+        mu_e_lo_n = (alpha_c * eta_n + beta_c) * scaled_total_fragments_n
         return mu_e_lo_n
 
     @staticmethod
@@ -585,6 +603,18 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_xi_posterior_loc_gq = pyro.param(
             "fsd_xi_posterior_loc_gq",
             self.fsd_codec.get_sorted_fsd_xi(self.fsd_codec.init_fsd_xi_loc_posterior))
+
+        # point estimate for chimera parameters
+        alpha_c_posterior_loc = pyro.param(
+            "alpha_c_posterior_loc",
+            torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype),
+            constraint=constraints.positive)
+        beta_c_posterior_loc = pyro.param(
+            "beta_c_posterior_loc",
+            torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
+            constraint=constraints.positive)
+        pyro.sample("alpha_c", dist.Delta(v=alpha_c_posterior_loc))
+        pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
 
         # base posterior distribution for fsd xi
         if self.guide_spec_dict['fsd_xi'] == 'map':
