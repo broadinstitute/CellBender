@@ -62,9 +62,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
 
-        self.eta_prior_a, self.eta_prior_b = gamma_loc_scale_to_concentration_rate(
-            loc=init_params_dict['global.eta_prior_loc'],
-            scale=init_params_dict['global.eta_prior_scale'])
+        # self.eta_prior_a, self.eta_prior_b = gamma_loc_scale_to_concentration_rate(
+        #     loc=init_params_dict['global.eta_prior_loc'],
+        #     scale=init_params_dict['global.eta_prior_scale'])
 
         self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
             loc=init_params_dict['global.chimera_alpha_c_prior_loc'],
@@ -118,6 +118,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         gene_index_tensor_n = data['gene_index_tensor']
         cell_index_tensor_n = data['cell_index_tensor']
         total_obs_reads_per_cell_tensor_n = data['total_obs_reads_per_cell_tensor']
+        total_obs_molecules_per_cell_tensor_n = data['total_obs_molecules_per_cell_tensor']
         cell_features_tensor_nf = data['cell_features_tensor']
 
         # sizes
@@ -149,11 +150,11 @@ class DropletTimeMachineModel(torch.nn.Module):
                 dtype=self.dtype, device=self.device),
             constraint=fsd_xi_prior_scales_constraint)
 
-        # droplet efficiency hyperparameters
-        eta_concentration_scalar = torch.tensor(
-            self.eta_prior_a, device=self.device, dtype=self.dtype)
-        eta_rate_scalar = torch.tensor(
-            self.eta_prior_b, device=self.device, dtype=self.dtype)
+        # # droplet efficiency hyperparameters
+        # eta_concentration_scalar = torch.tensor(
+        #     self.eta_prior_a, device=self.device, dtype=self.dtype)
+        # eta_rate_scalar = torch.tensor(
+        #     self.eta_prior_b, device=self.device, dtype=self.dtype)
 
         # chimera hyperparameters
         alpha_c_concentration_scalar = torch.tensor(
@@ -191,11 +192,14 @@ class DropletTimeMachineModel(torch.nn.Module):
                 # sample gene family size distribution parameters
                 fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_prior_dist)
 
-            with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
-                # sample droplet efficiency
-                eta_n = pyro.sample(
-                    "eta_n",
-                    dist.Gamma(concentration=eta_concentration_scalar, rate=eta_rate_scalar))
+            # with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
+            #     # sample droplet efficiency
+            #     eta_n = pyro.sample(
+            #         "eta_n",
+            #         dist.Gamma(concentration=eta_concentration_scalar, rate=eta_rate_scalar))
+
+            # empirical droplet efficiency
+            eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
 
             # transform fsd xi to the constrained space
             fsd_params_dict = self.fsd_codec.decode(fsd_xi_nq)
@@ -642,14 +646,14 @@ class DropletTimeMachineModel(torch.nn.Module):
         else:
             raise Exception("Unknown guide specification for fsd_xi: allowed values are 'map' and 'gaussian'")
 
-        # droplet efficiency factors
-        eta_loc_c = pyro.param(
-            "eta_loc_c",
-            torch.tensor(
-                self.sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
-                device=self.device,
-                dtype=self.dtype),
-            constraint=constraints.positive)
+        # # droplet efficiency factors
+        # eta_loc_c = pyro.param(
+        #     "eta_loc_c",
+        #     torch.tensor(
+        #         self.sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
+        #         device=self.device,
+        #         dtype=self.dtype),
+        #     constraint=constraints.positive)
 
         # apply a pseudo-bijective transformation to sort xi by component weights
         fsd_xi_sort_trans = SortByComponentWeights(self.fsd_codec)
@@ -661,8 +665,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
 
-            with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
-                pyro.sample("eta_n", dist.Delta(v=eta_loc_c[cell_index_tensor_n]))
+            # with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
+            #     pyro.sample("eta_n", dist.Delta(v=eta_loc_c[cell_index_tensor_n]))
 
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()

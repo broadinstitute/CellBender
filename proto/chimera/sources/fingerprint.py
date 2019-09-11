@@ -822,6 +822,7 @@ class SingleCellFingerprintDTM:
             assert fingerprint_array.shape[1] == self.max_family_size
 
         total_obs_reads_per_cell_array = self.total_obs_reads_per_cell[cell_index_array]
+        total_obs_molecules_per_cell_array = self.total_obs_molecules_per_cell[cell_index_array]
         empirical_fsd_mu_hi_array = self.empirical_fsd_mu_hi[gene_index_array]
         empirical_mean_obs_expr_per_gene_array = self.mean_obs_expr_per_gene[gene_index_array]
 
@@ -851,6 +852,11 @@ class SingleCellFingerprintDTM:
 
             'total_obs_reads_per_cell_tensor': torch.tensor(
                 total_obs_reads_per_cell_array,
+                device=self.device,
+                dtype=self.dtype),
+
+            'total_obs_molecules_per_cell_tensor': torch.tensor(
+                total_obs_molecules_per_cell_array,
                 device=self.device,
                 dtype=self.dtype),
 
