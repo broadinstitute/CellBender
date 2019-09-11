@@ -231,13 +231,16 @@ class DropletTimeMachineModel(torch.nn.Module):
             p_obs_hi_n = log_p_obs_hi_n.exp()
 
             # localization and/or calculation of required variables for pickup by locals() -- see below
-            p_obs_lo_to_p_obs_hi_ratio_n = p_obs_lo_n / p_obs_hi_n
             phi_fsd_lo_comps_nj = fsd_params_dict['phi_lo']
             phi_fsd_hi_comps_nj = fsd_params_dict['phi_hi']
             mu_fsd_lo_comps_nj = fsd_params_dict['mu_lo']
             mu_fsd_hi_comps_nj = fsd_params_dict['mu_hi']
             w_fsd_lo_comps_nj = fsd_params_dict['w_lo']
             w_fsd_hi_comps_nj = fsd_params_dict['w_hi']
+
+            # for regularization
+            p_obs_lo_to_p_obs_hi_ratio_n = p_obs_lo_n / p_obs_hi_n
+            mu_fsd_lo_to_mu_fsd_hi_ratio_n = mu_fsd_lo_n / mu_fsd_hi_n
             mu_fsd_lo_comps_to_mu_empirical_ratio_nj = mu_fsd_lo_comps_nj / self.mean_empirical_fsd_mu_hi
             mu_fsd_hi_comps_to_mu_empirical_ratio_nj = mu_fsd_hi_comps_nj / self.mean_empirical_fsd_mu_hi
 
