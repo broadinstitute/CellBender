@@ -385,20 +385,6 @@ class SingleCellFingerprintDTM:
         self._log_caching("sparse_count_matrix_csc")
         return sp.csc_matrix(self.sc_fingerprint_base.sparse_count_matrix_csr)
 
-    # TODO remove in favor of the cython version
-    @cachedproperty
-    def collapsed_csr_fingerprint_matrix_scipy(self) -> sp.csr_matrix:
-        """Returns the collapsed fingerprint matrix.
-
-        .. note:: The collapsed fingerprint matrix is simply the vertically stacked fingerprint matrix
-            of each barcode in the order of addition to the collection (i.e. in the same order as
-            ``barcode_list``).
-        """
-        self._log_caching("collapsed_csr_fingerprint_matrix_scipy")
-        return sp.vstack(list(
-            map(self.sc_fingerprint_base.csr_fingerprint_dict.get,
-                self.sc_fingerprint_base.barcode_list)))
-
     @cachedproperty
     def collapsed_csr_fingerprint_matrix_cython(self) -> CSRFloatMatrix:
         """Returns the collapsed fingerprint matrix.
@@ -408,13 +394,27 @@ class SingleCellFingerprintDTM:
             ``barcode_list``).
         """
         self._log_caching("collapsed_csr_fingerprint_matrix_cython")
+        collapsed_csr_fingerprint_matrix_scipy = sp.vstack(list(
+            map(self.sc_fingerprint_base.csr_fingerprint_dict.get,
+                self.sc_fingerprint_base.barcode_list)))
+        collapsed_csr_fingerprint_matrix_cython = CSRFloatMatrix(
+            n_rows=collapsed_csr_fingerprint_matrix_scipy.shape[0],
+            n_cols=collapsed_csr_fingerprint_matrix_scipy.shape[1],
+            indptr=collapsed_csr_fingerprint_matrix_scipy.indptr,
+            indices=collapsed_csr_fingerprint_matrix_scipy.indices,
+            data=collapsed_csr_fingerprint_matrix_scipy.data.astype(self.numpy_dtype))
+        return collapsed_csr_fingerprint_matrix_cython
 
-        return CSRFloatMatrix(
-            n_rows=self.collapsed_csr_fingerprint_matrix_scipy.shape[0],
-            n_cols=self.collapsed_csr_fingerprint_matrix_scipy.shape[1],
-            indptr=self.collapsed_csr_fingerprint_matrix_scipy.indptr,
-            indices=self.collapsed_csr_fingerprint_matrix_scipy.indices,
-            data=self.collapsed_csr_fingerprint_matrix_scipy.data.astype(self.numpy_dtype))
+    def get_single_gene_dense_fingerprint_array(self, gene_index: int, buffer: Optional[np.ndarray]) -> np.ndarray:
+        if buffer is not None:
+            assert buffer.shape == (self.n_cells, self.max_family_size)
+            buffer.fill(0)
+        else:
+            buffer = np.zeros((self.n_cells, self.max_family_size), dtype=self.numpy_dtype)
+        collapsed_index_array = gene_index + np.arange(self.n_cells) * self.n_genes
+        self.collapsed_csr_fingerprint_matrix_cython.copy_rows_to_dense(
+            collapsed_index_array, buffer)
+        return buffer
 
     @cachedproperty
     def family_size_threshold_per_gene(self) -> np.ndarray:
@@ -423,10 +423,12 @@ class SingleCellFingerprintDTM:
         self._log_caching("family_size_threshold_per_gene")
         assert 0 <= self.low_family_size_cdf_threshold < 1
         family_size_threshold_g = np.zeros((self.n_genes,), dtype=np.int)
+        single_gene_fingerprint_array = np.zeros((self.n_cells, self.max_family_size), dtype=self.numpy_dtype)
         for gene_index in range(self.n_genes):
-            collapsed_slice = gene_index + self.n_genes * np.arange(self.n_cells)
-            counts_per_family_size = np.asarray(
-                self.collapsed_csr_fingerprint_matrix_scipy[collapsed_slice, :].sum(0)).squeeze(0)
+            _ = self.get_single_gene_dense_fingerprint_array(
+                gene_index=gene_index,
+                buffer=single_gene_fingerprint_array)
+            counts_per_family_size = single_gene_fingerprint_array.sum(0)
             family_size_cdf = np.cumsum(counts_per_family_size) / np.sum(counts_per_family_size)
             try:
                 family_size_threshold_g[gene_index] = np.where(
@@ -618,23 +620,31 @@ class SingleCellFingerprintDTM:
                     sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index]))
         return gene_groups_dict
 
-    # TODO use truncated count matrix
     @cachedproperty
     def empirical_fsd_params(self) -> np.ndarray:
         self._log_caching("empirical_fsd_params")
+
+        # heuristic quantile-based FS threshold mask with shape (n_genes, max_family_size)
+        family_size_mask_g = (
+                np.arange(0, self.max_family_size)[:, None]
+                    >= (self.family_size_threshold_per_gene - 1)).T.astype(np.int)
+
         empirical_fsd_params = np.zeros((self.n_genes, 3), dtype=self.numpy_dtype)
+        single_gene_fingerprint_array = np.zeros((self.n_cells, self.max_family_size), dtype=self.numpy_dtype)
         for gene_index in range(self.n_genes):
-            collapsed_slice = gene_index + self.n_genes * np.arange(self.n_cells)
-            counts_per_family_size = np.asarray(
-                self.collapsed_csr_fingerprint_matrix_scipy[collapsed_slice, :].sum(0)).squeeze(0)
+            # obtain the empirical FSD from all cells
+            _ = self.get_single_gene_dense_fingerprint_array(
+                gene_index=gene_index,
+                buffer=single_gene_fingerprint_array)
 
-            # # "cap" the empirical histogram as a heuristic for attenuating chimeric counts
-            # if self.max_estimated_chimera_family_size >= 1:
-            #     counts_per_family_size[:self.max_estimated_chimera_family_size] = counts_per_family_size[
-            #         self.max_estimated_chimera_family_size]
+            # apply the heuristic quantile-based FS threshold to remove some of the chimeras
+            counts_per_family_size = single_gene_fingerprint_array.sum(0) * family_size_mask_g[gene_index, :]
+            total_kept_molecules = np.sum(counts_per_family_size)
+            assert total_kept_molecules > 0
 
+            # calculate empirical moments
             family_size_array = np.arange(1, self.max_family_size + 1)
-            family_size_pmf = counts_per_family_size / np.sum(counts_per_family_size)
+            family_size_pmf = counts_per_family_size / total_kept_molecules
             family_size_mean = np.sum(family_size_array * family_size_pmf)
             family_size_var = np.sum((family_size_array ** 2) * family_size_pmf) - family_size_mean ** 2
 
