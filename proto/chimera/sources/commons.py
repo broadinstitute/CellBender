@@ -10,72 +10,6 @@ from bisect import bisect_left, bisect_right
 from typing import Set, List, Dict, Union
 
 
-class MoleculeInfo:
-    def __init__(self, mol_h5_path, genes_tsv_path=None, extended=False):
-        logging.warning('Loading molecule info HDF5 file...')
-        mol_h5_tab = tables.open_file(mol_h5_path)        
-        self.gene_array = mol_h5_tab.root.gene.read()
-        self.barcode_array = mol_h5_tab.root.barcode.read()
-        self.reads_array = mol_h5_tab.root.reads.read()
-        if extended:
-            logging.warning('Extended mode: loading H5 additional columns in memory...')
-            self.umi_array = mol_h5_tab.root.umi.read()
-            self.conf_mapped_uniq_read_pos_array = mol_h5_tab.root.conf_mapped_uniq_read_pos.read()
-            self.nonconf_mapped_reads_array = mol_h5_tab.root.nonconf_mapped_reads.read()
-            self.unmapped_reads_array = mol_h5_tab.root.unmapped_reads.read()
-
-        # v1 molecule info file does not have gene names and we have read it externally
-        try:
-            self.gene_names_array = mol_h5_tab.root.gene_names.read()
-            self.gene_ids_array = mol_h5_tab.root.gene_ids.read()
-            self.unmappable_gene_idx = len(self.gene_names_array)
-        except:
-            logging.warning('Old CellRanger (v1) output; loading gene names from an external file...')
-            gene_names_tsv_pd = pd.read_csv(genes_tsv_path, delimiter='\t', header=None)
-            self.gene_names_array = gene_names_tsv_pd.values[:, 0].astype(str)
-            self.gene_ids_array = self.gene_names_array
-            self.unmappable_gene_idx = len(gene_names_array)
-            
-        if extended:
-            logging.warning('Sorting by (BC, UMI)...')
-            # sort molecules hierarchically by (barcode, umi); this will help us in fast binary search lookup of molecules
-            sort_index = sorted(
-                list(range(len(self.barcode_array))),
-                key=lambda idx: (self.barcode_array[idx], self.umi_array[idx]))
-            self.gene_array = self.gene_array[sort_index]
-            self.barcode_array = self.barcode_array[sort_index]
-            self.umi_array = self.umi_array[sort_index]
-            self.conf_mapped_uniq_read_pos_array = self.conf_mapped_uniq_read_pos_array[sort_index]
-            self.reads_array = self.reads_array[sort_index]
-            self.nonconf_mapped_reads_array = self.nonconf_mapped_reads_array[sort_index]
-            self.unmapped_reads_array = self.unmapped_reads_array[sort_index]
-        else:
-            logging.warning('Extended mode disabled: molecules may NOT be hierarchically sorted by (BC, UMI)!')
-        
-        # total umi by barcode
-        logging.warning('Ranking barcodes by UMI and read count...')
-        sorted_barcode_reads = zip(self.barcode_array, self.reads_array)
-        self.total_umi_per_barcode = dict()
-        self.total_reads_per_barcode = dict()
-        group_iter = itertools.groupby(sorted_barcode_reads, operator.itemgetter(0))
-        for barcode, grouper in group_iter:
-            c_reads = [elem[1] for elem in grouper]
-            self.total_umi_per_barcode[barcode] = sum(1 for read in c_reads if read > 0)
-            self.total_reads_per_barcode[barcode] = sum(c_reads)
-
-        # sort by total umi
-        self.total_umi_per_barcode_list = list(
-            (barcode, total_umi_count) for barcode, total_umi_count in self.total_umi_per_barcode.items())
-        self.sorted_total_umi_per_barcode_list = sorted(
-            self.total_umi_per_barcode_list, key=operator.itemgetter(1), reverse=True)
-
-        # sort by total reads
-        self.total_reads_per_barcode_list = list(
-            (barcode, total_read_count) for barcode, total_read_count in self.total_reads_per_barcode.items())
-        self.sorted_total_reads_per_barcode_list = sorted(
-            self.total_reads_per_barcode_list, key=operator.itemgetter(1), reverse=True)
-
-
 def encode(seq: str):
     '''Return the string representation of a DNA sequence
     encoded by 10x Genomics with the 2-bit encoding
@@ -129,6 +63,99 @@ def decode(num: int, length):
         seq = lookup[two_lsbs] + seq # 3' end is lsb, so keep 5' first
         numshift = (numshift >> 2) # shift num two bits over
     return seq
+
+
+class MoleculeInfo:
+    def __init__(self, mol_h5_path, cr_version, genes_tsv_path=None, extended=False):
+        assert cr_version in ['v1', 'v2', 'v3']
+        if cr_version == 'v1':
+            assert genes_tsv_path is not None
+
+        logging.warning(f'Loading molecule info HDF5 file (CellRanger version: {cr_version})...')
+        mol_h5_tab = tables.open_file(mol_h5_path)
+        
+        # data
+        if cr_version in ['v1', 'v2']:
+            self.gene_array = mol_h5_tab.root.gene.read()
+            self.barcode_array = mol_h5_tab.root.barcode.read()
+            self.reads_array = mol_h5_tab.root.reads.read()
+            if extended:
+                logging.warning('Extended mode: loading H5 additional columns in memory...')
+                self.umi_array = mol_h5_tab.root.umi.read()
+                self.conf_mapped_uniq_read_pos_array = mol_h5_tab.root.conf_mapped_uniq_read_pos.read()
+                self.nonconf_mapped_reads_array = mol_h5_tab.root.nonconf_mapped_reads.read()
+                self.unmapped_reads_array = mol_h5_tab.root.unmapped_reads.read()
+
+        if cr_version == 'v3':
+            self.gene_array = mol_h5_tab.root.feature_idx.read()
+            self.barcode_whitelist = np.asarray(list(
+                map(lambda barcode_bytes: encode(barcode_bytes.decode('ascii')),
+                    mol_h5_tab.root.barcodes.read())))
+            self.barcode_array = self.barcode_whitelist[mol_h5_tab.root.barcode_idx.read()]            
+            self.reads_array = mol_h5_tab.root.count.read()
+            if extended:
+                logging.warning('Extended mode: loading H5 additional columns in memory...')
+                self.umi_array= mol_h5_tab.root.umi.raed()
+                self.conf_mapped_uniq_read_pos_array = None
+                self.nonconf_mapped_reads_array = None
+                self.unmapped_reads_array = None
+
+        # gene names
+        if cr_version == 'v1':
+            gene_names_tsv_pd = pd.read_csv(genes_tsv_path, delimiter='\t', header=None)
+            self.gene_names_array = gene_names_tsv_pd.values[:, 0].astype(str)
+            self.gene_ids_array = self.gene_names_array
+            self.unmappable_gene_idx = len(gene_names_array)
+        elif cr_version == 'v2':
+            self.gene_names_array = mol_h5_tab.root.gene_names.read()
+            self.gene_ids_array = mol_h5_tab.root.gene_ids.read()
+            self.unmappable_gene_idx = len(self.gene_names_array)
+        elif cr_version == 'v3':
+            self.gene_names_array = mol_h5_tab.root.features.name.read()
+            self.gene_ids_array = mol_h5_tab.root.features.id.read()
+            self.unmappable_gene_idx = len(self.gene_names_array) #### check this
+            
+        if extended:
+            logging.warning('Sorting by (BC, UMI)...')
+            # sort molecules hierarchically by (barcode, umi); this will help us in fast binary search lookup of molecules
+            sort_index = sorted(
+                list(range(len(self.barcode_array))),
+                key=lambda idx: (self.barcode_array[idx], self.umi_array[idx]))
+            self.gene_array = self.gene_array[sort_index]
+            self.barcode_array = self.barcode_array[sort_index]
+            self.umi_array = self.umi_array[sort_index]
+            self.reads_array = self.reads_array[sort_index]
+            
+            if cr_version in {'v1', 'v2'}:
+                self.conf_mapped_uniq_read_pos_array = self.conf_mapped_uniq_read_pos_array[sort_index]
+                self.nonconf_mapped_reads_array = self.nonconf_mapped_reads_array[sort_index]
+                self.unmapped_reads_array = self.unmapped_reads_array[sort_index]
+        else:
+            logging.warning('Extended mode disabled: molecules may NOT be hierarchically sorted by (BC, UMI)!')
+        
+        # total umi by barcode
+        logging.warning('Ranking barcodes by UMI and read count...')
+        sorted_barcode_reads = zip(self.barcode_array, self.reads_array)
+        self.total_umi_per_barcode = dict()
+        self.total_reads_per_barcode = dict()
+        group_iter = itertools.groupby(sorted_barcode_reads, operator.itemgetter(0))
+        for barcode, grouper in group_iter:
+            c_reads = [elem[1] for elem in grouper]
+            self.total_umi_per_barcode[barcode] = sum(1 for read in c_reads if read > 0)
+            self.total_reads_per_barcode[barcode] = sum(c_reads)
+
+        # sort by total umi
+        self.total_umi_per_barcode_list = list(
+            (barcode, total_umi_count) for barcode, total_umi_count in self.total_umi_per_barcode.items())
+        self.sorted_total_umi_per_barcode_list = sorted(
+            self.total_umi_per_barcode_list, key=operator.itemgetter(1), reverse=True)
+
+        # sort by total reads
+        self.total_reads_per_barcode_list = list(
+            (barcode, total_read_count) for barcode, total_read_count in self.total_reads_per_barcode.items())
+        self.sorted_total_reads_per_barcode_list = sorted(
+            self.total_reads_per_barcode_list, key=operator.itemgetter(1), reverse=True)
+
 
 
 def get_full_umi_count_statistics(barcode_set: Union[Set[int], None],
