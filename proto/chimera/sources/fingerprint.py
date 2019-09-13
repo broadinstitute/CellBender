@@ -411,7 +411,7 @@ class SingleCellFingerprintDTM:
             buffer.fill(0)
         else:
             buffer = np.zeros((self.n_cells, self.max_family_size), dtype=self.numpy_dtype)
-        collapsed_index_array = gene_index + np.arange(self.n_cells) * self.n_genes
+        collapsed_index_array = gene_index + np.arange(self.n_cells, dtype=np.int32) * self.n_genes
         self.collapsed_csr_fingerprint_matrix_cython.copy_rows_to_dense(
             collapsed_index_array, buffer)
         return buffer

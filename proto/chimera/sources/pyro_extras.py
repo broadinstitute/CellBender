@@ -154,12 +154,12 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
     Creates a negative binomial distribution.
     
     Args:
-        logit_zero (Number, Tensor): zero inflation probability in logit scale
+        logit_p_zero (Number, Tensor): zero inflation probability in logit scale
         mu (Number, Tensor): mean (must be strictly positive)
         phi (Number, Tensor): overdispersion (must be strictly positive)
     """
     arg_constraints = {
-        'logit_zero': constraints.real,
+        'logit_p_zero': constraints.real,
         'mu': constraints.positive,
         'phi': constraints.positive}
     
@@ -177,7 +177,7 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(ZeroInflatedNegativeBinomial, _instance)
         batch_shape = torch.Size(batch_shape)
-        new.logit_zero = self.logit_p_zero.expand(batch_shape)
+        new.logit_p_zero = self.logit_p_zero.expand(batch_shape)
         new.mu = self.mu.expand(batch_shape)
         new.phi = self.phi.expand(batch_shape)
         
