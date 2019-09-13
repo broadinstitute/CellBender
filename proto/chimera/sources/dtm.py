@@ -10,7 +10,6 @@ from pyro.distributions import TorchDistribution
 
 import torch
 from torch.distributions import constraints
-from torch.nn.parameter import Parameter
 
 from pyro_extras import CustomLogProbTerm, MixtureDistribution, logaddexp, get_log_prob_compl, \
     get_binomial_samples_sparse_counts
