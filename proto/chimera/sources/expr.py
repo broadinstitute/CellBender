@@ -109,8 +109,8 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         with torch.no_grad():
             f_loc, f_scale = self.vsgp.forward(self.log_mean_obs_expr_g)
         X_test = self.log_mean_obs_expr_g.cpu().numpy()
-        f_loc_numpy = f_loc.cpu().numpy()
-        f_scale_numpy = f_scale.cpu().numpy()
+        f_loc_numpy = f_loc.cpu().numpy().T
+        f_scale_numpy = f_scale.cpu().numpy().T
 
         fig, axs = plt.subplots(ncols=4, figsize=(16, 4))
         y_labels = ['$\\beta_0$', '$\\beta_1$', '$\\beta_2$', '$\\beta_3$']
