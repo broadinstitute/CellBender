@@ -3,6 +3,7 @@ from typing import Tuple, List, Dict, Union, Any, Callable, Generator, Optional
 from abc import abstractmethod
 
 import torch
+from torch.distributions import constraints
 
 import pyro
 import pyro.distributions as dist
@@ -14,6 +15,29 @@ from matplotlib import pylab
 
 from pyro_extras import ZeroInflatedNegativeBinomial
 from fingerprint import SingleCellFingerprintDTM
+
+
+class FudgedConstant(kernels.Kernel):
+    r"""
+    Implementation of Constant kernel:
+
+        :math:`k(x, z) = \sigma^2.`
+    """
+    def __init__(self, input_dim, variance=None, min_variance=None, active_dims=None):
+        super(FudgedConstant, self).__init__(input_dim, active_dims)
+
+        variance = torch.tensor(1.) if variance is None else variance
+        min_variance = min_variance if min_variance is not None else 0.
+        self.variance = torch.nn.Parameter(variance)
+        self.set_constraint("variance", constraints.greater_than(min_variance))
+
+    def forward(self, X, Z=None, diag=False):
+        if diag:
+            return self.variance.expand(X.size(0))
+
+        if Z is None:
+            Z = X
+        return self.variance.expand(X.size(0), Z.size(0))
 
 
 class GeneExpressionPrior(torch.nn.Module):
@@ -39,6 +63,7 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
                  init_constant_kernel_variance: float,
                  init_beta_mean: np.ndarray,
                  cholesky_jitter: float,
+                 min_variance: float,
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
         super(VSGPGeneExpressionPrior, self).__init__()
@@ -65,9 +90,10 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         kernel_linear = kernels.Linear(
             input_dim=input_dim,
             variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
-        kernel_constant = kernels.Constant(
+        kernel_constant = FudgedConstant(
             input_dim=input_dim,
-            variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype))
+            variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype),
+            min_variance=min_variance)
         kernel_full = kernels.Sum(kernel_rbf, kernels.Sum(kernel_linear, kernel_constant))
 
         # mean subtraction
