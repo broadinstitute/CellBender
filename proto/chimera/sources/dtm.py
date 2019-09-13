@@ -61,10 +61,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
 
-        # self.eta_prior_a, self.eta_prior_b = gamma_loc_scale_to_concentration_rate(
-        #     loc=init_params_dict['global.eta_prior_loc'],
-        #     scale=init_params_dict['global.eta_prior_scale'])
-
         self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
             loc=init_params_dict['global.chimera_alpha_c_prior_loc'],
             scale=init_params_dict['global.chimera_alpha_c_prior_scale'])
@@ -125,7 +121,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         batch_shape = torch.Size([mb_size])
         max_family_size = fingerprint_tensor_nr.shape[1]
 
-        # register the parameters of the family size distribution codec
+        # register the external modules
         pyro.module("fsd_codec", self.fsd_codec)
         pyro.module("gene_expression_prior", self.gene_expression_prior)
         
@@ -148,12 +144,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                 (self.fsd_gmm_num_components, self.fsd_codec.total_fsd_params),
                 dtype=self.dtype, device=self.device),
             constraint=fsd_xi_prior_scales_constraint)
-
-        # # droplet efficiency hyperparameters
-        # eta_concentration_scalar = torch.tensor(
-        #     self.eta_prior_a, device=self.device, dtype=self.dtype)
-        # eta_rate_scalar = torch.tensor(
-        #     self.eta_prior_b, device=self.device, dtype=self.dtype)
 
         # chimera hyperparameters
         alpha_c_concentration_scalar = torch.tensor(
@@ -191,12 +181,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                 # sample gene family size distribution parameters
                 fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_prior_dist)
 
-            # with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
-            #     # sample droplet efficiency
-            #     eta_n = pyro.sample(
-            #         "eta_n",
-            #         dist.Gamma(concentration=eta_concentration_scalar, rate=eta_rate_scalar))
-
             # empirical droplet efficiency
             eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
 
@@ -208,17 +192,21 @@ class DropletTimeMachineModel(torch.nn.Module):
                 fsd_params_dict,
                 downsampling_rate_tensor=downsampling_rate_tensor_n)
 
-            # extract e_hi prior parameters (per cell)
-            e_hi_prior_params_dict = self.gene_expression_prior.forward(
-                gene_index_tensor_n=gene_index_tensor_n,
-                eta_n=eta_n,
-                cell_index_tensor_n=cell_index_tensor_n,
-                cell_features_tensor_nf=cell_features_tensor_nf,
-                total_obs_reads_per_cell_tensor_n=total_obs_reads_per_cell_tensor_n,
-                downsampling_rate_tensor_n=downsampling_rate_tensor_n)
-            log_mu_e_hi_n = e_hi_prior_params_dict['log_mu_e_hi_n']
-            log_phi_e_hi_n = e_hi_prior_params_dict['log_phi_e_hi_n']
-            logit_p_zero_e_hi_n = e_hi_prior_params_dict['logit_p_zero_e_hi_n']
+            # get e_hi prior parameters (per cell)
+            beta_loc_nr, beta_scale_nr = self.gene_expression_prior.forward(data)
+
+            # sample e_hi prior parameters
+            with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+                # sample beta parameters
+                beta_nr = pyro.sample(
+                    "beta_nr",
+                    dist.Normal(loc=beta_loc_nr, scale=beta_scale_nr).to_event(1))
+
+            # calculate ZINB parameters
+            log_eta_n = eta_n.log()
+            log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n
+            log_phi_e_hi_n = beta_nr[:, 2]
+            logit_p_zero_e_hi_n = beta_nr[:, 3]
 
             mu_e_hi_n = log_mu_e_hi_n.exp()
             phi_e_hi_n = log_phi_e_hi_n.exp()
@@ -379,7 +367,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * mean_empirical_fsd_mu_hi)
         scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
         mu_e_lo_n = (alpha_c * eta_n + beta_c) * scaled_total_fragments_n
-        # mu_e_lo_n = (alpha_c * eta_n + beta_c) * estimated_mean_e_hi_n
         return mu_e_lo_n
 
     @staticmethod
@@ -584,12 +571,14 @@ class DropletTimeMachineModel(torch.nn.Module):
         # input tensors
         fingerprint_tensor_nr = data['fingerprint_tensor']
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
-        cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
-        cell_index_tensor_n = data['cell_index_tensor']
 
         # sizes
         mb_size = fingerprint_tensor_nr.shape[0]
+
+        # register the external modules
+        pyro.module("fsd_codec", self.fsd_codec)
+        pyro.module("gene_expression_prior", self.gene_expression_prior)
 
         # fsd xi gmm
         if self.fsd_gmm_num_components > 1:
@@ -645,27 +634,18 @@ class DropletTimeMachineModel(torch.nn.Module):
         else:
             raise Exception("Unknown guide specification for fsd_xi: allowed values are 'map' and 'gaussian'")
 
-        # # droplet efficiency factors
-        # eta_loc_c = pyro.param(
-        #     "eta_loc_c",
-        #     torch.tensor(
-        #         self.sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
-        #         device=self.device,
-        #         dtype=self.dtype),
-        #     constraint=constraints.positive)
-
         # apply a pseudo-bijective transformation to sort xi by component weights
         fsd_xi_sort_trans = SortByComponentWeights(self.fsd_codec)
         fsd_xi_posterior_dist = dist.TransformedDistribution(
             fsd_xi_posterior_base_dist, [fsd_xi_sort_trans])
         
+        # gene expression prior guide
+        self.gene_expression_prior.guide(data)
+
         with pyro.plate("collapsed_gene_cell", size=mb_size):
 
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
-
-            # with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
-            #     pyro.sample("eta_n", dist.Delta(v=eta_loc_c[cell_index_tensor_n]))
 
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()
@@ -719,36 +699,6 @@ class PosteriorGeneExpressionSampler(object):
         self.dtm_model = dtm_model
         self.device = device
         self.dtype = dtype
-
-    def _generate_single_gene_minibatch_data(
-            self,
-            gene_index: int,
-            cell_index_list: List[int],
-            n_particles_cell: int) -> Dict[str, torch.Tensor]:
-        """Generate model input tensors for a given gene index and the cell index range
-
-        :param n_particles_cell: repeat factor for every cell
-
-        .. note: The generated minibatch has scale-factor set to 1.0 for all gene and cell sampling
-            sites (because they are not necessary for our purposes here). As such, the minibatches
-            produced by this method should not be used for training.
-        """
-        cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell).astype(np.int32)
-        gene_index_array = gene_index * np.ones_like(cell_index_array).astype(np.int32)
-        cell_sampling_site_scale_factor_array = np.ones_like(
-            cell_index_array, dtype=self.dtm_model.sc_fingerprint_dtm.numpy_dtype)
-        gene_sampling_site_scale_factor_array = np.ones_like(
-            cell_index_array, dtype=self.dtm_model.sc_fingerprint_dtm.numpy_dtype)
-        fingerprint_array = np.zeros(
-            (len(cell_index_array), self.dtm_model.sc_fingerprint_dtm.max_family_size),
-            dtype=self.dtm_model.sc_fingerprint_dtm.numpy_dtype)
-
-        return self.dtm_model.sc_fingerprint_dtm.generate_torch_minibatch_data(
-            cell_index_array=cell_index_array,
-            gene_index_array=gene_index_array,
-            cell_sampling_site_scale_factor_array=cell_sampling_site_scale_factor_array,
-            gene_sampling_site_scale_factor_array=gene_sampling_site_scale_factor_array,
-            fingerprint_array=fingerprint_array)
 
     def _sharded_cell_index_generator(
             self,
@@ -823,7 +773,7 @@ class PosteriorGeneExpressionSampler(object):
             the trained model context.
         """
         assert run_mode in {"only_observed", "full"}
-        minibatch_data = self._generate_single_gene_minibatch_data(
+        minibatch_data = self.dtm_model.sc_fingerprint_dtm.generate_single_gene_minibatch_data(
             gene_index=gene_index,
             cell_index_list=cell_index_list,
             n_particles_cell=n_particles_cell)

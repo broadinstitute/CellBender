@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from sklearn.decomposition import TruncatedSVD
 
-from stats import ApproximateZINBFit
+#from stats import ApproximateZINBFit
 from cellbender.sampling.fingerprint_sampler import CSRFloatMatrix, CSRBinaryMatrix, \
     SingleCellFingerprintStratifiedSampler
 
@@ -302,7 +302,7 @@ class SingleCellFingerprintDTM:
                  n_pca_features: int = 50,
                  n_pca_iters: int = 20,
                  count_trans_feature_extraction: Callable[[np.ndarray], np.ndarray] = np.log1p,
-                 zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
+                 #zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
                  enable_cell_features: bool = False,
@@ -310,8 +310,8 @@ class SingleCellFingerprintDTM:
                  verbose: bool = True,
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
-        if zinb_fitter_kwargs is None:
-            zinb_fitter_kwargs = dict()
+        # if zinb_fitter_kwargs is None:
+        #     zinb_fitter_kwargs = dict()
 
         self.sc_fingerprint_base = sc_fingerprint_base
         self.low_family_size_cdf_threshold = low_family_size_cdf_threshold
@@ -333,8 +333,8 @@ class SingleCellFingerprintDTM:
             self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "
                                  "entire dataset!")
 
-        # ZINB fitter
-        self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
+        # # ZINB fitter
+        # self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
 
     def _log_caching(self, name: str):
         if self.verbose:
@@ -662,41 +662,41 @@ class SingleCellFingerprintDTM:
 
         return empirical_fsd_params
 
-    @cachedproperty
-    def empirical_e_hi_params(self) -> np.ndarray:
-        self._log_caching("empirical_e_hi_params")
-        # estimated probability of observing real molecules
-        p_obs_g = self.empirical_fsd_params[:, 2]
+    # @cachedproperty
+    # def empirical_e_hi_params(self) -> np.ndarray:
+    #     self._log_caching("empirical_e_hi_params")
+    #     # estimated probability of observing real molecules
+    #     p_obs_g = self.empirical_fsd_params[:, 2]
+    #
+    #     # fit zero-inflated negative-binomial
+    #     self._logger.warning("Fitting approximate ZINB to UMI counts (per gene)...")
+    #     empirical_e_hi_params = np.zeros((self.n_genes, 3), dtype=self.numpy_dtype)
+    #     for gene_index in tqdm(range(self.n_genes)):
+    #         # inflate the counts to account for p_obs
+    #         e_hi_est = np.asarray(self.sparse_count_matrix_csc[:, gene_index].todense()).squeeze(-1) / (
+    #                 p_obs_g[gene_index] + self.eps)
+    #         fit = self.zinb_fitter(e_hi_est)
+    #         if not fit['converged']:
+    #             self._logger.warning(f'ZINB fit to gene (internal index: {gene_index}) was not successful!')
+    #         empirical_e_hi_params[gene_index, 0] = fit['mu']
+    #         empirical_e_hi_params[gene_index, 1] = fit['phi']
+    #         empirical_e_hi_params[gene_index, 2] = fit['p_zero']
+    #     return empirical_e_hi_params
 
-        # fit zero-inflated negative-binomial
-        self._logger.warning("Fitting approximate ZINB to UMI counts (per gene)...")
-        empirical_e_hi_params = np.zeros((self.n_genes, 3), dtype=self.numpy_dtype)
-        for gene_index in tqdm(range(self.n_genes)):
-            # inflate the counts to account for p_obs
-            e_hi_est = np.asarray(self.sparse_count_matrix_csc[:, gene_index].todense()).squeeze(-1) / (
-                    p_obs_g[gene_index] + self.eps)
-            fit = self.zinb_fitter(e_hi_est)
-            if not fit['converged']:
-                self._logger.warning(f'ZINB fit to gene (internal index: {gene_index}) was not successful!')
-            empirical_e_hi_params[gene_index, 0] = fit['mu']
-            empirical_e_hi_params[gene_index, 1] = fit['phi']
-            empirical_e_hi_params[gene_index, 2] = fit['p_zero']
-        return empirical_e_hi_params
-
-    @cachedproperty
-    def empirical_mu_e_hi(self) -> np.ndarray:
-        self._log_caching("empirical_mu_e_hi")
-        return self.empirical_e_hi_params[:, 0]
-
-    @cachedproperty
-    def empirical_phi_e_hi(self) -> np.ndarray:
-        self._log_caching("empirical_phi_e_hi")
-        return self.empirical_e_hi_params[:, 1]
-
-    @cachedproperty
-    def empirical_p_zero_e_hi(self) -> np.ndarray:
-        self._log_caching("empirical_p_zero_e_hi")
-        return self.empirical_e_hi_params[:, 2]
+    # @cachedproperty
+    # def empirical_mu_e_hi(self) -> np.ndarray:
+    #     self._log_caching("empirical_mu_e_hi")
+    #     return self.empirical_e_hi_params[:, 0]
+    #
+    # @cachedproperty
+    # def empirical_phi_e_hi(self) -> np.ndarray:
+    #     self._log_caching("empirical_phi_e_hi")
+    #     return self.empirical_e_hi_params[:, 1]
+    #
+    # @cachedproperty
+    # def empirical_p_zero_e_hi(self) -> np.ndarray:
+    #     self._log_caching("empirical_p_zero_e_hi")
+    #     return self.empirical_e_hi_params[:, 2]
 
     @cachedproperty
     def empirical_fsd_mu_hi(self) -> np.ndarray:
@@ -899,6 +899,41 @@ class SingleCellFingerprintDTM:
                 device=self.device,
                 dtype=self.dtype)
         }
+
+    def generate_single_gene_minibatch_data(
+            self,
+            gene_index: int,
+            cell_index_list: List[int],
+            n_particles_cell: int) -> Dict[str, torch.Tensor]:
+        """Generate model input tensors for a given gene index and the cell index range
+
+        :param gene_index:
+        :param cell_index_list:
+        :param n_particles_cell: repeat factor for every cell (see the notes)
+
+        .. note: for n_particles_cell > 1, the entire ``cell_index_list`` is repeated that many times
+
+        .. note: The generated minibatch has scale-factor set to 1.0 for all gene and cell sampling
+            sites (because they are not necessary for our purposes here). As such, the minibatches
+            produced by this method should not be used for training.
+        """
+        assert n_particles_cell >= 1
+        cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell).astype(np.int32)
+        gene_index_array = gene_index * np.ones_like(cell_index_array).astype(np.int32)
+        cell_sampling_site_scale_factor_array = np.ones_like(
+            cell_index_array, dtype=self.numpy_dtype)
+        gene_sampling_site_scale_factor_array = np.ones_like(
+            cell_index_array, dtype=self.numpy_dtype)
+        fingerprint_array = np.zeros(
+            (len(cell_index_array), self.max_family_size),
+            dtype=self.numpy_dtype)
+
+        return self.generate_torch_minibatch_data(
+            cell_index_array=cell_index_array,
+            gene_index_array=gene_index_array,
+            cell_sampling_site_scale_factor_array=cell_sampling_site_scale_factor_array,
+            gene_sampling_site_scale_factor_array=gene_sampling_site_scale_factor_array,
+            fingerprint_array=fingerprint_array)
 
 
 def downsample_single_fingerprint_numpy(fingerprint_array: np.ndarray, downsampling_rate: float):

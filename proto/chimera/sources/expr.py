@@ -3,9 +3,16 @@ from typing import Tuple, List, Dict, Union, Any, Callable, Generator, Optional
 from abc import abstractmethod
 
 import torch
-from torch.nn.parameter import Parameter
 
-from pyro_extras import logit, get_log_prob_compl, logaddexp
+import pyro
+import pyro.distributions as dist
+from pyro import poutine
+from pyro.contrib.gp.models import VariationalSparseGP
+import pyro.contrib.gp.kernels as kernels
+
+from matplotlib import pylab
+
+from pyro_extras import ZeroInflatedNegativeBinomial
 from fingerprint import SingleCellFingerprintDTM
 
 
@@ -14,138 +21,241 @@ class GeneExpressionPrior(torch.nn.Module):
         super(GeneExpressionPrior, self).__init__()
 
     @abstractmethod
-    def forward(self,
-                gene_index_tensor_n: torch.Tensor,
-                cell_index_tensor_n: torch.Tensor,
-                eta_n: torch.Tensor,
-                cell_features_tensor_nf: Optional[torch.Tensor],
-                total_obs_reads_per_cell_tensor_n: Optional[torch.Tensor],
-                downsampling_rate_tensor_n: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, data: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def guide(self, data: Dict[str, torch.Tensor]):
         raise NotImplementedError
 
 
-class GeneLevelGeneExpressionPrior(GeneExpressionPrior):
-    EPS = 1e-6
-
+class VSGPGeneExpressionPrior(GeneExpressionPrior):
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
+                 n_inducing_points: int,
+                 init_rbf_kernel_variance: float,
+                 init_rbf_kernel_lengthscale: float,
+                 init_linear_kernel_variance: float,
+                 init_constant_kernel_variance: float,
+                 init_beta_mean: np.ndarray,
+                 cholesky_jitter: float,
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
-        super(GeneLevelGeneExpressionPrior, self).__init__()
+        super(VSGPGeneExpressionPrior, self).__init__()
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.device = device
         self.dtype = dtype
-        self.log_mean_total_reads_per_cell: float = np.log(
-            np.mean(sc_fingerprint_dtm.total_obs_reads_per_cell)).item()
 
-        init_log_mu_e_hi_g = torch.log(torch.tensor(
-            self.EPS + sc_fingerprint_dtm.empirical_mu_e_hi,
-            device=device,
-            dtype=dtype))
-        init_log_phi_e_hi_g = torch.log(torch.tensor(
-            self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
-            device=device,
-            dtype=dtype))
-        init_logit_p_zero_e_hi_g = logit(torch.tensor(
-            sc_fingerprint_dtm.empirical_p_zero_e_hi,
-            device=device,
-            dtype=dtype))
-        self.global_prior_params_gr = torch.nn.Parameter(
-            torch.cat((
-                init_log_mu_e_hi_g.unsqueeze(-1),
-                init_log_phi_e_hi_g.unsqueeze(-1),
-                init_logit_p_zero_e_hi_g.unsqueeze(-1)), dim=-1))
+        # feature space
+        self.log_mean_obs_expr_g = torch.log(
+            torch.tensor(sc_fingerprint_dtm.mean_obs_expr_per_gene, device=device, dtype=dtype))
+
+        # inducing points
+        sort_ind = torch.argsort(self.log_mean_obs_expr_g, descending=True)
+        stride = (sc_fingerprint_dtm.n_genes // n_inducing_points)
+        self.inducing_points = self.log_mean_obs_expr_g[sort_ind][::stride].clone()
+        assert self.inducing_points.size(0) > 0
+
+        # GP kernel setup
+        input_dim = 1  #
+        kernel_rbf = kernels.RBF(
+            input_dim=input_dim,
+            variance=torch.tensor(init_rbf_kernel_variance, device=device, dtype=dtype),
+            lengthscale=torch.tensor(init_rbf_kernel_lengthscale, device=device, dtype=dtype))
+        kernel_linear = kernels.Linear(
+            input_dim=input_dim,
+            variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
+        kernel_constant = kernels.Constant(
+            input_dim=input_dim,
+            variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype))
+        kernel_full = kernels.Sum(kernel_rbf, kernels.Sum(kernel_linear, kernel_constant))
+
+        # mean subtraction
+        self.f_mean = torch.nn.Parameter(
+            torch.tensor(init_beta_mean, device=device, dtype=dtype).unsqueeze(-1))
+
+        # instantiate VSGP model
+        self.vsgp = VariationalSparseGP(
+            X=self.log_mean_obs_expr_g,
+            y=None,
+            kernel=kernel_full,
+            Xu=self.inducing_points,
+            likelihood=None,
+            mean_function=lambda x: self.f_mean,
+            latent_shape=torch.Size([4]),
+            whiten=True,
+            jitter=cholesky_jitter)
 
         # send parameters to device
         self.to(device)
 
-    def forward(self,
-                gene_index_tensor_n: torch.Tensor,
-                cell_index_tensor_n: torch.Tensor,
-                eta_n: torch.Tensor,
-                cell_features_tensor_nf: Optional[torch.Tensor],
-                total_obs_reads_per_cell_tensor_n: Optional[torch.Tensor],
-                downsampling_rate_tensor_n: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, data: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        log_mean_obs_expr_n = data['empirical_mean_obs_expr_per_gene_tensor'].log()
 
-        return {
-            'log_mu_e_hi_n': eta_n.log() + self.global_prior_params_gr[gene_index_tensor_n, 0],
-            'log_phi_e_hi_n': self.global_prior_params_gr[gene_index_tensor_n, 1],
-            'logit_p_zero_e_hi_n': self.global_prior_params_gr[gene_index_tensor_n, 2]}
+        # sample all points
+        self.vsgp.set_data(X=log_mean_obs_expr_n, y=None)
+        beta_loc_rn, beta_var_rn = self.vsgp.model()
+
+        beta_loc_nr = beta_loc_rn.permute(-1, -2)
+        beta_scale_nr = beta_var_rn.permute(-1, -2).sqrt()
+
+        return beta_loc_nr, beta_scale_nr
+
+    def guide(self, data: Dict[str, torch.Tensor]):
+        # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
+        self.vsgp.guide()
+
+    def plot_beta(self, plt: pylab):
+        with torch.no_grad():
+            f_loc, f_scale = self.vsgp.forward(self.log_mean_obs_expr_g)
+        X_test = self.log_mean_obs_expr_g.cpu().numpy()
+        f_loc_numpy = f_loc.cpu().numpy()
+        f_scale_numpy = f_scale.cpu().numpy()
+
+        fig, axs = plt.subplots(ncols=4, figsize=(16, 4))
+        y_labels = ['$\\beta_0$', '$\\beta_1$', '$\\beta_2$', '$\\beta_3$']
+
+        for i, ax in enumerate(axs):
+            ax.plot(X_test, f_loc_numpy[:, i], color='red')
+            ax.fill_between(X_test,
+                            f_loc_numpy[:, i] - 2.0 * f_scale_numpy[:, i],
+                            f_loc_numpy[:, i] + 2.0 * f_scale_numpy[:, i],
+                            color='C0', alpha=0.3)
+            ax.set_ylabel(y_labels[i], fontsize=14)
+            ax.set_xlabel('$\log \,\, \\tilde{e}$', fontsize=14)
+
+        plt.tight_layout()
 
 
-class SingleCellFeaturePredictedGeneExpressionPrior(GeneExpressionPrior):
-    EPS = 1e-6
+class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
+    def __init__(
+            self,
+            vsgp_gene_expression_prior: VSGPGeneExpressionPrior):
+        super(VSGPGeneExpressionPriorPreTrainer, self).__init__()
+        self.vsgp_gene_expression_prior = vsgp_gene_expression_prior
+        self.log_mean_total_molecules_per_cell = np.log(np.mean(
+            vsgp_gene_expression_prior.sc_fingerprint_dtm.total_obs_molecules_per_cell))
 
-    def __init__(self,
-                 sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 hidden_dims: Tuple[int] = (50,),
-                 hidden_activation: torch.nn.Module = torch.nn.SELU(),
-                 device: torch.device = torch.device('cuda'),
-                 dtype: torch.dtype = torch.float):
-        super(SingleCellFeaturePredictedGeneExpressionPrior, self).__init__()
+    def model(self, data: Dict[str, torch.Tensor]):
+        fingerprint_tensor_nr = data['fingerprint_tensor']
+        gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+        cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
+        total_obs_molecules_per_cell_tensor_n = data['total_obs_molecules_per_cell_tensor']
 
-        self.sc_fingerprint_dtm = sc_fingerprint_dtm
-        self.hidden_activation = hidden_activation
-        self.device = device
-        self.dtype = dtype
+        mb_size = fingerprint_tensor_nr.shape[0]
+        e_obs_n = fingerprint_tensor_nr.sum(-1)
 
-        # hidden layers
-        n_input_features = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
-        self.hidden_layers = torch.nn.ModuleList()
-        last_dim = n_input_features
-        for hidden_dim in hidden_dims:
-            layer = torch.nn.Linear(last_dim, hidden_dim, bias=True)
-            last_dim = hidden_dim
-            self.hidden_layers.append(layer)
+        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior)
+        beta_loc_nr, beta_scale_nr = self.vsgp_gene_expression_prior.forward(data)
 
-        # setup the final cell-feature-based readout weight
-        xavier_scale = 1. / np.sqrt(n_input_features)
-        self.readout_weight_hg = torch.nn.Parameter(
-            xavier_scale * torch.randn(
-                (last_dim, sc_fingerprint_dtm.n_genes),
-                device=device, dtype=dtype))
-        self.readout_bias_g = torch.nn.Parameter(
-            xavier_scale * torch.randn(
-                (sc_fingerprint_dtm.n_genes,),
-                device=device, dtype=dtype))
+        with pyro.plate("collapsed_gene_cell", size=mb_size):
+            with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+                # sample beta parameters
+                beta_nr = pyro.sample(
+                    "beta_nr",
+                    dist.Normal(loc=beta_loc_nr, scale=beta_scale_nr).to_event(1))
 
-        # global parameters
-        self.log_phi_e_hi_g = torch.nn.Parameter(
-            torch.log(torch.tensor(
-                self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
-                device=device, dtype=dtype)))
-        self.logit_p_zero_e_hi_g = torch.nn.Parameter(
-            logit(torch.tensor(
-                sc_fingerprint_dtm.empirical_p_zero_e_hi,
-                device=device, dtype=dtype)))
+            with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
+                log_eta_n = (
+                        total_obs_molecules_per_cell_tensor_n.log()
+                        - self.log_mean_total_molecules_per_cell)
 
-        self.to(device)
+                # calculate ZINB parameters
+                mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n).exp()
+                phi_e_hi_n = beta_nr[:, 2].exp()
+                logit_p_zero_e_hi_n = beta_nr[:, 3]
 
-    def forward(self,
-                gene_index_tensor_n: torch.Tensor,
-                cell_index_tensor_n: torch.Tensor,
-                eta_n: torch.Tensor,
-                cell_features_tensor_nf: Optional[torch.Tensor],
-                total_obs_reads_per_cell_tensor_n: Optional[torch.Tensor],
-                downsampling_rate_tensor_n: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Estimate cell-specific ZINB expression parameters."""
+                # observe the empirical gene expression
+                pyro.sample(
+                    "e_obs",
+                    ZeroInflatedNegativeBinomial(
+                        logit_p_zero=logit_p_zero_e_hi_n,
+                        mu=mu_e_hi_n,
+                        phi=phi_e_hi_n),
+                    obs=e_obs_n)
 
-        activations_nh = cell_features_tensor_nf
-        for layer in self.hidden_layers:
-            activations_nh = self.hidden_activation(layer.forward(activations_nh))
+    def guide(self, data):
+        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior)
+        self.vsgp_gene_expression_prior.guide(data)
 
-        # gene-specific linear readout of expression rate
-        log_pred_mu_n = (
-                torch.einsum(
-                    "nh,hn->n",
-                    [activations_nh,
-                     self.readout_weight_hg[:, gene_index_tensor_n]])
-                + self.readout_bias_g[gene_index_tensor_n])
 
-        return {
-            'log_mu_e_hi_n': log_pred_mu_n + eta_n.log(),
-            'log_phi_e_hi_n': self.log_phi_e_hi_g[gene_index_tensor_n],
-            'logit_p_zero_e_hi_n': self.logit_p_zero_e_hi_g[gene_index_tensor_n]}
+##############
+# deprecated #
+##############
+
+# class SingleCellFeaturePredictedGeneExpressionPrior(GeneExpressionPrior):
+#     EPS = 1e-6
+#
+#     def __init__(self,
+#                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
+#                  hidden_dims: Tuple[int] = (50,),
+#                  hidden_activation: torch.nn.Module = torch.nn.SELU(),
+#                  device: torch.device = torch.device('cuda'),
+#                  dtype: torch.dtype = torch.float):
+#         super(SingleCellFeaturePredictedGeneExpressionPrior, self).__init__()
+#
+#         self.sc_fingerprint_dtm = sc_fingerprint_dtm
+#         self.hidden_activation = hidden_activation
+#         self.device = device
+#         self.dtype = dtype
+#
+#         # hidden layers
+#         n_input_features = sc_fingerprint_dtm.feature_z_scores_per_cell.shape[1]
+#         self.hidden_layers = torch.nn.ModuleList()
+#         last_dim = n_input_features
+#         for hidden_dim in hidden_dims:
+#             layer = torch.nn.Linear(last_dim, hidden_dim, bias=True)
+#             last_dim = hidden_dim
+#             self.hidden_layers.append(layer)
+#
+#         # setup the final cell-feature-based readout weight
+#         xavier_scale = 1. / np.sqrt(n_input_features)
+#         self.readout_weight_hg = torch.nn.Parameter(
+#             xavier_scale * torch.randn(
+#                 (last_dim, sc_fingerprint_dtm.n_genes),
+#                 device=device, dtype=dtype))
+#         self.readout_bias_g = torch.nn.Parameter(
+#             xavier_scale * torch.randn(
+#                 (sc_fingerprint_dtm.n_genes,),
+#                 device=device, dtype=dtype))
+#
+#         # global parameters
+#         self.log_phi_e_hi_g = torch.nn.Parameter(
+#             torch.log(torch.tensor(
+#                 self.EPS + sc_fingerprint_dtm.empirical_phi_e_hi,
+#                 device=device, dtype=dtype)))
+#         self.logit_p_zero_e_hi_g = torch.nn.Parameter(
+#             logit(torch.tensor(
+#                 sc_fingerprint_dtm.empirical_p_zero_e_hi,
+#                 device=device, dtype=dtype)))
+#
+#         self.to(device)
+#
+#     def forward(self,
+#                 gene_index_tensor_n: torch.Tensor,
+#                 cell_index_tensor_n: torch.Tensor,
+#                 eta_n: torch.Tensor,
+#                 cell_features_tensor_nf: Optional[torch.Tensor],
+#                 total_obs_reads_per_cell_tensor_n: Optional[torch.Tensor],
+#                 downsampling_rate_tensor_n: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
+#         """Estimate cell-specific ZINB expression parameters."""
+#
+#         activations_nh = cell_features_tensor_nf
+#         for layer in self.hidden_layers:
+#             activations_nh = self.hidden_activation(layer.forward(activations_nh))
+#
+#         # gene-specific linear readout of expression rate
+#         log_pred_mu_n = (
+#                 torch.einsum(
+#                     "nh,hn->n",
+#                     [activations_nh,
+#                      self.readout_weight_hg[:, gene_index_tensor_n]])
+#                 + self.readout_bias_g[gene_index_tensor_n])
+#
+#         return {
+#             'log_mu_e_hi_n': log_pred_mu_n + eta_n.log(),
+#             'log_phi_e_hi_n': self.log_phi_e_hi_g[gene_index_tensor_n],
+#             'logit_p_zero_e_hi_n': self.logit_p_zero_e_hi_g[gene_index_tensor_n]}
 
 
 # class SingleCellFeaturePredictedGeneExpressionPrior(GeneLevelGeneExpressionPrior):

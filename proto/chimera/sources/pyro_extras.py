@@ -166,9 +166,9 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
     support = constraints.positive_integer
     EPS = 1e-6
     
-    def __init__(self, logit_zero, mu, phi, validate_args=None):
-        self.logit_zero, self.mu, self.phi = broadcast_all(logit_zero, mu, phi)
-        if all(isinstance(_var, Number) for _var in (logit_zero, mu, phi)): 
+    def __init__(self, logit_p_zero, mu, phi, validate_args=None):
+        self.logit_p_zero, self.mu, self.phi = broadcast_all(logit_p_zero, mu, phi)
+        if all(isinstance(_var, Number) for _var in (logit_p_zero, mu, phi)):
             batch_shape = torch.Size()
         else:
             batch_shape = self.mu.size()
@@ -177,7 +177,7 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(ZeroInflatedNegativeBinomial, _instance)
         batch_shape = torch.Size(batch_shape)
-        new.logit_zero = self.logit_zero.expand(batch_shape)
+        new.logit_zero = self.logit_p_zero.expand(batch_shape)
         new.mu = self.mu.expand(batch_shape)
         new.phi = self.phi.expand(batch_shape)
         
@@ -187,11 +187,11 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
     
     @lazy_property
     def prob_zero(self):
-        return torch.sigmoid(self.logit_zero)
+        return torch.sigmoid(self.logit_p_zero)
     
     @lazy_property
     def log_prob_zero(self):
-        return torch.nn.functional.logsigmoid(self.logit_zero)
+        return torch.nn.functional.logsigmoid(self.logit_p_zero)
     
     @lazy_property
     def log_prob_nonzero(self):
@@ -205,7 +205,7 @@ class ZeroInflatedNegativeBinomial(TorchDistribution):
 
     @lazy_property
     def _bernoulli(self):
-        return torch.distributions.Bernoulli(logits=self.logit_zero)
+        return torch.distributions.Bernoulli(logits=self.logit_p_zero)
     
     def sample(self, sample_shape=torch.Size()):
         with torch.no_grad():
