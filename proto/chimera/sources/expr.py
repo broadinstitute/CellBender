@@ -19,7 +19,7 @@ from fingerprint import SingleCellFingerprintDTM
 
 class FudgedConstant(kernels.Kernel):
     r"""
-    Implementation of Constant kernel:
+    Implementation of Constant kernel (with an optional lower bound):
 
         :math:`k(x, z) = \sigma^2.`
     """
@@ -76,10 +76,11 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             torch.tensor(sc_fingerprint_dtm.mean_obs_expr_per_gene, device=device, dtype=dtype))
 
         # inducing points
-        sort_ind = torch.argsort(self.log_mean_obs_expr_g, descending=True)
-        stride = (sc_fingerprint_dtm.n_genes // n_inducing_points)
-        self.inducing_points = self.log_mean_obs_expr_g[sort_ind][::stride].clone()
-        assert self.inducing_points.size(0) > 0
+        self.inducing_points = torch.linspace(
+            torch.min(self.log_mean_obs_expr_g),
+            torch.max(self.log_mean_obs_expr_g),
+            steps=n_inducing_points,
+            device=device, dtype=dtype)
 
         # GP kernel setup
         input_dim = 1  #
@@ -87,15 +88,17 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             input_dim=input_dim,
             variance=torch.tensor(init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=torch.tensor(init_rbf_kernel_lengthscale, device=device, dtype=dtype))
-        kernel_linear = kernels.Linear(
-            input_dim=input_dim,
-            variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
+#         kernel_linear = kernels.Linear(
+#             input_dim=input_dim,
+#             variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
         kernel_constant = FudgedConstant(
             input_dim=input_dim,
             variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype),
             min_variance=min_variance)
-        kernel_full = kernels.Sum(kernel_rbf, kernels.Sum(kernel_linear, kernel_constant))
+#         kernel_full = kernels.Sum(kernel_rbf, kernels.Sum(kernel_linear, kernel_constant))
 
+        kernel_full = kernels.Sum(kernel_rbf, kernel_constant)
+    
         # mean subtraction
         self.f_mean = torch.nn.Parameter(
             torch.tensor(init_beta_mean, device=device, dtype=dtype).unsqueeze(-1))
@@ -111,7 +114,7 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             latent_shape=torch.Size([4]),
             whiten=True,
             jitter=cholesky_jitter)
-
+        
         # send parameters to device
         self.to(device)
 
