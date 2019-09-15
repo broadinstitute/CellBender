@@ -580,6 +580,12 @@ class DropletTimeMachineModel(torch.nn.Module):
         pyro.module("fsd_codec", self.fsd_codec)
         pyro.module("gene_expression_prior", self.gene_expression_prior)
 
+        # gene expression guide
+        self.gene_expression_prior.guide(data)
+
+        # fsd guide
+        self.fsd_codec.guide(data)
+
         # fsd xi gmm
         if self.fsd_gmm_num_components > 1:
             # MAP estimate of GMM fsd prior weights
@@ -638,14 +644,21 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_xi_sort_trans = SortByComponentWeights(self.fsd_codec)
         fsd_xi_posterior_dist = dist.TransformedDistribution(
             fsd_xi_posterior_base_dist, [fsd_xi_sort_trans])
-        
-        # gene expression prior guide
-        self.gene_expression_prior.guide(data)
 
         with pyro.plate("collapsed_gene_cell", size=mb_size):
 
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
-                pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
+                fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
+
+            # get e_hi prior parameters (per cell)
+            beta_loc_nr, beta_scale_nr = self.gene_expression_prior.forward(data)
+
+            # sample e_hi prior parameters
+            with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+                # sample beta parameters
+                beta_nr = pyro.sample(
+                    "beta_nr",
+                    dist.Normal(loc=beta_loc_nr, scale=beta_scale_nr).to_event(1))
 
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()

@@ -44,7 +44,7 @@ class FSDCodec(torch.nn.Module):
     @abstractmethod
     def get_fsd_components(self,
                            fsd_params_dict: Dict[str, torch.Tensor],
-                           downsampling_rate_tensor: Union[None, torch.Tensor]) \
+                           downsampling_rate_tensor: Union[None, torch.Tensor] = None) \
             -> Tuple[TorchDistribution, TorchDistribution]:
         raise NotImplementedError
 
@@ -56,6 +56,10 @@ class FSDCodec(torch.nn.Module):
     @property
     @abstractmethod
     def init_fsd_xi_loc_posterior(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    @abstractmethod
+    def guide(self, data: Dict[str, torch.Tensor]):
         raise NotImplementedError
 
 
@@ -254,13 +258,16 @@ class NBMixtureFSDCodec(FSDCodec):
 
     def get_fsd_components(self,
                            fsd_params_dict: Dict[str, torch.Tensor],
-                           downsampling_rate_tensor: Union[None, torch.Tensor]) \
+                           downsampling_rate_tensor: Union[None, torch.Tensor] = None) \
             -> Tuple[TorchDistribution, TorchDistribution]:
         return self.get_fsd_components_nb_mixture(
             fsd_params_dict=fsd_params_dict,
             n_fsd_lo_comps=self.n_fsd_lo_comps,
             n_fsd_hi_comps=self.n_fsd_hi_comps,
             downsampling_rate_tensor=downsampling_rate_tensor)
+
+    def guide(self, data: Dict[str, torch.Tensor]):
+        pass
 
     # TODO magic numbers
     def generate_fsd_init_params(self, mu_hi_guess, phi_hi_guess):
@@ -437,9 +444,33 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
                 'phi_hi': phi_hi,
                 'w_hi': w_hi}
 
-    def sample_fsd_lo_params_dict(self, fsd_hi_params_dist: Dict[str, torch.Tensor]) \
+    def sample_fsd_lo_params_dict(self, fsd_hi_params_dict: Dict[str, torch.Tensor]) \
             -> Dict[str, torch.Tensor]:
-        raise NotImplementedError
+        # calculate log_mu_fsd_hi
+        log_w_hi_nj = fsd_hi_params_dict['w_hi'].log()
+        log_mu_hi_nj = fsd_hi_params_dict['mu_hi'].log()
+        log_mu_hi_n = (log_w_hi_nj + log_mu_hi_nj).logsumexp(dim=-1)
+
+        # sample from GP
+        self.vsgp.set_data(X=log_mu_hi_n, y=None)
+        log_mu_lo_loc_rn, log_mu_lo_var_rn = self.vsgp.model()
+
+        # drop the singleton dimension
+        log_mu_lo_loc_n = log_mu_lo_loc_rn.squeeze(0)
+        log_mu_lo_scale_n = log_mu_lo_var_rn.squeeze(0).sqrt()
+
+        log_mu_lo_n = dist.Normal(loc=log_mu_lo_loc_n, scale=log_mu_lo_scale_n).rsample()
+        mu_lo_n = log_mu_lo_n.exp()
+        phi_lo_n = torch.ones_like(mu_lo_n)
+        w_lo_n = torch.ones_like(mu_lo_n)
+
+        return {
+            'mu_lo': mu_lo_n,
+            'phi_lo': phi_lo_n,
+            'w_lo': w_lo_n}
+
+    def guide(self, data: Dict[str, torch.Tensor]):
+        return self.vsgp.guide()
 
     def decode(self, fsd_xi: torch.Tensor) -> Dict[str, torch.Tensor]:
         fsd_hi_params_dict = self.decode_xi_to_fsd_hi_params_dict(fsd_xi)
