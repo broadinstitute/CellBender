@@ -122,8 +122,8 @@ class DropletTimeMachineModel(torch.nn.Module):
         max_family_size = fingerprint_tensor_nr.shape[1]
 
         # register the external modules
-        pyro.module("fsd_codec", self.fsd_codec)
-        pyro.module("gene_expression_prior", self.gene_expression_prior)
+        pyro.module("fsd_codec", self.fsd_codec, update_module_params=True)
+        pyro.module("gene_expression_prior", self.gene_expression_prior, update_module_params=True)
         
         # GMM prior for family size distribution parameters
         fsd_xi_prior_locs_kq = pyro.param(
@@ -577,8 +577,8 @@ class DropletTimeMachineModel(torch.nn.Module):
         mb_size = fingerprint_tensor_nr.shape[0]
 
         # register the external modules
-        pyro.module("fsd_codec", self.fsd_codec)
-        pyro.module("gene_expression_prior", self.gene_expression_prior)
+        pyro.module("fsd_codec", self.fsd_codec, update_module_params=True)
+        pyro.module("gene_expression_prior", self.gene_expression_prior, update_module_params=True)
 
         # gene expression guide
         self.gene_expression_prior.guide(data)

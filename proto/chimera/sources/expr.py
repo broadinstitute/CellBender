@@ -164,7 +164,9 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
         mb_size = fingerprint_tensor_nr.shape[0]
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
-        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior)
+        pyro.module("vsgp_gene_expression_prior",
+                    self.vsgp_gene_expression_prior,
+                    update_module_params=True)
         beta_loc_nr, beta_scale_nr = self.vsgp_gene_expression_prior.forward(data)
 
         with pyro.plate("collapsed_gene_cell", size=mb_size):
@@ -194,7 +196,9 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
                     obs=e_obs_n)
 
     def guide(self, data):
-        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior)
+        pyro.module("vsgp_gene_expression_prior",
+                    self.vsgp_gene_expression_prior,
+                    update_module_params=True)
         self.vsgp_gene_expression_prior.guide(data)
 
 
