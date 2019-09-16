@@ -343,7 +343,7 @@ class NBMixtureFSDModel(FSDModel):
         return torch.cat(xi_list, 0).to(self.device)
 
 
-class NBMixtureRealVSGPChimeraFSDCodec(FSDModel):
+class NBMixtureRealVSGPChimeraFSDModel(FSDModel):
     """NB mixture for real components, VSGP from real for chimeric component."""
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
@@ -351,7 +351,7 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDModel):
                  init_params_dict: Dict[str, float],
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
-        super(FSDModel, self).__init__()
+        super(NBMixtureRealVSGPChimeraFSDModel, self).__init__()
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.n_fsd_hi_comps = n_fsd_hi_comps
