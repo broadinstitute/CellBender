@@ -36,7 +36,10 @@ class Decoder(nn.Module):
 
     """
 
-    def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int,
+    def __init__(self,
+                 input_dim: int,
+                 hidden_dims: List[int],
+                 output_dim: int,
                  log_output: bool = False):
         super(Decoder, self).__init__()
         self.input_dim = input_dim

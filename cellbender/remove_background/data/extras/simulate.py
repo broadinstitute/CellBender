@@ -2,6 +2,7 @@
 
 import numpy as np
 import scipy.sparse as sp
+import torch
 from typing import Tuple, List, Union
 
 
@@ -376,3 +377,168 @@ def neg_binom(mu: float, phi: float, size: int = 1) -> np.ndarray:
     n = 1. / phi
     p = n / (mu + n)
     return np.random.negative_binomial(n, p, size=size)
+
+
+def sample_from_dirichlet_model(num: int,
+                                alpha: np.ndarray,
+                                d_mu: float,
+                                d_sigma: float,
+                                v_mu: float,
+                                v_sigma: float,
+                                y: int,
+                                chi_ambient: np.ndarray,
+                                eps_param: float,
+                                random_seed: int = 0,
+                                include_swapping: bool = False,
+                                rho_alpha: float = 3,
+                                rho_beta: float = 80) -> Tuple[np.ndarray,
+                                                                         np.ndarray]:
+    """Draw samples of cell expression profiles using the Dirichlet-Poisson,
+    Poisson sum model.
+
+    Args:
+        num: Number of expression profiles to draw.
+        alpha: Dirichlet concentration parameters for cell expression profile,
+            size (n_gene).
+        d_mu: Mean of LogNormal cell size distribution.
+        d_sigma: Scale parameter of LogNormal cell size distribution.
+        v_mu: Mean of LogNormal empty size distribution.
+        v_sigma: Scale parameter of LogNormal empty size distribution.
+        y: 1 for cell(s), 0 for empties.
+        chi_ambient: Ambient gene expression profile (sums to one).
+        eps_param: Parameter for gamma distribution of the epsilon droplet
+            efficiency factor ~ Gamma(eps_param, 1/eps_param), i.e. mean is 1.
+        random_seed: Seed a random number generator.
+        include_swapping: Whether to include swapping in the model.
+        rho_alpha: Beta distribution param alpha for swapping fraction.
+        rho_beta: Beta distribution param beta for swapping fraction.
+
+    Returns:
+        Tuple of (c_real, c_bkg)
+        c_real: Count matrix (cells, genes) for real cell counts.
+        c_bkg: Count matrix (cells, genes) for background RNA.
+
+    """
+
+    # Check inputs.
+    assert y in [0, 1], f'y must be 0 or 1, but was {y}'
+    assert d_mu > 0, f'd_mu must be > 0, but was {d_mu}'
+    assert d_sigma > 0, f'd_sigma must be > 0, but was {d_sigma}'
+    assert v_mu > 0, f'v_mu must be > 0, but was {v_mu}'
+    assert v_sigma > 0, f'v_sigma must be > 0, but was {v_sigma}'
+    assert np.all(alpha > 0), 'all alphas must be > 0.'
+    assert np.all(chi_ambient > 0), 'all chi_ambient must be > 0.'
+    assert np.abs(1. - chi_ambient.sum()) < 1e-10, f'chi_ambient must sum to 1, but it sums ' \
+        f'to {chi_ambient.sum()}'
+    assert len(chi_ambient.shape) == 1, 'chi_ambient should be 1-dimensional.'
+    assert alpha.shape[0] == chi_ambient.size, 'alpha and chi_ambient must ' \
+        'be the same size in the rightmost dimension.'
+    assert num > 0, f'num must be > 0, but was {num}'
+    assert eps_param > 1, f'eps_param must be > 1, but was {eps_param}'
+
+    # Seed random number generator.
+    rng = np.random.RandomState(seed=random_seed)
+
+    # Draw chi ~ Dir(alpha)
+    chi = rng.dirichlet(alpha=alpha, size=num)
+
+    # Draw epsilon ~ Gamma(eps_param, 1 / eps_param)
+    epsilon = rng.gamma(shape=eps_param, scale=1. / eps_param, size=num)
+
+    # Draw d ~ LogNormal(d_mu, d_sigma)
+    d = rng.lognormal(mean=d_mu, sigma=d_sigma, size=num)
+
+    # Draw d ~ LogNormal(d_mu, d_sigma)
+    v = rng.lognormal(mean=v_mu, sigma=v_sigma, size=num)
+
+    # Draw rho ~ Beta(rho_alpha, rho_beta)
+    rho = rng.beta(a=rho_alpha, b=rho_beta, size=num)
+
+    # print(f'eps.shape is {epsilon.shape}')
+    # print(f'd.shape is {d.shape}')
+    # print(f'chi.shape is {chi.shape}')
+    # print(f'rho.shape is {rho.shape}')
+
+    mu = _calculate_mu(model_type='ambient' if not include_swapping else 'full',
+                       epsilon=torch.Tensor(epsilon),
+                       d_cell=torch.Tensor(d),
+                       chi=torch.Tensor(chi),
+                       y=torch.ones(d.shape) * y,
+                       rho=torch.Tensor(rho)).numpy()
+
+    # Draw cell counts ~ Poisson(y * epsilon * d * chi)
+    c_real = rng.poisson(lam=mu,
+                         size=(num, chi_ambient.size))
+
+    lam = _calculate_lambda(model_type='ambient' if not include_swapping else 'full',
+                            epsilon=torch.Tensor(epsilon),
+                            chi_ambient=torch.Tensor(chi_ambient),
+                            d_cell=torch.Tensor(d),
+                            d_empty=torch.Tensor(v),
+                            y=torch.ones(d.shape) * y,
+                            rho=torch.Tensor(rho),
+                            chi_bar=torch.Tensor(chi_ambient)).numpy()
+
+    # Draw empty counts ~ Poisson(epsilon * v * chi_ambient)
+    c_bkg = rng.poisson(lam=lam,
+                        size=(num, chi_ambient.size))
+
+    # Output observed counts are the sum, but return them separately.
+    return c_real, c_bkg
+
+
+def _calculate_lambda(model_type: str,
+                      epsilon: torch.Tensor,
+                      chi_ambient: torch.Tensor,
+                      d_empty: torch.Tensor,
+                      y: Union[torch.Tensor, None] = None,
+                      d_cell: Union[torch.Tensor, None] = None,
+                      rho: Union[torch.Tensor, None] = None,
+                      chi_bar: Union[torch.Tensor, None] = None):
+    """Calculate noise rate based on the model."""
+
+    if model_type == "simple" or model_type == "ambient":
+        lam = epsilon.unsqueeze(-1) * d_empty.unsqueeze(-1) * chi_ambient
+
+    elif model_type == "swapping":
+        lam = (rho.unsqueeze(-1) * y.unsqueeze(-1)
+               * epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1)
+               + d_empty.unsqueeze(-1)) * chi_bar
+
+    elif model_type == "full":
+        lam = ((1 - rho.unsqueeze(-1)) * d_empty.unsqueeze(-1) * chi_ambient.unsqueeze(0)
+               + rho.unsqueeze(-1)
+               * (y.unsqueeze(-1) * epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1)
+                  + d_empty.unsqueeze(-1)) * chi_bar)
+    else:
+        raise NotImplementedError(f"model_type was set to {model_type}, "
+                                  f"which is not implemented.")
+
+    return lam
+
+
+def _calculate_mu(model_type: str,
+                  epsilon: torch.Tensor,
+                  d_cell: torch.Tensor,
+                  chi: torch.Tensor,
+                  y: Union[torch.Tensor, None] = None,
+                  rho: Union[torch.Tensor, None] = None):
+    """Calculate mean expression based on the model."""
+
+    if model_type == 'simple':
+        mu = epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
+
+    elif model_type == 'ambient':
+        mu = (y.unsqueeze(-1) * epsilon.unsqueeze(-1)
+              * d_cell.unsqueeze(-1) * chi)
+
+    elif model_type == 'swapping' or model_type == 'full':
+        mu = ((1 - rho.unsqueeze(-1))
+              * y.unsqueeze(-1) * epsilon.unsqueeze(-1)
+              * d_cell.unsqueeze(-1) * chi)
+
+    else:
+        raise NotImplementedError(f"model_type was set to {model_type}, "
+                                  f"which is not implemented.")
+
+    return mu
