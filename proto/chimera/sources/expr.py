@@ -132,6 +132,9 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 
+        # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
+        autoname.scope(prefix="EXPR", fn=self.vsgp_gene_expression_prior.vsgp.guide)()
+
         # sample beta_nr posterior
         beta_posterior_loc_gr = pyro.param(
             "beta_posterior_loc_gr",
@@ -143,27 +146,6 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
                 dist.Delta(v=beta_posterior_loc_gr[gene_index_tensor_n, :]).to_event(1))
 
         return beta_nr
-
-    # def plot_beta(self, data: Dict[str, torch.Tensor]):
-    #     with torch.no_grad():
-    #         f_loc, f_scale = self.vsgp.forward(self.log_mean_obs_expr_g)
-    #     X_test = self.log_mean_obs_expr_g.cpu().numpy()
-    #     f_loc_numpy = f_loc.cpu().numpy().T
-    #     f_scale_numpy = f_scale.cpu().numpy().T
-    #
-    #     fig, axs = plt.subplots(ncols=4, figsize=(16, 4))
-    #     y_labels = ['$\\beta_0$', '$\\beta_1$', '$\\beta_2$', '$\\beta_3$']
-    #
-    #     for i, ax in enumerate(axs):
-    #         ax.plot(X_test, f_loc_numpy[:, i], color='red')
-    #         ax.fill_between(X_test,
-    #                         f_loc_numpy[:, i] - 2.0 * f_scale_numpy[:, i],
-    #                         f_loc_numpy[:, i] + 2.0 * f_scale_numpy[:, i],
-    #                         color='C0', alpha=0.3)
-    #         ax.set_ylabel(y_labels[i], fontsize=14)
-    #         ax.set_xlabel('$\log \,\, \\tilde{e}$', fontsize=14)
-    #
-    #     plt.tight_layout()
 
 
 class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
@@ -180,48 +162,35 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
         total_obs_molecules_per_cell_tensor_n = data['total_obs_molecules_per_cell_tensor']
 
-        mb_size = fingerprint_tensor_nr.shape[0]
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
-        pyro.module("vsgp_gene_expression_prior",
-                    self.vsgp_gene_expression_prior,
+        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior,
                     update_module_params=True)
 
-        with pyro.plate("collapsed_gene_cell", size=mb_size):
-            beta_nr = self.vsgp_gene_expression_prior.model(data)
+        beta_nr = self.vsgp_gene_expression_prior.model(data)
+        log_eta_n = (
+                total_obs_molecules_per_cell_tensor_n.log()
+                - self.log_mean_total_molecules_per_cell)
 
-            with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
-                log_eta_n = (
-                        total_obs_molecules_per_cell_tensor_n.log()
-                        - self.log_mean_total_molecules_per_cell)
+        # calculate ZINB parameters
+        mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n).exp()
+        phi_e_hi_n = beta_nr[:, 2].exp()
+        logit_p_zero_e_hi_n = beta_nr[:, 3]
 
-                # calculate ZINB parameters
-                mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n).exp()
-                phi_e_hi_n = beta_nr[:, 2].exp()
-                logit_p_zero_e_hi_n = beta_nr[:, 3]
-
-                # observe the empirical gene expression
-                pyro.sample(
-                    "e_obs",
-                    ZeroInflatedNegativeBinomial(
-                        logit_p_zero=logit_p_zero_e_hi_n,
-                        mu=mu_e_hi_n,
-                        phi=phi_e_hi_n),
-                    obs=e_obs_n)
+        with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
+            # observe the empirical gene expression
+            pyro.sample(
+                "e_obs",
+                ZeroInflatedNegativeBinomial(
+                    logit_p_zero=logit_p_zero_e_hi_n,
+                    mu=mu_e_hi_n,
+                    phi=phi_e_hi_n),
+                obs=e_obs_n)
 
     def guide(self, data):
-        fingerprint_tensor_nr = data['fingerprint_tensor']
-        mb_size = fingerprint_tensor_nr.shape[0]
-
-        pyro.module("vsgp_gene_expression_prior",
-                    self.vsgp_gene_expression_prior,
+        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior,
                     update_module_params=True)
-
-        # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
-        autoname.scope(prefix="EXPR", fn=self.vsgp_gene_expression_prior.vsgp.guide)()
-
-        with pyro.plate("collapsed_gene_cell", size=mb_size):
-            self.vsgp_gene_expression_prior.guide(data)
+        self.vsgp_gene_expression_prior.guide(data)
 
 
 ##############

@@ -175,125 +175,123 @@ class DropletTimeMachineModel(torch.nn.Module):
             "beta_c",
             dist.Gamma(concentration=beta_c_concentration_scalar, rate=beta_c_rate_scalar))
 
-        with pyro.plate("collapsed_gene_cell", size=mb_size):
+        # sample fsd params
+        fsd_params_dict = self.fsd_model.model(data, fsd_xi_prior_dist)
 
-            # sample fsd params
-            fsd_params_dict = self.fsd_model.model(data, fsd_xi_prior_dist)
+        # get chimeric and real family size distributions
+        fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(
+            fsd_params_dict,
+            downsampling_rate_tensor=downsampling_rate_tensor_n)
 
-            # get chimeric and real family size distributions
-            fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(
-                fsd_params_dict,
-                downsampling_rate_tensor=downsampling_rate_tensor_n)
+        # get e_hi prior parameters (per cell)
+        beta_nr = self.gene_expression_prior.model(data)
 
-            # get e_hi prior parameters (per cell)
-            beta_nr = self.gene_expression_prior.model(data)
+        # empirical droplet efficiency
+        eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
 
-            # empirical droplet efficiency
-            eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
+        # calculate ZINB parameters
+        log_eta_n = eta_n.log()
+        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n
+        log_phi_e_hi_n = beta_nr[:, 2]
+        logit_p_zero_e_hi_n = beta_nr[:, 3]
 
-            # calculate ZINB parameters
-            log_eta_n = eta_n.log()
-            log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n
-            log_phi_e_hi_n = beta_nr[:, 2]
-            logit_p_zero_e_hi_n = beta_nr[:, 3]
+        mu_e_hi_n = log_mu_e_hi_n.exp()
+        phi_e_hi_n = log_phi_e_hi_n.exp()
 
-            mu_e_hi_n = log_mu_e_hi_n.exp()
-            phi_e_hi_n = log_phi_e_hi_n.exp()
+        # extract required quantities from the distributions
+        mu_fsd_lo_n = fsd_lo_dist.mean.squeeze(-1)
+        mu_fsd_hi_n = fsd_hi_dist.mean.squeeze(-1)
+        log_p_unobs_lo_n = fsd_lo_dist.log_prob(zero).squeeze(-1)
+        log_p_unobs_hi_n = fsd_hi_dist.log_prob(zero).squeeze(-1)
+        log_p_obs_lo_n = get_log_prob_compl(log_p_unobs_lo_n)
+        log_p_obs_hi_n = get_log_prob_compl(log_p_unobs_hi_n)
+        p_obs_lo_n = log_p_obs_lo_n.exp()
+        p_obs_hi_n = log_p_obs_hi_n.exp()
 
-            # extract required quantities from the distributions
-            mu_fsd_lo_n = fsd_lo_dist.mean.squeeze(-1)
-            mu_fsd_hi_n = fsd_hi_dist.mean.squeeze(-1)
-            log_p_unobs_lo_n = fsd_lo_dist.log_prob(zero).squeeze(-1)
-            log_p_unobs_hi_n = fsd_hi_dist.log_prob(zero).squeeze(-1)
-            log_p_obs_lo_n = get_log_prob_compl(log_p_unobs_lo_n)
-            log_p_obs_hi_n = get_log_prob_compl(log_p_unobs_hi_n)
-            p_obs_lo_n = log_p_obs_lo_n.exp()
-            p_obs_hi_n = log_p_obs_hi_n.exp()
+        # localization and/or calculation of required variables for pickup by locals() -- see below
+        phi_fsd_lo_comps_nj = fsd_params_dict['phi_lo']
+        phi_fsd_hi_comps_nj = fsd_params_dict['phi_hi']
+        mu_fsd_lo_comps_nj = fsd_params_dict['mu_lo']
+        mu_fsd_hi_comps_nj = fsd_params_dict['mu_hi']
+        w_fsd_lo_comps_nj = fsd_params_dict['w_lo']
+        w_fsd_hi_comps_nj = fsd_params_dict['w_hi']
 
-            # localization and/or calculation of required variables for pickup by locals() -- see below
-            phi_fsd_lo_comps_nj = fsd_params_dict['phi_lo']
-            phi_fsd_hi_comps_nj = fsd_params_dict['phi_hi']
-            mu_fsd_lo_comps_nj = fsd_params_dict['mu_lo']
-            mu_fsd_hi_comps_nj = fsd_params_dict['mu_hi']
-            w_fsd_lo_comps_nj = fsd_params_dict['w_lo']
-            w_fsd_hi_comps_nj = fsd_params_dict['w_hi']
+        # for regularization
+        p_obs_lo_to_p_obs_hi_ratio_n = p_obs_lo_n / p_obs_hi_n
+        mu_fsd_lo_to_mu_fsd_hi_ratio_n = mu_fsd_lo_n / mu_fsd_hi_n
+        mu_fsd_lo_comps_to_mu_empirical_ratio_nj = mu_fsd_lo_comps_nj / self.mean_empirical_fsd_mu_hi
+        mu_fsd_hi_comps_to_mu_empirical_ratio_nj = mu_fsd_hi_comps_nj / self.mean_empirical_fsd_mu_hi
 
-            # for regularization
-            p_obs_lo_to_p_obs_hi_ratio_n = p_obs_lo_n / p_obs_hi_n
-            mu_fsd_lo_to_mu_fsd_hi_ratio_n = mu_fsd_lo_n / mu_fsd_hi_n
-            mu_fsd_lo_comps_to_mu_empirical_ratio_nj = mu_fsd_lo_comps_nj / self.mean_empirical_fsd_mu_hi
-            mu_fsd_hi_comps_to_mu_empirical_ratio_nj = mu_fsd_hi_comps_nj / self.mean_empirical_fsd_mu_hi
+        # observation probability for each component of the distribution
+        alpha_fsd_lo_comps_nj = (self.eps + phi_fsd_lo_comps_nj).reciprocal()
+        log_p_unobs_lo_comps_nj = alpha_fsd_lo_comps_nj * (
+                alpha_fsd_lo_comps_nj.log() - (alpha_fsd_lo_comps_nj + mu_fsd_lo_comps_nj).log())
+        p_obs_lo_comps_nj = get_log_prob_compl(log_p_unobs_lo_comps_nj).exp()
+        alpha_fsd_hi_comps_nj = (self.eps + phi_fsd_hi_comps_nj).reciprocal()
+        log_p_unobs_hi_comps_nj = alpha_fsd_hi_comps_nj * (
+                alpha_fsd_hi_comps_nj.log() - (alpha_fsd_hi_comps_nj + mu_fsd_hi_comps_nj).log())
+        p_obs_hi_comps_nj = get_log_prob_compl(log_p_unobs_hi_comps_nj).exp()
 
-            # observation probability for each component of the distribution
-            alpha_fsd_lo_comps_nj = (self.eps + phi_fsd_lo_comps_nj).reciprocal()
-            log_p_unobs_lo_comps_nj = alpha_fsd_lo_comps_nj * (
-                    alpha_fsd_lo_comps_nj.log() - (alpha_fsd_lo_comps_nj + mu_fsd_lo_comps_nj).log())
-            p_obs_lo_comps_nj = get_log_prob_compl(log_p_unobs_lo_comps_nj).exp()
-            alpha_fsd_hi_comps_nj = (self.eps + phi_fsd_hi_comps_nj).reciprocal()
-            log_p_unobs_hi_comps_nj = alpha_fsd_hi_comps_nj * (
-                    alpha_fsd_hi_comps_nj.log() - (alpha_fsd_hi_comps_nj + mu_fsd_hi_comps_nj).log())
-            p_obs_hi_comps_nj = get_log_prob_compl(log_p_unobs_hi_comps_nj).exp()
+        # calculate p_lo and p_hi on all observable family sizes
+        log_prob_fsd_lo_full_nr = fsd_lo_dist.log_prob(family_size_vector_full_r)
+        log_prob_fsd_hi_full_nr = fsd_hi_dist.log_prob(family_size_vector_full_r)
+        log_prob_fsd_lo_obs_nr = log_prob_fsd_lo_full_nr[..., 1:]
+        log_prob_fsd_hi_obs_nr = log_prob_fsd_hi_full_nr[..., 1:]
 
-            # calculate p_lo and p_hi on all observable family sizes
-            log_prob_fsd_lo_full_nr = fsd_lo_dist.log_prob(family_size_vector_full_r)
-            log_prob_fsd_hi_full_nr = fsd_hi_dist.log_prob(family_size_vector_full_r)
-            log_prob_fsd_lo_obs_nr = log_prob_fsd_lo_full_nr[..., 1:]
-            log_prob_fsd_hi_obs_nr = log_prob_fsd_hi_full_nr[..., 1:]
+        # total observed molecules per cell
+        e_obs_n = fingerprint_tensor_nr.sum(-1)
 
-            # total observed molecules per cell
-            e_obs_n = fingerprint_tensor_nr.sum(-1)
+        # calculate the (poisson) rate of chimeric molecule formation
+        mu_e_lo_n = self._get_mu_e_lo_n(
+            alpha_c=alpha_c,
+            beta_c=beta_c,
+            eta_n=eta_n,
+            mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
+            empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
+            p_obs_lo_n=p_obs_lo_n,
+            p_obs_hi_n=p_obs_hi_n,
+            mu_fsd_hi_n=mu_fsd_hi_n,
+            downsampling_rate_tensor_n=downsampling_rate_tensor_n)
 
-            # calculate the (poisson) rate of chimeric molecule formation
-            mu_e_lo_n = self._get_mu_e_lo_n(
-                alpha_c=alpha_c,
-                beta_c=beta_c,
-                eta_n=eta_n,
-                mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
-                empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
-                p_obs_lo_n=p_obs_lo_n,
-                p_obs_hi_n=p_obs_hi_n,
-                mu_fsd_hi_n=mu_fsd_hi_n,
-                downsampling_rate_tensor_n=downsampling_rate_tensor_n)
+        if posterior_sampling_mode:
 
-            if posterior_sampling_mode:
+            # just return the calculated auxiliary tensors
+            return locals()
 
-                # just return the calculated auxiliary tensors
-                return locals()
+        else:
 
-            else:
+            # sample the fingerprint
+            self._sample_fingerprint(
+                batch_shape=batch_shape,
+                cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+                fingerprint_tensor_nr=fingerprint_tensor_nr,
+                log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
+                log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
+                mu_e_lo_n=mu_e_lo_n,
+                mu_e_hi_n=mu_e_hi_n,
+                phi_e_hi_n=phi_e_hi_n,
+                logit_p_zero_e_hi_n=logit_p_zero_e_hi_n,
+                n_particles=self.n_particles_fingerprint_log_like)
 
-                # sample the fingerprint
-                self._sample_fingerprint(
-                    batch_shape=batch_shape,
-                    cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
-                    fingerprint_tensor_nr=fingerprint_tensor_nr,
-                    log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
-                    log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
-                    mu_e_lo_n=mu_e_lo_n,
-                    mu_e_hi_n=mu_e_hi_n,
-                    phi_e_hi_n=phi_e_hi_n,
-                    logit_p_zero_e_hi_n=logit_p_zero_e_hi_n,
-                    n_particles=self.n_particles_fingerprint_log_like)
+            # sample fsd sparsity regularization
+            if self.enable_fsd_w_dirichlet_reg:
+                self._sample_fsd_weight_sparsity_regularization(
+                    w_lo_dirichlet_reg_strength=self.w_lo_dirichlet_reg_strength,
+                    w_hi_dirichlet_reg_strength=self.w_hi_dirichlet_reg_strength,
+                    w_lo_dirichlet_concentration=self.w_lo_dirichlet_concentration,
+                    w_hi_dirichlet_concentration=self.w_hi_dirichlet_concentration,
+                    n_fsd_lo_comps=self.fsd_model.n_fsd_lo_comps,
+                    n_fsd_hi_comps=self.fsd_model.n_fsd_hi_comps,
+                    w_fsd_lo_comps_nj=w_fsd_lo_comps_nj,
+                    w_fsd_hi_comps_nj=w_fsd_hi_comps_nj,
+                    gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n)
 
-                # sample fsd sparsity regularization
-                if self.enable_fsd_w_dirichlet_reg:
-                    self._sample_fsd_weight_sparsity_regularization(
-                        w_lo_dirichlet_reg_strength=self.w_lo_dirichlet_reg_strength,
-                        w_hi_dirichlet_reg_strength=self.w_hi_dirichlet_reg_strength,
-                        w_lo_dirichlet_concentration=self.w_lo_dirichlet_concentration,
-                        w_hi_dirichlet_concentration=self.w_hi_dirichlet_concentration,
-                        n_fsd_lo_comps=self.fsd_model.n_fsd_lo_comps,
-                        n_fsd_hi_comps=self.fsd_model.n_fsd_hi_comps,
-                        w_fsd_lo_comps_nj=w_fsd_lo_comps_nj,
-                        w_fsd_hi_comps_nj=w_fsd_hi_comps_nj,
-                        gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n)
-
-                # sample (soft) constraints
-                self._sample_gene_plate_soft_constraints(
-                    model_constraint_params_dict=self.model_constraint_params_dict,
-                    model_vars_dict=locals(),
-                    gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
-                    batch_shape=batch_shape)
+            # sample (soft) constraints
+            self._sample_gene_plate_soft_constraints(
+                model_constraint_params_dict=self.model_constraint_params_dict,
+                model_vars_dict=locals(),
+                gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
+                batch_shape=batch_shape)
 
     def guide(self,
               data: Dict[str, torch.Tensor],
@@ -302,9 +300,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         # input tensors
         fingerprint_tensor_nr = data['fingerprint_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
-
-        # sizes
-        mb_size = fingerprint_tensor_nr.shape[0]
 
         # register the external modules
         pyro.module("fsd_model", self.fsd_model, update_module_params=True)
@@ -369,12 +364,10 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_xi_posterior_dist = dist.TransformedDistribution(
             fsd_xi_posterior_base_dist, [fsd_xi_sort_trans])
 
-        with pyro.plate("collapsed_gene_cell", size=mb_size):
-            # gene expression guide
-            _ = self.gene_expression_prior.guide(data)
+        _ = self.gene_expression_prior.guide(data)
 
-            # fsd guide
-            _ = self.fsd_model.guide(data, fsd_xi_posterior_dist)
+        # fsd guide
+        _ = self.fsd_model.guide(data, fsd_xi_posterior_dist)
 
     @staticmethod
     def _sample_fingerprint(batch_shape: torch.Size,
