@@ -6,7 +6,6 @@ from boltons.cacheutils import cachedproperty
 
 import torch
 from torch.distributions import transforms, constraints
-from torch.nn.parameter import Parameter
 
 import pyro
 import pyro.distributions as dist
@@ -21,9 +20,9 @@ from fingerprint import SingleCellFingerprintDTM
 from abc import abstractmethod
 
 
-class FSDCodec(torch.nn.Module):
+class FSDModel(torch.nn.Module):
     def __init__(self):
-        super(FSDCodec, self).__init__()
+        super(FSDModel, self).__init__()
 
     @property
     @abstractmethod
@@ -36,6 +35,16 @@ class FSDCodec(torch.nn.Module):
 
     @abstractmethod
     def decode(self, fsd_xi: torch.Tensor) -> Dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def model(self, data: Dict[str, torch.Tensor], fsd_xi_prior_dist: torch.distributions.Distribution) \
+            -> Dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def guide(self, data: Dict[str, torch.Tensor], fsd_xi_posterior_dist: torch.distributions.Distribution) \
+            -> Dict[str, torch.Tensor]:
         raise NotImplementedError
 
     @abstractmethod
@@ -59,19 +68,15 @@ class FSDCodec(torch.nn.Module):
     def init_fsd_xi_loc_posterior(self) -> torch.Tensor:
         raise NotImplementedError
 
-    @abstractmethod
-    def guide(self, data: Dict[str, torch.Tensor]):
-        raise NotImplementedError
-
 
 class SortByComponentWeights(transforms.Transform):
-    def __init__(self, fsd_codec: FSDCodec):
+    def __init__(self, fsd_model: FSDModel):
         super(SortByComponentWeights, self).__init__()
-        self.fsd_codec = fsd_codec
+        self.fsd_model = fsd_model
         self._intermediates_cache = {}
 
     def _call(self, x):
-        y = self.fsd_codec.get_sorted_fsd_xi(x)
+        y = self.fsd_model.get_sorted_fsd_xi(x)
         self._add_intermediate_to_cache(x, y)
         return y
 
@@ -92,7 +97,7 @@ class SortByComponentWeights(transforms.Transform):
         return torch.zeros_like(x)
 
 
-class NBMixtureFSDCodec(FSDCodec):
+class NBMixtureFSDModel(FSDModel):
 
     stick = transforms.StickBreakingTransform()
 
@@ -103,7 +108,7 @@ class NBMixtureFSDCodec(FSDCodec):
                  init_params_dict: Dict[str, float],
                  device=torch.device("cuda"),
                  dtype=torch.float):
-        super(NBMixtureFSDCodec, self).__init__()
+        super(NBMixtureFSDModel, self).__init__()
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.n_fsd_lo_comps = n_fsd_lo_comps
         self.n_fsd_hi_comps = n_fsd_hi_comps
@@ -151,7 +156,7 @@ class NBMixtureFSDCodec(FSDCodec):
         offset += n_fsd_hi_comps
 
         if n_fsd_hi_comps > 1:
-            w_hi = NBMixtureFSDCodec.stick(fsd_xi[..., offset:(offset + n_fsd_hi_comps - 1)])
+            w_hi = NBMixtureFSDModel.stick(fsd_xi[..., offset:(offset + n_fsd_hi_comps - 1)])
             offset += (n_fsd_hi_comps - 1)
         else:
             w_hi = torch.ones_like(mu_hi)
@@ -166,7 +171,7 @@ class NBMixtureFSDCodec(FSDCodec):
         offset += n_fsd_lo_comps
 
         if n_fsd_lo_comps > 1:
-            w_lo = NBMixtureFSDCodec.stick(fsd_xi[..., offset:(offset + n_fsd_lo_comps - 1)])
+            w_lo = NBMixtureFSDModel.stick(fsd_xi[..., offset:(offset + n_fsd_lo_comps - 1)])
             offset += (n_fsd_lo_comps - 1)
         else:
             w_lo = torch.ones_like(mu_lo)
@@ -192,11 +197,11 @@ class NBMixtureFSDCodec(FSDCodec):
         xi_tuple += (fsd_params_dict['mu_hi'].log(),)
         xi_tuple += (fsd_params_dict['phi_hi'].log(),)
         if n_fsd_hi_comps > 1:
-            xi_tuple += (NBMixtureFSDCodec.stick.inv(fsd_params_dict['w_hi']),)
+            xi_tuple += (NBMixtureFSDModel.stick.inv(fsd_params_dict['w_hi']),)
         xi_tuple += (fsd_params_dict['mu_lo'].log(),)
         xi_tuple += (fsd_params_dict['phi_lo'].log(),)
         if n_fsd_lo_comps > 1:
-            xi_tuple += (NBMixtureFSDCodec.stick.inv(fsd_params_dict['w_lo']),)
+            xi_tuple += (NBMixtureFSDModel.stick.inv(fsd_params_dict['w_lo']),)
         return torch.cat(xi_tuple, -1)
 
     def encode(self, fsd_params_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -267,8 +272,23 @@ class NBMixtureFSDCodec(FSDCodec):
             n_fsd_hi_comps=self.n_fsd_hi_comps,
             downsampling_rate_tensor=downsampling_rate_tensor)
 
-    def guide(self, data: Dict[str, torch.Tensor]):
-        pass
+    def model(self, data: Dict[str, torch.Tensor], fsd_xi_prior_dist: torch.distributions.Distribution) \
+            -> Dict[str, torch.Tensor]:
+        gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+            # sample gene family size distribution parameters
+            fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_prior_dist)
+
+        return self.decode(fsd_xi_nq)
+
+    def guide(self, data: Dict[str, torch.Tensor], fsd_xi_posterior_dist: torch.distributions.Distribution) \
+            -> Dict[str, torch.Tensor]:
+        gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+            # sample gene family size distribution parameters
+            fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
+
+        return self.decode(fsd_xi_nq)
 
     # TODO magic numbers
     def generate_fsd_init_params(self, mu_hi_guess, phi_hi_guess):
@@ -323,7 +343,7 @@ class NBMixtureFSDCodec(FSDCodec):
         return torch.cat(xi_list, 0).to(self.device)
 
 
-class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
+class NBMixtureRealVSGPChimeraFSDCodec(FSDModel):
     """NB mixture for real components, VSGP from real for chimeric component."""
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
@@ -331,7 +351,7 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
                  init_params_dict: Dict[str, float],
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
-        super(FSDCodec, self).__init__()
+        super(FSDModel, self).__init__()
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.n_fsd_hi_comps = n_fsd_hi_comps
@@ -437,7 +457,7 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
         offset += self.n_fsd_hi_comps
 
         if self.n_fsd_hi_comps > 1:
-            w_hi = NBMixtureFSDCodec.stick(fsd_xi[..., offset:(offset + self.n_fsd_hi_comps - 1)])
+            w_hi = NBMixtureFSDModel.stick(fsd_xi[..., offset:(offset + self.n_fsd_hi_comps - 1)])
             offset += (self.n_fsd_hi_comps - 1)
         else:
             w_hi = torch.ones_like(mu_hi)
@@ -446,8 +466,16 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
                 'phi_hi': phi_hi,
                 'w_hi': w_hi}
 
-    def sample_fsd_lo_params_dict(self, fsd_hi_params_dict: Dict[str, torch.Tensor]) \
+    def model(self, data: Dict[str, torch.Tensor], fsd_xi_prior_dist: torch.distributions.Distribution) \
             -> Dict[str, torch.Tensor]:
+        gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+
+        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+            # sample gene family size distribution parameters
+            fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_prior_dist)
+
+        fsd_hi_params_dict = self.decode_xi_to_fsd_hi_params_dict(fsd_xi_nq)
+
         # calculate log_mu_fsd_hi
         log_w_hi_nj = fsd_hi_params_dict['w_hi'].log()
         log_mu_hi_nj = fsd_hi_params_dict['mu_hi'].log()
@@ -461,32 +489,69 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
         log_mu_lo_loc_n = log_mu_lo_loc_rn.squeeze(0)
         log_mu_lo_scale_n = log_mu_lo_var_rn.squeeze(0).sqrt()
 
-        log_mu_lo_n = dist.Normal(loc=log_mu_lo_loc_n, scale=log_mu_lo_scale_n).rsample()
+        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+            log_mu_lo_n = pyro.sample(
+                "log_mu_lo_n",
+                dist.Normal(loc=log_mu_lo_loc_n, scale=log_mu_lo_scale_n))
+
         mu_lo_nj = log_mu_lo_n.exp().unsqueeze(-1)
         phi_lo_nj = torch.ones_like(mu_lo_nj)
         w_lo_nj = torch.ones_like(mu_lo_nj)
 
-        return {
-            'log_mu_lo_loc_n': log_mu_lo_loc_n,
-            'log_mu_lo_scale_n': log_mu_lo_scale_n,
+        fsd_lo_params_dict = {
             'mu_lo': mu_lo_nj,
             'phi_lo': phi_lo_nj,
             'w_lo': w_lo_nj}
 
-    def guide(self, data: Dict[str, torch.Tensor]):
-        return autoname.scope(prefix="FSD", fn=self.vsgp.guide)()
+        return {**fsd_lo_params_dict, **fsd_hi_params_dict}
+
+    def guide(self, data: Dict[str, torch.Tensor], fsd_xi_posterior_dist: torch.distributions.Distribution) \
+            -> Dict[str, torch.Tensor]:
+        gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+        gene_index_tensor_n = data['gene_index_tensor']
+
+        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+            # sample gene family size distribution parameters
+            fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
+
+        fsd_hi_params_dict = self.decode_xi_to_fsd_hi_params_dict(fsd_xi_nq)
+
+        # calculate log_mu_fsd_hi
+        log_w_hi_nj = fsd_hi_params_dict['w_hi'].log()
+        log_mu_hi_nj = fsd_hi_params_dict['mu_hi'].log()
+        log_mu_hi_n = (log_w_hi_nj + log_mu_hi_nj).logsumexp(dim=-1)
+
+        # MAP estimate of log_mu_lo_n
+        log_mu_lo_posterior_loc_g = pyro.param(
+            "log_mu_lo_posterior_loc_g",
+            lambda: self.log_mu_lo_mean.detach().clone().squeeze(-1).expand(
+                [self.sc_fingerprint_dtm.n_genes, 1]).contiguous())
+
+        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+            log_mu_lo_n = pyro.sample(
+                "log_mu_lo_n",
+                dist.Delta(v=log_mu_lo_posterior_loc_g[gene_index_tensor_n]))
+
+        mu_lo_nj = log_mu_lo_n.exp().unsqueeze(-1)
+        phi_lo_nj = torch.ones_like(mu_lo_nj)
+        w_lo_nj = torch.ones_like(mu_lo_nj)
+
+        fsd_lo_params_dict = {
+            'mu_lo': mu_lo_nj,
+            'phi_lo': phi_lo_nj,
+            'w_lo': w_lo_nj}
+
+        return {**fsd_lo_params_dict, **fsd_hi_params_dict}
 
     def decode(self, fsd_xi: torch.Tensor) -> Dict[str, torch.Tensor]:
-        fsd_hi_params_dict = self.decode_xi_to_fsd_hi_params_dict(fsd_xi)
-        fsd_lo_params_dict = self.sample_fsd_lo_params_dict(fsd_hi_params_dict)
-        return {**fsd_lo_params_dict, **fsd_hi_params_dict}
+        return self.decode_xi_to_fsd_hi_params_dict(fsd_xi)
 
     def encode(self, fsd_params_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         xi_tuple = tuple()
         xi_tuple += (fsd_params_dict['mu_hi'].log(),)
         xi_tuple += (fsd_params_dict['phi_hi'].log(),)
         if self.n_fsd_hi_comps > 1:
-            xi_tuple += (NBMixtureFSDCodec.stick.inv(fsd_params_dict['w_hi']),)
+            xi_tuple += (NBMixtureFSDModel.stick.inv(fsd_params_dict['w_hi']),)
         return torch.cat(xi_tuple, -1)
 
     @staticmethod
@@ -507,7 +572,7 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
                            fsd_params_dict: Dict[str, torch.Tensor],
                            downsampling_rate_tensor: Union[None, torch.Tensor] = None) \
             -> Tuple[TorchDistribution, TorchDistribution]:
-        return NBMixtureFSDCodec.get_fsd_components_nb_mixture(
+        return NBMixtureFSDModel.get_fsd_components_nb_mixture(
             fsd_params_dict=fsd_params_dict,
             n_fsd_lo_comps=1,
             n_fsd_hi_comps=self.n_fsd_hi_comps,
