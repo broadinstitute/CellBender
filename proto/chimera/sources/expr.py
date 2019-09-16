@@ -132,9 +132,6 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 
-        # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
-        autoname.scope(prefix="EXPR", fn=self.vsgp.guide)()
-
         # sample beta_nr posterior
         beta_posterior_loc_gr = pyro.param(
             "beta_posterior_loc_gr",
@@ -219,6 +216,9 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
         pyro.module("vsgp_gene_expression_prior",
                     self.vsgp_gene_expression_prior,
                     update_module_params=True)
+
+        # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
+        autoname.scope(prefix="EXPR", fn=self.vsgp_gene_expression_prior.vsgp.guide)()
 
         with pyro.plate("collapsed_gene_cell", size=mb_size):
             self.vsgp_gene_expression_prior.guide(data)
