@@ -650,16 +650,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
                 fsd_xi_nq = pyro.sample("fsd_xi_nq", fsd_xi_posterior_dist)
 
-            # get e_hi prior parameters (per cell)
-            beta_loc_nr, beta_scale_nr = self.gene_expression_prior.forward(data)
-
-            # sample e_hi prior parameters
-            with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
-                # sample beta parameters
-                beta_nr = pyro.sample(
-                    "beta_nr",
-                    dist.Normal(loc=beta_loc_nr, scale=beta_scale_nr).to_event(1))
-
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()
     def get_active_constraints_on_genes(self) -> Dict:

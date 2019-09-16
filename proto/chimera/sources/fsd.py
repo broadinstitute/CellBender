@@ -12,6 +12,7 @@ import pyro
 import pyro.distributions as dist
 from pyro import poutine
 from pyro.contrib.gp.models import VariationalSparseGP
+from pyro.contrib import autoname
 import pyro.contrib.gp.kernels as kernels
 
 from pyro_extras import NegativeBinomial, MixtureDistribution
@@ -334,7 +335,8 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.n_fsd_hi_comps = n_fsd_hi_comps
-
+        self.n_fsd_lo_comps = 1
+        
         self.fsd_init_min_mu_lo = init_params_dict['fsd.init_min_mu_lo']
         self.fsd_init_min_mu_hi = init_params_dict['fsd.init_min_mu_hi']
         self.fsd_init_max_phi_lo = init_params_dict['fsd.init_max_phi_lo']
@@ -349,8 +351,7 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
         # initialization of p_lo and p_hi
         mean_fsd_mu_hi = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi)
         mean_fsd_phi_hi = np.mean(sc_fingerprint_dtm.empirical_fsd_phi_hi)
-        (self.init_fsd_mu_lo, self.init_fsd_phi_lo, self.init_fsd_w_lo,
-         self.init_fsd_mu_hi, self.init_fsd_phi_hi, self.init_fsd_w_hi) = self.generate_fsd_init_params(
+        self.init_fsd_mu_hi, self.init_fsd_phi_hi, self.init_fsd_w_hi = self.generate_fsd_init_params(
             mean_fsd_mu_hi, mean_fsd_phi_hi)
 
         # fsd_lo GP inducing points
@@ -407,7 +408,8 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
             X=None,
             y=None,
             kernel=kernel_full,
-            Xu=self.inducing_points,
+            Xu=self.fsd_lo_inducing_points,
+            num_data=sc_fingerprint_dtm.n_genes,
             likelihood=None,
             mean_function=lambda x: self.log_mu_lo_mean,
             latent_shape=torch.Size([1]),
@@ -453,24 +455,26 @@ class NBMixtureRealVSGPChimeraFSDCodec(FSDCodec):
 
         # sample from GP
         self.vsgp.set_data(X=log_mu_hi_n, y=None)
-        log_mu_lo_loc_rn, log_mu_lo_var_rn = self.vsgp.model()
+        log_mu_lo_loc_rn, log_mu_lo_var_rn = autoname.scope(prefix="FSD", fn=self.vsgp.model)()
 
         # drop the singleton dimension
         log_mu_lo_loc_n = log_mu_lo_loc_rn.squeeze(0)
         log_mu_lo_scale_n = log_mu_lo_var_rn.squeeze(0).sqrt()
 
         log_mu_lo_n = dist.Normal(loc=log_mu_lo_loc_n, scale=log_mu_lo_scale_n).rsample()
-        mu_lo_n = log_mu_lo_n.exp()
-        phi_lo_n = torch.ones_like(mu_lo_n)
-        w_lo_n = torch.ones_like(mu_lo_n)
+        mu_lo_nj = log_mu_lo_n.exp().unsqueeze(-1)
+        phi_lo_nj = torch.ones_like(mu_lo_nj)
+        w_lo_nj = torch.ones_like(mu_lo_nj)
 
         return {
-            'mu_lo': mu_lo_n,
-            'phi_lo': phi_lo_n,
-            'w_lo': w_lo_n}
+            'log_mu_lo_loc_n': log_mu_lo_loc_n,
+            'log_mu_lo_scale_n': log_mu_lo_scale_n,
+            'mu_lo': mu_lo_nj,
+            'phi_lo': phi_lo_nj,
+            'w_lo': w_lo_nj}
 
     def guide(self, data: Dict[str, torch.Tensor]):
-        return self.vsgp.guide()
+        return autoname.scope(prefix="FSD", fn=self.vsgp.guide)()
 
     def decode(self, fsd_xi: torch.Tensor) -> Dict[str, torch.Tensor]:
         fsd_hi_params_dict = self.decode_xi_to_fsd_hi_params_dict(fsd_xi)
