@@ -298,7 +298,6 @@ class DropletTimeMachineModel(torch.nn.Module):
               posterior_sampling_mode: bool = False):
 
         # input tensors
-        fingerprint_tensor_nr = data['fingerprint_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 
         # register the external modules

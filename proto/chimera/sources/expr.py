@@ -40,6 +40,7 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
                  init_linear_kernel_variance: float,
                  init_whitenoise_kernel_variance: float,
                  init_constant_kernel_variance: float,
+                 init_beta_posterior_scale: float,
                  init_beta_mean: np.ndarray,
                  cholesky_jitter: float,
                  min_noise: float,
@@ -105,7 +106,18 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             latent_shape=torch.Size([4]),
             whiten=True,
             jitter=cholesky_jitter)
-        
+
+        # posterior parameters
+        self.beta_posterior_loc_gr = pyro.param(
+            "beta_posterior_loc_gr",
+            lambda: self.f_mean.detach().clone().squeeze(-1).expand(
+                [self.sc_fingerprint_dtm.n_genes, 4]))
+        self.beta_posterior_scale_gr = pyro.param(
+            "beta_posterior_scale_gr",
+            init_beta_posterior_scale * torch.ones(
+                (self.sc_fingerprint_dtm.n_genes, 4), device=device, dtype=dtype),
+            constraint=constraints.positive)
+
         # send parameters to device
         self.to(device)
 
@@ -135,16 +147,12 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
         autoname.scope(prefix="EXPR", fn=self.vsgp.guide)()
 
-        # TODO make this gaussian
-        # sample beta_nr posterior
-        beta_posterior_loc_gr = pyro.param(
-            "beta_posterior_loc_gr",
-            lambda: self.f_mean.detach().clone().squeeze(-1).expand([self.sc_fingerprint_dtm.n_genes, 4]).contiguous())
-
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
             beta_nr = pyro.sample(
                 "beta_nr",
-                dist.Delta(v=beta_posterior_loc_gr[gene_index_tensor_n, :]).to_event(1))
+                dist.Normal(
+                    loc=self.beta_posterior_loc_gr[gene_index_tensor_n, :],
+                    scale=self.beta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1))
 
         return beta_nr
 
