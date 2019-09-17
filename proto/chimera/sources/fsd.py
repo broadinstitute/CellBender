@@ -486,15 +486,15 @@ class NBMixtureRealVSGPChimeraFSDModel(FSDModel):
         log_mu_lo_loc_rn, log_mu_lo_var_rn = autoname.scope(prefix="FSD", fn=self.vsgp.model)()
 
         # drop the singleton dimension
-        log_mu_lo_loc_n = log_mu_lo_loc_rn.squeeze(0)
-        log_mu_lo_scale_n = log_mu_lo_var_rn.squeeze(0).sqrt()
-
+        log_mu_lo_loc_nj = log_mu_lo_loc_rn.permute(-1, -2)
+        log_mu_lo_scale_nj = log_mu_lo_var_rn.permute(-1, -2).sqrt()
+        
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
-            log_mu_lo_n = pyro.sample(
-                "log_mu_lo_n",
-                dist.Normal(loc=log_mu_lo_loc_n, scale=log_mu_lo_scale_n))
+            log_mu_lo_nj = pyro.sample(
+                "log_mu_lo_nj",
+                dist.Normal(loc=log_mu_lo_loc_nj, scale=log_mu_lo_scale_nj).to_event(1))
 
-        mu_lo_nj = log_mu_lo_n.exp().unsqueeze(-1)
+        mu_lo_nj = log_mu_lo_nj.exp()
         phi_lo_nj = torch.ones_like(mu_lo_nj)
         w_lo_nj = torch.ones_like(mu_lo_nj)
 
@@ -521,18 +521,19 @@ class NBMixtureRealVSGPChimeraFSDModel(FSDModel):
         log_mu_hi_nj = fsd_hi_params_dict['mu_hi'].log()
         log_mu_hi_n = (log_w_hi_nj + log_mu_hi_nj).logsumexp(dim=-1)
 
+        # TODO make this gaussian
         # MAP estimate of log_mu_lo_n
-        log_mu_lo_posterior_loc_g = pyro.param(
-            "log_mu_lo_posterior_loc_g",
+        log_mu_lo_posterior_loc_gj = pyro.param(
+            "log_mu_lo_posterior_loc_gj",
             lambda: self.log_mu_lo_mean.detach().clone().squeeze(-1).expand(
                 [self.sc_fingerprint_dtm.n_genes, 1]).contiguous())
 
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
-            log_mu_lo_n = pyro.sample(
-                "log_mu_lo_n",
-                dist.Delta(v=log_mu_lo_posterior_loc_g[gene_index_tensor_n]))
+            log_mu_lo_nj = pyro.sample(
+                "log_mu_lo_nj",
+                dist.Delta(v=log_mu_lo_posterior_loc_gj[gene_index_tensor_n, :]).to_event(1))
 
-        mu_lo_nj = log_mu_lo_n.exp().unsqueeze(-1)
+        mu_lo_nj = log_mu_lo_nj.exp()
         phi_lo_nj = torch.ones_like(mu_lo_nj)
         w_lo_nj = torch.ones_like(mu_lo_nj)
 

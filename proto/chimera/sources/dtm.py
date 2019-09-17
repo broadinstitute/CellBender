@@ -364,10 +364,14 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_xi_posterior_dist = dist.TransformedDistribution(
             fsd_xi_posterior_base_dist, [fsd_xi_sort_trans])
 
-        _ = self.gene_expression_prior.guide(data)
+        beta_nr = self.gene_expression_prior.guide(data)
 
         # fsd guide
-        _ = self.fsd_model.guide(data, fsd_xi_posterior_dist)
+        fsd_params_dict = self.fsd_model.guide(data, fsd_xi_posterior_dist)
+        
+        return {
+            'beta_nr': beta_nr,
+            'fsd_params_dict': fsd_params_dict}
 
     @staticmethod
     def _sample_fingerprint(batch_shape: torch.Size,

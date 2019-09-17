@@ -133,8 +133,9 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         gene_index_tensor_n = data['gene_index_tensor']
 
         # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
-        autoname.scope(prefix="EXPR", fn=self.vsgp_gene_expression_prior.vsgp.guide)()
+        autoname.scope(prefix="EXPR", fn=self.vsgp.guide)()
 
+        # TODO make this gaussian
         # sample beta_nr posterior
         beta_posterior_loc_gr = pyro.param(
             "beta_posterior_loc_gr",
