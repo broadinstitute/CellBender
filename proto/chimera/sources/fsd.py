@@ -437,11 +437,11 @@ class NBMixtureRealVSGPChimeraFSDModel(FSDModel):
             jitter=init_params_dict['fsd.vsgp.cholesky_jitter'])
 
         # posterior parameters
-        self.log_mu_lo_posterior_loc_gj = pyro.param(
+        log_mu_lo_posterior_loc_gj = pyro.param(
             "log_mu_lo_posterior_loc_gj",
             lambda: self.log_mu_lo_mean.detach().clone().squeeze(-1).expand(
                 [self.sc_fingerprint_dtm.n_genes, 1]))
-        self.log_mu_lo_posterior_scale_gj = pyro.param(
+        log_mu_lo_posterior_scale_gj = pyro.param(
             "log_mu_lo_posterior_scale_gj",
             init_params_dict['fsd.init_mu_lo_posterior_scale'] * torch.ones(
                 (self.sc_fingerprint_dtm.n_genes, 1), device=device, dtype=dtype),
@@ -527,17 +527,15 @@ class NBMixtureRealVSGPChimeraFSDModel(FSDModel):
 
         fsd_hi_params_dict = self.decode_xi_to_fsd_hi_params_dict(fsd_xi_nq)
 
-        # calculate log_mu_fsd_hi
-        log_w_hi_nj = fsd_hi_params_dict['w_hi'].log()
-        log_mu_hi_nj = fsd_hi_params_dict['mu_hi'].log()
-        log_mu_hi_n = (log_w_hi_nj + log_mu_hi_nj).logsumexp(dim=-1)
-
+        log_mu_lo_posterior_loc_gj = pyro.param("log_mu_lo_posterior_loc_gj")
+        log_mu_lo_posterior_scale_gj = pyro.param("log_mu_lo_posterior_scale_gj")
+        
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
             log_mu_lo_nj = pyro.sample(
                 "log_mu_lo_nj",
                 dist.Normal(
-                    loc=self.log_mu_lo_posterior_loc_gj[gene_index_tensor_n, :],
-                    scale=self.log_mu_lo_posterior_scale_gj[gene_index_tensor_n, :]).to_event(1))
+                    loc=log_mu_lo_posterior_loc_gj[gene_index_tensor_n, :],
+                    scale=log_mu_lo_posterior_scale_gj[gene_index_tensor_n, :]).to_event(1))
 
         mu_lo_nj = log_mu_lo_nj.exp()
         phi_lo_nj = torch.ones_like(mu_lo_nj)

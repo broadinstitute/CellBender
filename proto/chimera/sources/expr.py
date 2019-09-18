@@ -108,11 +108,11 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             jitter=cholesky_jitter)
 
         # posterior parameters
-        self.beta_posterior_loc_gr = pyro.param(
+        pyro.param(
             "beta_posterior_loc_gr",
             lambda: self.f_mean.detach().clone().squeeze(-1).expand(
                 [self.sc_fingerprint_dtm.n_genes, 4]))
-        self.beta_posterior_scale_gr = pyro.param(
+        pyro.param(
             "beta_posterior_scale_gr",
             init_beta_posterior_scale * torch.ones(
                 (self.sc_fingerprint_dtm.n_genes, 4), device=device, dtype=dtype),
@@ -147,12 +147,15 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
         autoname.scope(prefix="EXPR", fn=self.vsgp.guide)()
 
+        beta_posterior_loc_gr = pyro.param("beta_posterior_loc_gr")
+        beta_posterior_scale_gr = pyro.param("beta_posterior_scale_gr")
+        
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
             beta_nr = pyro.sample(
                 "beta_nr",
                 dist.Normal(
-                    loc=self.beta_posterior_loc_gr[gene_index_tensor_n, :],
-                    scale=self.beta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1))
+                    loc=beta_posterior_loc_gr[gene_index_tensor_n, :],
+                    scale=beta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1))
 
         return beta_nr
 
