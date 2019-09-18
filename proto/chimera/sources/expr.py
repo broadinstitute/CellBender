@@ -121,13 +121,14 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         # send parameters to device
         self.to(device)
 
+    @autoname.scope(prefix="expr")
     def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         log_mean_obs_expr_n = data['empirical_mean_obs_expr_per_gene_tensor'].log()
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
 
         # sample all points
         self.vsgp.set_data(X=log_mean_obs_expr_n, y=None)
-        beta_loc_rn, beta_var_rn = autoname.scope(prefix="EXPR", fn=self.vsgp.model)()
+        beta_loc_rn, beta_var_rn = self.vsgp.model()
         beta_loc_nr = beta_loc_rn.permute(-1, -2)
         beta_scale_nr = beta_var_rn.permute(-1, -2).sqrt()
 
@@ -140,12 +141,13 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
         return beta_nr
 
+    @autoname.scope(prefix="expr")
     def guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 
         # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
-        autoname.scope(prefix="EXPR", fn=self.vsgp.guide)()
+        self.vsgp.guide()
 
         beta_posterior_loc_gr = pyro.param("beta_posterior_loc_gr")
         beta_posterior_scale_gr = pyro.param("beta_posterior_scale_gr")

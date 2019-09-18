@@ -124,26 +124,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         # register the external modules
         pyro.module("fsd_model", self.fsd_model, update_module_params=True)
         pyro.module("gene_expression_prior", self.gene_expression_prior, update_module_params=True)
-        
-        # GMM prior for family size distribution parameters
-        fsd_xi_prior_locs_kq = pyro.param(
-            "fsd_xi_prior_locs_kq",
-            self.fsd_model.init_fsd_xi_loc_prior +
-            self.fsd_gmm_init_components_perplexity * torch.randn(
-                (self.fsd_gmm_num_components, self.fsd_model.total_fsd_params),
-                dtype=self.dtype, device=self.device))
-
-        if self.fsd_gmm_max_xi_scale is None:
-            fsd_xi_prior_scales_constraint = constraints.greater_than(self.fsd_gmm_min_xi_scale)
-        else:
-            fsd_xi_prior_scales_constraint = constraints.interval(
-                self.fsd_gmm_min_xi_scale, self.fsd_gmm_max_xi_scale)
-        fsd_xi_prior_scales_kq = pyro.param(
-            "fsd_xi_prior_scales_kq",
-            self.fsd_gmm_init_xi_scale * torch.ones(
-                (self.fsd_gmm_num_components, self.fsd_model.total_fsd_params),
-                dtype=self.dtype, device=self.device),
-            constraint=fsd_xi_prior_scales_constraint)
 
         # chimera hyperparameters
         alpha_c_concentration_scalar = torch.tensor(
@@ -162,11 +142,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             0, max_family_size + 1, device=self.device, dtype=self.dtype)
         zero = torch.tensor(0, device=self.device, dtype=self.dtype)
 
-        # fsd xi prior distribution
-        fsd_xi_prior_dist = self._get_fsd_xi_prior_dist(
-            fsd_xi_prior_locs_kq,
-            fsd_xi_prior_scales_kq)
-
         # sample chimera parameters
         alpha_c = pyro.sample(
             "alpha_c",
@@ -176,12 +151,10 @@ class DropletTimeMachineModel(torch.nn.Module):
             dist.Gamma(concentration=beta_c_concentration_scalar, rate=beta_c_rate_scalar))
 
         # sample fsd params
-        fsd_params_dict = self.fsd_model.model(data, fsd_xi_prior_dist)
+        fsd_params_dict = self.fsd_model.model(data)
 
         # get chimeric and real family size distributions
-        fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(
-            fsd_params_dict,
-            downsampling_rate_tensor=downsampling_rate_tensor_n)
+        fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(fsd_params_dict)
 
         # get e_hi prior parameters (per cell)
         beta_nr = self.gene_expression_prior.model(data)
@@ -297,76 +270,28 @@ class DropletTimeMachineModel(torch.nn.Module):
               data: Dict[str, torch.Tensor],
               posterior_sampling_mode: bool = False):
 
-        # input tensors
-        gene_index_tensor_n = data['gene_index_tensor']
-
         # register the external modules
         pyro.module("fsd_model", self.fsd_model, update_module_params=True)
         pyro.module("gene_expression_prior", self.gene_expression_prior, update_module_params=True)
 
-        # fsd xi gmm
-        if self.fsd_gmm_num_components > 1:
-            # MAP estimate of GMM fsd prior weights
-            fsd_xi_prior_weights_map_k = pyro.param(
-                "fsd_xi_prior_weights_map_k",
-                torch.ones((self.fsd_gmm_num_components,),
-                           device=self.device, dtype=self.dtype) / self.fsd_gmm_num_components,
-                constraint=constraints.simplex)
-            pyro.sample(
-                "fsd_xi_prior_weights_k",
-                dist.Delta(
-                    self.fsd_gmm_min_weight_per_component
-                    + (1 - self.fsd_gmm_num_components * self.fsd_gmm_min_weight_per_component)
-                    * fsd_xi_prior_weights_map_k))
-
-        # point estimate for fsd xi (per gene)
-        fsd_xi_posterior_loc_gq = pyro.param(
-            "fsd_xi_posterior_loc_gq",
-            self.fsd_model.get_sorted_fsd_xi(self.fsd_model.init_fsd_xi_loc_posterior))
-
         # point estimate for chimera parameters
         alpha_c_posterior_loc = pyro.param(
             "alpha_c_posterior_loc",
-            torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype),
+            lambda: torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype),
             constraint=constraints.positive)
         beta_c_posterior_loc = pyro.param(
             "beta_c_posterior_loc",
-            torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
+            lambda: torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
             constraint=constraints.positive)
+
         pyro.sample("alpha_c", dist.Delta(v=alpha_c_posterior_loc))
         pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
 
-        # base posterior distribution for fsd xi
-        if self.guide_spec_dict['fsd_xi'] == 'map':
-
-            fsd_xi_posterior_base_dist = dist.Delta(
-                v=fsd_xi_posterior_loc_gq[gene_index_tensor_n, :]).to_event(1)
-
-        elif self.guide_spec_dict['fsd_xi'] == 'gaussian':
-
-            # scale for fsd xi (per gene)
-            fsd_xi_posterior_scale_gq = pyro.param(
-                "fsd_xi_posterior_scale_gq",
-                self.fsd_gmm_init_xi_scale * torch.ones(
-                    (self.sc_fingerprint_dtm.n_genes,
-                     self.fsd_model.total_fsd_params), device=self.device, dtype=self.dtype),
-                constraint=constraints.greater_than(self.fsd_xi_posterior_min_scale))
-            fsd_xi_posterior_base_dist = dist.Normal(
-                loc=fsd_xi_posterior_loc_gq[gene_index_tensor_n, :],
-                scale=fsd_xi_posterior_scale_gq[gene_index_tensor_n, :]).to_event(1)
-
-        else:
-            raise Exception("Unknown guide specification for fsd_xi: allowed values are 'map' and 'gaussian'")
-
-        # apply a pseudo-bijective transformation to sort xi by component weights
-        fsd_xi_sort_trans = SortByComponentWeights(self.fsd_model)
-        fsd_xi_posterior_dist = dist.TransformedDistribution(
-            fsd_xi_posterior_base_dist, [fsd_xi_sort_trans])
-
+        # e_Hi prior ZINB parameters
         beta_nr = self.gene_expression_prior.guide(data)
 
-        # fsd guide
-        fsd_params_dict = self.fsd_model.guide(data, fsd_xi_posterior_dist)
+        # fsd posterior parameters
+        fsd_params_dict = self.fsd_model.guide(data)
         
         return {
             'beta_nr': beta_nr,
