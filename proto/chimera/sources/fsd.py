@@ -383,27 +383,27 @@ class FSDModelGPLVM(FSDModel):
         self.fsd_gplvm_latent_dim = int(init_params_dict['fsd.gplvm.latent_dim'])
 
         self.fsd_gplvm_cholesky_jitter = init_params_dict['fsd.gplvm.cholesky_jitter']
+        self.fsd_gplvm_min_noise = init_params_dict['fsd.gplvm.min_noise']
         self.fsd_init_xi_posterior_scale = init_params_dict['fsd.init_fsd_xi_posterior_scale']
 
         self.device = device
         self.dtype = dtype
 
         # GPLVM kernel setup
-        latent_one = torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype)
-
         kernel_rbf = kernels.RBF(
             input_dim=self.fsd_gplvm_latent_dim,
-            variance=self.fsd_vsgp_init_rbf_kernel_variance * latent_one,
-            lengthscale=self.fsd_gplvm_init_rbf_kernel_lengthscale * latent_one)
+            variance=torch.tensor(self.fsd_gplvm_init_rbf_kernel_variance, device=device, dtype=dtype),
+            lengthscale=self.fsd_gplvm_init_rbf_kernel_lengthscale
+                * torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype))
         kernel_linear = kernels.Linear(
             input_dim=self.fsd_gplvm_latent_dim,
-            variance=self.fsd_gplvm_init_linear_kernel_variance * latent_one)
+            variance=torch.tensor(self.fsd_gplvm_init_linear_kernel_variance, device=device, dtype=dtype))
         kernel_constant = kernels.Constant(
             input_dim=self.fsd_gplvm_latent_dim,
-            variance=self.fsd_gplvm_init_constant_kernel_variance * latent_one)
+            variance=torch.tensor(self.fsd_gplvm_init_constant_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise = kernels.WhiteNoise(
             input_dim=self.fsd_gplvm_latent_dim,
-            variance=self.fsd_gplvm_init_whitenoise_kernel_variance * latent_one)
+            variance=torch.tensor(self.fsd_gplvm_init_whitenoise_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise.set_constraint(
             "variance", constraints.greater_than(self.fsd_gplvm_min_noise))
 
@@ -416,10 +416,10 @@ class FSDModelGPLVM(FSDModel):
                     kernel_constant)))
 
         # mean fsd xi
-        self.fsd_xi_mean = torch.nn.Parameter(self.init_fsd_xi_loc_prior.clone().unsqueeze(-1))
+        self.fsd_xi_mean = torch.nn.Parameter(self.init_fsd_xi_loc_prior.clone().detach().unsqueeze(-1))
 
         # GPLVM inducing points initial values
-        self.Xu_init = torch.rand(
+        self.Xu_init = torch.randn(
             self.fsd_gplvm_n_inducing_points, self.fsd_gplvm_latent_dim,
             device=device, dtype=dtype)
 
@@ -451,7 +451,8 @@ class FSDModelGPLVM(FSDModel):
 
         pyro.param(
             "fsd_xi_posterior_loc_gq",
-            lambda: self.init_fsd_xi_loc_prior.expand((sc_fingerprint_dtm.n_genes, self.fsd_xi_dim)))
+            # lambda: self.init_fsd_xi_loc_prior.expand((sc_fingerprint_dtm.n_genes, self.fsd_xi_dim)))
+            lambda: self.init_fsd_xi_loc_posterior.clone().detach())
         pyro.param(
             "fsd_xi_posterior_scale_gq",
             lambda: self.fsd_init_xi_posterior_scale * torch.ones(
@@ -571,7 +572,13 @@ class FSDModelGPLVM(FSDModel):
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
             fsd_latent_nl = pyro.sample(
                 "fsd_latent_nl",
-                dist.Normal(loc=0., scale=1.).expand([batch_size, self.fsd_gplvm_latent_dim]).to_event(1))
+                dist.Normal(
+                    loc=torch.zeros(
+                        (batch_size, self.fsd_gplvm_latent_dim),
+                        device=self.device, dtype=self.dtype),
+                    scale=torch.ones(
+                        (batch_size, self.fsd_gplvm_latent_dim),
+                        device=self.device, dtype=self.dtype)).to_event(1))
 
         # sample the inducing points and fsd xi prior
         self.gplvm.set_data(X=fsd_latent_nl, y=None)
