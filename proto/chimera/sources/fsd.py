@@ -395,25 +395,27 @@ class FSDModelGPLVM(FSDModel):
             variance=torch.tensor(self.fsd_gplvm_init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=self.fsd_gplvm_init_rbf_kernel_lengthscale
                 * torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype))
-        kernel_linear = kernels.Linear(
-            input_dim=self.fsd_gplvm_latent_dim,
-            variance=torch.tensor(self.fsd_gplvm_init_linear_kernel_variance, device=device, dtype=dtype))
-        kernel_constant = kernels.Constant(
-            input_dim=self.fsd_gplvm_latent_dim,
-            variance=torch.tensor(self.fsd_gplvm_init_constant_kernel_variance, device=device, dtype=dtype))
+#         kernel_linear = kernels.Linear(
+#             input_dim=self.fsd_gplvm_latent_dim,
+#             variance=torch.tensor(self.fsd_gplvm_init_linear_kernel_variance, device=device, dtype=dtype))
+#         kernel_constant = kernels.Constant(
+#             input_dim=self.fsd_gplvm_latent_dim,
+#             variance=torch.tensor(self.fsd_gplvm_init_constant_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise = kernels.WhiteNoise(
             input_dim=self.fsd_gplvm_latent_dim,
             variance=torch.tensor(self.fsd_gplvm_init_whitenoise_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise.set_constraint(
             "variance", constraints.greater_than(self.fsd_gplvm_min_noise))
 
-        kernel_full = kernels.Sum(
-            kernel_rbf,
-            kernels.Sum(
-                kernel_linear,
-                kernels.Sum(
-                    kernel_whitenoise,
-                    kernel_constant)))
+#         kernel_full = kernels.Sum(
+#             kernel_rbf,
+#             kernels.Sum(
+#                 kernel_linear,
+#                 kernels.Sum(
+#                     kernel_whitenoise,
+#                     kernel_constant)))
+
+        kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
         # mean fsd xi
         self.fsd_xi_mean = torch.nn.Parameter(self.init_fsd_xi_loc_prior.clone().detach().unsqueeze(-1))
