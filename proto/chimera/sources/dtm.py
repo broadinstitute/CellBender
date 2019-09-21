@@ -14,7 +14,7 @@ from torch.distributions import constraints
 from pyro_extras import CustomLogProbTerm, MixtureDistribution, logaddexp, get_log_prob_compl, \
     get_binomial_samples_sparse_counts
 from fingerprint import SingleCellFingerprintDTM
-from fsd import FSDModel, SortByComponentWeights
+from fsd import FSDModel
 from expr import GeneExpressionPrior
 from importance_sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 from stats import int_ndarray_mode, gamma_loc_scale_to_concentration_rate
@@ -792,6 +792,7 @@ class PosteriorGeneExpressionSampler(object):
 
         return omega_importance_sampler_inputs, trained_model_context, minibatch_data
 
+    @torch.no_grad()
     def _estimate_log_gene_expression_with_fixed_n_particles(
             self,
             gene_index: int,
@@ -866,6 +867,7 @@ class PosteriorGeneExpressionSampler(object):
             return (log_zero_inflated_mom_1_expression_n,
                     log_zero_inflated_mom_2_expression_n)
 
+    @torch.no_grad()
     def get_gene_expression_posterior_moments_summary(
             self,
             gene_index: int,
@@ -976,7 +978,7 @@ class PosteriorGeneExpressionSampler(object):
 
         # prior zero-inflation log prob
         log_prob_zero_prior_n: torch.Tensor = torch.nn.functional.logsigmoid(logit_prob_zero_prior_n)
-        log_prob_nonzero_prior_n = get_log_prob_compl(log_prob_zero_prior_n)
+        log_prob_nonzero_prior_n: torch.Tensor = torch.nn.functional.logsigmoid(-logit_prob_zero_prior_n)
 
         # log likelihood at zero
         log_likelihood_zero_n = log_likelihood_function(

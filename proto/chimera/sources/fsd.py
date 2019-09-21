@@ -462,9 +462,6 @@ class FSDModelGPLVM(FSDModel):
                 device=device, dtype=dtype),
             constraint=constraints.positive)
 
-        # fsd xi sort transformation
-        self.fsd_xi_sort_trans = SortByComponentWeights(self)
-
         # send parameters to device
         self.to(device)
 
@@ -624,7 +621,7 @@ class FSDModelGPLVM(FSDModel):
                     dist.Normal(
                         loc=fsd_xi_posterior_loc_gq[gene_index_tensor_n, :],
                         scale=fsd_xi_posterior_scale_gq[gene_index_tensor_n, :]).to_event(1),
-                    [self.fsd_xi_sort_trans]))
+                    [SortByComponentWeights(self)]))
 
         return self.decode(fsd_xi_nq)
 
