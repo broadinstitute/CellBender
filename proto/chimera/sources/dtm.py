@@ -75,12 +75,12 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.eta_empirical_n = torch.tensor(
             sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
             device=device, dtype=dtype)
-        self.log1p_eta_empirical_n = self.eta_empirical_n.log1p()
+        self.log_eta_empirical_n = self.eta_empirical_n.log()
 
-        # parameters for calculating and caching log1p_eta_empirical moment generating function
-        self.log1p_eta_empirical_mgf_min = init_params_dict['model.log1p_eta_empirical_mgf_min']
-        self.log1p_eta_empirical_mgf_max = init_params_dict['model.log1p_eta_empirical_mgf_max']
-        self.log1p_eta_empirical_mgf_steps = init_params_dict['model.log1p_eta_empirical_mgf_steps']
+        # parameters for calculating and caching log eta empirical moment generating function
+        self.log_eta_empirical_mgf_min = init_params_dict['model.log_eta_empirical_mgf_min']
+        self.log_eta_empirical_mgf_max = init_params_dict['model.log_eta_empirical_mgf_max']
+        self.log_eta_empirical_mgf_steps = init_params_dict['model.log_eta_empirical_mgf_steps']
 
         # 1D interpolation helper
         self.interp1d = Interp1d()
@@ -173,12 +173,12 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # empirical droplet efficiency
         eta_n = self.eta_empirical_n[cell_index_tensor_n]
-        log1p_eta_n = self.log1p_eta_empirical_n[cell_index_tensor_n]
+        log_eta_n = self.log_eta_empirical_n[cell_index_tensor_n]
 
         # calculate ZINB parameters
         e_hi_params_dict = self.gene_expression_prior.decode(
             beta_nr=beta_nr,
-            cell_features_nf=log1p_eta_n.unsqueeze(-1))
+            cell_features_nf=log_eta_n.unsqueeze(-1))
         log_mu_e_hi_n = e_hi_params_dict['log_mu_e_hi_n']
         log_phi_e_hi_n = e_hi_params_dict['log_phi_e_hi_n']
         logit_p_zero_e_hi_n = e_hi_params_dict['logit_p_zero_e_hi_n']
@@ -527,7 +527,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                         dist.Dirichlet(w_hi_dirichlet_concentration * torch.ones_like(w_fsd_hi_comps_nj)),
                         obs=w_fsd_hi_comps_nj)
 
-
     # TODO: rewrite using poutine and avoid code repetition
     @torch.no_grad()
     def get_active_constraints_on_genes(self) -> Dict:
@@ -565,33 +564,33 @@ class DropletTimeMachineModel(torch.nn.Module):
         return dict(active_constraints_dict)
 
     @cachedproperty
-    def log1p_eta_empirical_mgf(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def log_eta_empirical_mgf(self) -> Tuple[torch.Tensor, torch.Tensor]:
         t_k = torch.linspace(
-            start=self.log1p_eta_empirical_mgf_min,
-            end=self.log1p_eta_empirical_mgf_max,
-            steps=self.log1p_eta_empirical_mgf_steps,
+            start=self.log_eta_empirical_mgf_min,
+            end=self.log_eta_empirical_mgf_max,
+            steps=self.log_eta_empirical_mgf_steps,
             device=self.device,
             dtype=self.dtype)
-        log1p_eta_empirical_mgf_k = torch.mean(
-            torch.exp(self.log1p_eta_empirical_n.unsqueeze(-1) * t_k),
+        log_eta_empirical_mgf_k = torch.mean(
+            torch.exp(self.log_eta_empirical_n.unsqueeze(-1) * t_k),
             dim=0)
 
-        return t_k, log1p_eta_empirical_mgf_k
+        return t_k, log_eta_empirical_mgf_k
 
     def _get_mu_e_hi_eta_averaged_n(self, beta_nr: torch.Tensor):
         log_mu_e_hi_intercept_n = beta_nr[:, 0]
         log_mu_e_hi_slope_n = beta_nr[:, 1]
         logit_p_zero_e_hi_n = beta_nr[:, 3]
         p_nonzero_n = torch.sigmoid(-logit_p_zero_e_hi_n)
-        t_k, log1p_eta_empirical_mgf_k = self.log1p_eta_empirical_mgf
+        t_k, log_eta_empirical_mgf_k = self.log_eta_empirical_mgf
 
         # perform eta-averaging
-        exp_log1p_eta_averaged_n = self.interp1d(
+        exp_log_eta_averaged_n = self.interp1d(
             x=t_k,
-            y=log1p_eta_empirical_mgf_k,
+            y=log_eta_empirical_mgf_k,
             xnew=log_mu_e_hi_slope_n)[0, :]
 
-        return p_nonzero_n * torch.exp(log_mu_e_hi_intercept_n) * exp_log1p_eta_averaged_n
+        return p_nonzero_n * torch.exp(log_mu_e_hi_intercept_n) * exp_log_eta_averaged_n
 
 
 class PosteriorGeneExpressionSampler(object):

@@ -170,8 +170,8 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
     def decode(self,
                beta_nr: torch.Tensor,
                cell_features_nf: torch.Tensor) -> Dict[str, torch.Tensor]:
-        eta_log1p_n = cell_features_nf[:, 0]
-        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * eta_log1p_n
+        log_eta_n = cell_features_nf[:, 0]
+        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n
         log_phi_e_hi_n = beta_nr[:, 2]
         logit_p_zero_e_hi_n = beta_nr[:, 3]
         return {
@@ -201,10 +201,10 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
 
         beta_nr = self.vsgp_gene_expression_prior.model(data)
         eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
-        log1p_eta_n = eta_n.log1p()
+        log_eta_n = eta_n.log()
 
         # calculate ZINB parameters
-        mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log1p_eta_n).exp()
+        mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n).exp()
         phi_e_hi_n = beta_nr[:, 2].exp()
         logit_p_zero_e_hi_n = beta_nr[:, 3]
 
