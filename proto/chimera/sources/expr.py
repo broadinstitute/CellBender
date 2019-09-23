@@ -30,6 +30,12 @@ class GeneExpressionPrior(torch.nn.Module):
     def guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         raise NotImplementedError
 
+    @abstractmethod
+    def decode(self,
+               beta_nr: torch.Tensor,
+               cell_features_nf: torch.Tensor) -> Dict[str, torch.Tensor]:
+        raise NotImplementedError
+
 
 class VSGPGeneExpressionPrior(GeneExpressionPrior):
     def __init__(self,
@@ -161,6 +167,18 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
         return beta_nr
 
+    def decode(self,
+               beta_nr: torch.Tensor,
+               cell_features_nf: torch.Tensor) -> Dict[str, torch.Tensor]:
+        eta_log1p_n = cell_features_nf[:, 0]
+        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * eta_log1p_n
+        log_phi_e_hi_n = beta_nr[:, 2]
+        logit_p_zero_e_hi_n = beta_nr[:, 3]
+        return {
+            'log_mu_e_hi_n': log_mu_e_hi_n,
+            'log_phi_e_hi_n': log_phi_e_hi_n,
+            'logit_p_zero_e_hi_n': logit_p_zero_e_hi_n}
+
 
 class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
     def __init__(
@@ -168,8 +186,8 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
             vsgp_gene_expression_prior: VSGPGeneExpressionPrior):
         super(VSGPGeneExpressionPriorPreTrainer, self).__init__()
         self.vsgp_gene_expression_prior = vsgp_gene_expression_prior
-        self.log_mean_total_molecules_per_cell = np.log(np.mean(
-            vsgp_gene_expression_prior.sc_fingerprint_dtm.total_obs_molecules_per_cell))
+        self.mean_total_molecules_per_cell = np.mean(
+            vsgp_gene_expression_prior.sc_fingerprint_dtm.total_obs_molecules_per_cell)
 
     def model(self, data: Dict[str, torch.Tensor]):
         fingerprint_tensor_nr = data['fingerprint_tensor']
@@ -182,12 +200,11 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
                     update_module_params=True)
 
         beta_nr = self.vsgp_gene_expression_prior.model(data)
-        log_eta_n = (
-                total_obs_molecules_per_cell_tensor_n.log()
-                - self.log_mean_total_molecules_per_cell)
+        eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
+        log1p_eta_n = eta_n.log1p()
 
         # calculate ZINB parameters
-        mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n).exp()
+        mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log1p_eta_n).exp()
         phi_e_hi_n = beta_nr[:, 2].exp()
         logit_p_zero_e_hi_n = beta_nr[:, 3]
 

@@ -9,11 +9,8 @@ from typing import List, Union, Dict, Callable, Optional
 
 from boltons.cacheutils import cachedproperty, cachedmethod
 
-from tqdm import tqdm
-
 from sklearn.decomposition import TruncatedSVD
 
-#from stats import ApproximateZINBFit
 from cellbender.sampling.fingerprint_sampler import CSRFloatMatrix, CSRBinaryMatrix, \
     SingleCellFingerprintStratifiedSampler
 
@@ -302,7 +299,6 @@ class SingleCellFingerprintDTM:
                  n_pca_features: int = 50,
                  n_pca_iters: int = 20,
                  count_trans_feature_extraction: Callable[[np.ndarray], np.ndarray] = np.log1p,
-                 #zinb_fitter_kwargs: Union[None, Dict[str, Union[int, float]]] = None,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
                  enable_cell_features: bool = False,
@@ -310,8 +306,6 @@ class SingleCellFingerprintDTM:
                  verbose: bool = True,
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
-        # if zinb_fitter_kwargs is None:
-        #     zinb_fitter_kwargs = dict()
 
         self.sc_fingerprint_base = sc_fingerprint_base
         self.low_family_size_cdf_threshold = low_family_size_cdf_threshold
@@ -332,9 +326,6 @@ class SingleCellFingerprintDTM:
         if np.any(sc_fingerprint_base.total_molecules_per_gene_g == 0):
             self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "
                                  "entire dataset!")
-
-        # # ZINB fitter
-        # self.zinb_fitter = ApproximateZINBFit(**zinb_fitter_kwargs)
 
     def _log_caching(self, name: str):
         if self.verbose:
@@ -661,42 +652,6 @@ class SingleCellFingerprintDTM:
             empirical_fsd_params[gene_index, 2] = p_obs
 
         return empirical_fsd_params
-
-    # @cachedproperty
-    # def empirical_e_hi_params(self) -> np.ndarray:
-    #     self._log_caching("empirical_e_hi_params")
-    #     # estimated probability of observing real molecules
-    #     p_obs_g = self.empirical_fsd_params[:, 2]
-    #
-    #     # fit zero-inflated negative-binomial
-    #     self._logger.warning("Fitting approximate ZINB to UMI counts (per gene)...")
-    #     empirical_e_hi_params = np.zeros((self.n_genes, 3), dtype=self.numpy_dtype)
-    #     for gene_index in tqdm(range(self.n_genes)):
-    #         # inflate the counts to account for p_obs
-    #         e_hi_est = np.asarray(self.sparse_count_matrix_csc[:, gene_index].todense()).squeeze(-1) / (
-    #                 p_obs_g[gene_index] + self.eps)
-    #         fit = self.zinb_fitter(e_hi_est)
-    #         if not fit['converged']:
-    #             self._logger.warning(f'ZINB fit to gene (internal index: {gene_index}) was not successful!')
-    #         empirical_e_hi_params[gene_index, 0] = fit['mu']
-    #         empirical_e_hi_params[gene_index, 1] = fit['phi']
-    #         empirical_e_hi_params[gene_index, 2] = fit['p_zero']
-    #     return empirical_e_hi_params
-
-    # @cachedproperty
-    # def empirical_mu_e_hi(self) -> np.ndarray:
-    #     self._log_caching("empirical_mu_e_hi")
-    #     return self.empirical_e_hi_params[:, 0]
-    #
-    # @cachedproperty
-    # def empirical_phi_e_hi(self) -> np.ndarray:
-    #     self._log_caching("empirical_phi_e_hi")
-    #     return self.empirical_e_hi_params[:, 1]
-    #
-    # @cachedproperty
-    # def empirical_p_zero_e_hi(self) -> np.ndarray:
-    #     self._log_caching("empirical_p_zero_e_hi")
-    #     return self.empirical_e_hi_params[:, 2]
 
     @cachedproperty
     def empirical_fsd_mu_hi(self) -> np.ndarray:

@@ -6,12 +6,13 @@ from boltons.cacheutils import cachedproperty
 import pyro
 from pyro import poutine
 import pyro.distributions as dist
-from pyro.distributions import TorchDistribution
 
 import torch
 from torch.distributions import constraints
 
-from pyro_extras import CustomLogProbTerm, MixtureDistribution, logaddexp, get_log_prob_compl, \
+from torchinterp1d import Interp1d
+
+from pyro_extras import CustomLogProbTerm, logaddexp, get_log_prob_compl, \
     get_binomial_samples_sparse_counts
 from fingerprint import SingleCellFingerprintDTM
 from fsd import FSDModel
@@ -24,7 +25,6 @@ from collections import defaultdict
 
 
 class DropletTimeMachineModel(torch.nn.Module):
-
     def __init__(self,
                  init_params_dict: Dict[str, Union[int, float, bool]],
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
@@ -72,6 +72,18 @@ class DropletTimeMachineModel(torch.nn.Module):
         # empirical normalization factors
         self.mean_total_molecules_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_molecules_per_cell).item()
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
+        self.eta_empirical_n = torch.tensor(
+            sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
+            device=device, dtype=dtype)
+        self.log1p_eta_empirical_n = self.eta_empirical_n.log1p()
+
+        # parameters for calculating and caching log1p_eta_empirical moment generating function
+        self.log1p_eta_empirical_mgf_min = init_params_dict['model.log1p_eta_empirical_mgf_min']
+        self.log1p_eta_empirical_mgf_max = init_params_dict['model.log1p_eta_empirical_mgf_max']
+        self.log1p_eta_empirical_mgf_steps = init_params_dict['model.log1p_eta_empirical_mgf_steps']
+
+        # 1D interpolation helper
+        self.interp1d = Interp1d()
 
         # logging
         self._logger = logging.getLogger()
@@ -160,13 +172,19 @@ class DropletTimeMachineModel(torch.nn.Module):
         beta_nr = self.gene_expression_prior.model(data)
 
         # empirical droplet efficiency
-        eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
+        eta_n = self.eta_empirical_n[cell_index_tensor_n]
+        log1p_eta_n = self.log1p_eta_empirical_n[cell_index_tensor_n]
 
         # calculate ZINB parameters
-        log_eta_n = eta_n.log()
-        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n
-        log_phi_e_hi_n = beta_nr[:, 2]
-        logit_p_zero_e_hi_n = beta_nr[:, 3]
+        e_hi_params_dict = self.gene_expression_prior.decode(
+            beta_nr=beta_nr,
+            cell_features_nf=log1p_eta_n.unsqueeze(-1))
+        log_mu_e_hi_n = e_hi_params_dict['log_mu_e_hi_n']
+        log_phi_e_hi_n = e_hi_params_dict['log_phi_e_hi_n']
+        logit_p_zero_e_hi_n = e_hi_params_dict['logit_p_zero_e_hi_n']
+
+        # mean e_hi per gene per cell
+        mu_e_hi_cell_averaged_n = self._get_mu_e_hi_eta_averaged_n(beta_nr=beta_nr)
 
         mu_e_hi_n = log_mu_e_hi_n.exp()
         phi_e_hi_n = log_phi_e_hi_n.exp()
@@ -219,12 +237,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             alpha_c=alpha_c,
             beta_c=beta_c,
             eta_n=eta_n,
-            mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
-            empirical_mean_obs_expr_per_gene_tensor_n=empirical_mean_obs_expr_per_gene_tensor_n,
-            p_obs_lo_n=p_obs_lo_n,
-            p_obs_hi_n=p_obs_hi_n,
             mu_fsd_hi_n=mu_fsd_hi_n,
-            downsampling_rate_tensor_n=downsampling_rate_tensor_n)
+            mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
+            mu_e_hi_cell_averaged_n=mu_e_hi_cell_averaged_n)
 
         if posterior_sampling_mode:
 
@@ -334,29 +349,20 @@ class DropletTimeMachineModel(torch.nn.Module):
             alpha_c: torch.Tensor,
             beta_c: torch.Tensor,
             eta_n: torch.Tensor,
-            mean_empirical_fsd_mu_hi: float,
-            empirical_mean_obs_expr_per_gene_tensor_n: torch.Tensor,
-            p_obs_lo_n: torch.Tensor,
-            p_obs_hi_n: torch.Tensor,
             mu_fsd_hi_n: torch.Tensor,
-            downsampling_rate_tensor_n: torch.Tensor) -> torch.Tensor:
+            mean_empirical_fsd_mu_hi: float,
+            mu_e_hi_cell_averaged_n: torch.Tensor) -> torch.Tensor:
         """Calculates the Poisson rate of chimeric molecule formation
 
         :param alpha_c: chimera formation coefficient (cell-size prefactor)
         :param beta_c: chimera formation coefficient (constant piece)
         :param eta_n: (relative) cell size scale factor
-        :param mean_empirical_fsd_mu_hi: empirical dataset-wide mean reads-per-molecule
-        :param empirical_mean_obs_expr_per_gene_tensor_n: empirical mean gene expression per cell
-        :param p_obs_lo_n: probability of observing a chimeric molecule
-        :param p_obs_hi_n: probability of observing a real molecule
         :param mu_fsd_hi_n: mean family size per real molecule
-        :param downsampling_rate_tensor_n: downsampling scale-factor of raw counts (applicable
-            only if downsampling regularization is used -- deprecated)
+        :param mu_e_hi_cell_averaged_n: mean expression per cell
         :return: Poisson rate of chimeric molecule formation
         """
-        estimated_mean_e_hi_n = empirical_mean_obs_expr_per_gene_tensor_n / p_obs_hi_n
-        scaled_mu_fsd_hi_n = mu_fsd_hi_n / (downsampling_rate_tensor_n * mean_empirical_fsd_mu_hi)
-        scaled_total_fragments_n = estimated_mean_e_hi_n * scaled_mu_fsd_hi_n
+        scaled_mu_fsd_hi_n = mu_fsd_hi_n / mean_empirical_fsd_mu_hi
+        scaled_total_fragments_n = mu_e_hi_cell_averaged_n * scaled_mu_fsd_hi_n
         mu_e_lo_n = (alpha_c * eta_n + beta_c) * scaled_total_fragments_n
         return mu_e_lo_n
 
@@ -425,40 +431,6 @@ class DropletTimeMachineModel(torch.nn.Module):
             log_p_nonzero_e_hi_n + log_poisson_nonzero_e_hi_contrib_n)
 
         return log_like_n
-
-    def _get_fsd_xi_prior_dist(self,
-                               fsd_xi_prior_locs_kq: torch.Tensor,
-                               fsd_xi_prior_scales_kq: torch.Tensor) -> TorchDistribution:
-        """Calculates the prior distribution for :math:`\\xi`, which is a marginalized Gaussian mixture.
-
-        :param fsd_xi_prior_locs_kq: location of Gaussian components
-        :param fsd_xi_prior_scales_kq: scale of Gaussian components
-        :return: a TorchDistribution
-        """
-        if self.fsd_gmm_num_components > 1:
-            # generate the marginalized GMM distribution w/ Dirichlet prior over the weights
-            fsd_xi_prior_weights_k = pyro.sample(
-                "fsd_xi_prior_weights_k",
-                dist.Dirichlet(
-                    self.fsd_gmm_dirichlet_concentration *
-                    torch.ones((self.fsd_gmm_num_components,), dtype=self.dtype, device=self.device)))
-            fsd_xi_prior_log_weights_k = fsd_xi_prior_weights_k.log()
-            fsd_xi_prior_log_weights_tuple = tuple(
-                fsd_xi_prior_log_weights_k[k]
-                for k in range(self.fsd_gmm_num_components))
-            fsd_xi_prior_components_tuple = tuple(
-                dist.Normal(fsd_xi_prior_locs_kq[k, :], fsd_xi_prior_scales_kq[k, :]).to_event(1)
-                for k in range(self.fsd_gmm_num_components))
-            fsd_xi_prior_dist = MixtureDistribution(
-                fsd_xi_prior_log_weights_tuple,
-                fsd_xi_prior_components_tuple)
-
-        else:
-            fsd_xi_prior_dist = dist.Normal(
-                fsd_xi_prior_locs_kq[0, :],
-                fsd_xi_prior_scales_kq[0, :]).to_event(1)
-
-        return fsd_xi_prior_dist
 
     @staticmethod
     def _sample_gene_plate_soft_constraints(
@@ -591,6 +563,35 @@ class DropletTimeMachineModel(torch.nn.Module):
                     active_constraints_dict[var_name]['upper_bound'] = set(nnz_activity.tolist())
 
         return dict(active_constraints_dict)
+
+    @cachedproperty
+    def log1p_eta_empirical_mgf(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        t_k = torch.linspace(
+            start=self.log1p_eta_empirical_mgf_min,
+            end=self.log1p_eta_empirical_mgf_max,
+            steps=self.log1p_eta_empirical_mgf_steps,
+            device=self.device,
+            dtype=self.dtype)
+        log1p_eta_empirical_mgf_k = torch.mean(
+            torch.exp(self.log1p_eta_empirical_n.unsqueeze(-1) * t_k),
+            dim=0)
+
+        return t_k, log1p_eta_empirical_mgf_k
+
+    def _get_mu_e_hi_eta_averaged_n(self, beta_nr: torch.Tensor):
+        log_mu_e_hi_intercept_n = beta_nr[:, 0]
+        log_mu_e_hi_slope_n = beta_nr[:, 1]
+        logit_p_zero_e_hi_n = beta_nr[:, 3]
+        p_nonzero_n = torch.sigmoid(-logit_p_zero_e_hi_n)
+        t_k, log1p_eta_empirical_mgf_k = self.log1p_eta_empirical_mgf
+
+        # perform eta-averaging
+        exp_log1p_eta_averaged_n = self.interp1d(
+            x=t_k,
+            y=log1p_eta_empirical_mgf_k,
+            xnew=log_mu_e_hi_slope_n)[0, :]
+
+        return p_nonzero_n * torch.exp(log_mu_e_hi_intercept_n) * exp_log1p_eta_averaged_n
 
 
 class PosteriorGeneExpressionSampler(object):
