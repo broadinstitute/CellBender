@@ -31,7 +31,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  gene_expression_prior: GeneExpressionPrior,
                  fsd_model: FSDModel,
-                 guide_spec_dict: Dict[str, str],
                  device=torch.device('cuda'),
                  dtype=torch.float):
         super(DropletTimeMachineModel, self).__init__()
@@ -40,7 +39,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.gene_expression_prior = gene_expression_prior
         self.fsd_model = fsd_model
-        self.guide_spec_dict = guide_spec_dict
 
         self.device = device
         self.dtype = dtype
@@ -176,9 +174,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         log_phi_e_hi_n = e_hi_params_dict['log_phi_e_hi_n']
         logit_p_zero_e_hi_n = e_hi_params_dict['logit_p_zero_e_hi_n']
 
-        # mean e_hi per gene per cell
-        mu_e_hi_cell_averaged_n = self._get_mu_e_hi_eta_averaged_n(beta_nr=beta_nr)
-
         mu_e_hi_n = log_mu_e_hi_n.exp()
         phi_e_hi_n = log_phi_e_hi_n.exp()
 
@@ -226,13 +221,18 @@ class DropletTimeMachineModel(torch.nn.Module):
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
         # calculate the (poisson) rate of chimeric molecule formation
+
+        # # mean e_hi per gene per cell
+        # mu_e_hi_cell_averaged_n = self._get_mu_e_hi_eta_averaged_n(beta_nr=beta_nr)
         mu_e_lo_n = self._get_mu_e_lo_n(
             alpha_c=alpha_c,
             beta_c=beta_c,
             eta_n=eta_n,
             mu_fsd_hi_n=mu_fsd_hi_n,
             mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
-            mu_e_hi_cell_averaged_n=mu_e_hi_cell_averaged_n)
+            p_obs_lo_n=p_obs_lo_n,
+            p_obs_hi_n=p_obs_hi_n,
+            total_obs_gene_expr_per_cell_n=empirical_mean_obs_expr_per_gene_tensor_n)
 
         if posterior_sampling_mode:
 
@@ -344,19 +344,20 @@ class DropletTimeMachineModel(torch.nn.Module):
             eta_n: torch.Tensor,
             mu_fsd_hi_n: torch.Tensor,
             mean_empirical_fsd_mu_hi: float,
-            mu_e_hi_cell_averaged_n: torch.Tensor) -> torch.Tensor:
+            p_obs_lo_n: torch.Tensor,
+            p_obs_hi_n: torch.Tensor,
+            total_obs_gene_expr_per_cell_n: torch.Tensor) -> torch.Tensor:
         """Calculates the Poisson rate of chimeric molecule formation
 
         :param alpha_c: chimera formation coefficient (cell-size prefactor)
         :param beta_c: chimera formation coefficient (constant piece)
-        :param eta_n: (relative) cell size scale factor
         :param mu_fsd_hi_n: mean family size per real molecule
-        :param mu_e_hi_cell_averaged_n: mean expression per cell
         :return: Poisson rate of chimeric molecule formation
         """
         scaled_mu_fsd_hi_n = mu_fsd_hi_n / mean_empirical_fsd_mu_hi
-        scaled_total_fragments_n = mu_e_hi_cell_averaged_n * scaled_mu_fsd_hi_n
-        mu_e_lo_n = (alpha_c * eta_n + beta_c) * scaled_total_fragments_n
+        rho_n = (alpha_c * eta_n + beta_c) * scaled_mu_fsd_hi_n
+        total_fragments_n = total_obs_gene_expr_per_cell_n / (rho_n * p_obs_lo_n + p_obs_hi_n)
+        mu_e_lo_n = rho_n * total_fragments_n
         return mu_e_lo_n
 
     @staticmethod
