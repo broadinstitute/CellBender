@@ -396,7 +396,9 @@ class SingleCellFingerprintDTM:
             data=collapsed_csr_fingerprint_matrix_scipy.data.astype(self.numpy_dtype))
         return collapsed_csr_fingerprint_matrix_cython
 
-    def get_single_gene_dense_fingerprint_array(self, gene_index: int, buffer: Optional[np.ndarray]) -> np.ndarray:
+    def get_single_gene_dense_fingerprint_array(self,
+                                                gene_index: int,
+                                                buffer: Optional[np.ndarray] = None) -> np.ndarray:
         if buffer is not None:
             assert buffer.shape == (self.n_cells, self.max_family_size)
             buffer.fill(0)

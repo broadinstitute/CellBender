@@ -46,13 +46,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.dtype = dtype
 
         # hyperparameters
-        self.fsd_gmm_num_components: int = init_params_dict['fsd.gmm_num_components']
-        self.fsd_gmm_dirichlet_concentration: float = init_params_dict['fsd.gmm_dirichlet_concentration']
-        self.fsd_gmm_init_xi_scale: float = init_params_dict['fsd.gmm_init_xi_scale']
-        self.fsd_gmm_min_xi_scale: float = init_params_dict['fsd.gmm_min_xi_scale']
-        self.fsd_gmm_max_xi_scale: Union[None, float] = init_params_dict['fsd.gmm_max_xi_scale']
-        self.fsd_gmm_init_components_perplexity: float = init_params_dict['fsd.gmm_init_components_perplexity']
-        self.fsd_gmm_min_weight_per_component: float = init_params_dict['fsd.gmm_min_weight_per_component']
         self.enable_fsd_w_dirichlet_reg: bool = init_params_dict['fsd.enable_fsd_w_dirichlet_reg']
         self.w_lo_dirichlet_reg_strength: float = init_params_dict['fsd.w_lo_dirichlet_reg_strength']
         self.w_hi_dirichlet_reg_strength: float = init_params_dict['fsd.w_hi_dirichlet_reg_strength']
