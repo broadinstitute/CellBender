@@ -9,7 +9,7 @@ from typing import List, Union, Dict, Callable, Optional, Tuple
 
 from boltons.cacheutils import cachedproperty, cachedmethod
 
-from sklearn.decomposition import TruncatedSVD
+from sklearn.decomposition import PCA
 
 from cellbender.sampling.fingerprint_sampler import CSRFloatMatrix, CSRBinaryMatrix, \
     SingleCellFingerprintStratifiedSampler
@@ -308,13 +308,10 @@ class SingleCellFingerprintDTM:
 
     def __init__(self,
                  sc_fingerprint_base: SingleCellFingerprintBase,
-                 low_family_size_cdf_threshold: float = 0.05,
-                 n_pca_features: int = 50,
-                 n_pca_iters: int = 20,
-                 count_trans_feature_extraction: Callable[[np.ndarray], np.ndarray] = np.log1p,
+                 low_family_size_cdf_threshold: float = 0.20,
+                 n_cell_pca_features: int = 20,
                  gene_grouping_trans: Callable[[np.ndarray], np.ndarray] = np.log,
                  n_gene_groups: int = 10,
-                 enable_cell_features: bool = False,
                  allow_dense_int_ndarray: bool = False,
                  verbose: bool = True,
                  device: torch.device = torch.device("cuda"),
@@ -322,12 +319,9 @@ class SingleCellFingerprintDTM:
 
         self.sc_fingerprint_base = sc_fingerprint_base
         self.low_family_size_cdf_threshold = low_family_size_cdf_threshold
-        self.n_pca_features = n_pca_features
-        self.n_pca_iters = n_pca_iters
-        self.count_trans_feature_extraction = count_trans_feature_extraction
+        self.n_cell_pca_features = n_cell_pca_features
         self.gene_grouping_trans = gene_grouping_trans
         self.n_gene_groups = n_gene_groups
-        self.enable_cell_features = enable_cell_features
         self.allow_dense_int_ndarray = allow_dense_int_ndarray
         self.verbose = verbose
         self.device = device
@@ -339,6 +333,9 @@ class SingleCellFingerprintDTM:
         if np.any(sc_fingerprint_base.total_molecules_per_gene_g == 0):
             self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "
                                  "entire dataset!")
+
+        # placeholder for lazy initialization
+        self.highly_variable_gene_indices: Optional[List[int]] = None
 
     def _log_caching(self, name: str):
         if self.verbose:
@@ -370,6 +367,9 @@ class SingleCellFingerprintDTM:
     @cachedproperty
     def eps(self):
         return np.finfo(self.numpy_dtype).eps
+
+    def set_highly_variable_gene_indices(self, highly_variable_gene_indices: List[int]):
+        self.highly_variable_gene_indices = highly_variable_gene_indices
 
     @cachedproperty
     def dense_fingerprint_ndarray(self) -> np.ndarray:
@@ -546,58 +546,39 @@ class SingleCellFingerprintDTM:
         return self.total_obs_expr_per_gene.astype(self.numpy_dtype) / self.n_cells
 
     @cachedproperty
-    def trans_trunc_sparse_count_matrix_csr(self) -> sp.csr_matrix:
-        self._log_caching("trans_trunc_sparse_count_matrix_csr")
-        # transformed and family-size-truncated count matrix
-        trunc_sparse_count_matrix_csr = self.sparse_family_size_truncated_count_matrix_csr
-        return sp.csr_matrix(
-            (self.count_trans_feature_extraction(trunc_sparse_count_matrix_csr.data),
-             trunc_sparse_count_matrix_csr.indices,
-             trunc_sparse_count_matrix_csr.indptr),
-            shape=trunc_sparse_count_matrix_csr.shape,
-            dtype=np.float)
+    def features_per_cell(self) -> np.ndarray:
+        self._log_caching("features_per_cell")
 
-    @cachedproperty
-    def trans_trunc_count_matrix_features_truncated_svd_object(self) -> TruncatedSVD:
-        self._log_caching("trans_trunc_count_matrix_features_truncated_svd_object")
-        svd = TruncatedSVD(n_components=self.n_pca_features, n_iter=self.n_pca_iters)
-        return svd.fit(self.trans_trunc_sparse_count_matrix_csr)
+        # perform PCA over highly variable genes
+        assert self.highly_variable_gene_indices is not None, \
+            "Highly variable genes for PCA features are not provided yet -- cannot continue."
 
-    @cachedproperty
-    def svd_feature_loadings_per_cell(self) -> np.ndarray:
-        self._log_caching("svd_feature_loadings_per_cell")
-        svd = self.trans_trunc_count_matrix_features_truncated_svd_object
-        return svd.transform(self.trans_trunc_sparse_count_matrix_csr).astype(self.numpy_dtype)
+        # obtain raw counts of HVG
+        raw_count_matrix = np.asarray(
+            self.sparse_family_size_truncated_count_matrix_csc[:, self.highly_variable_gene_indices].todense()
+        ).astype(self.numpy_dtype)
 
-    @cachedproperty
-    def svd_feature_z_scores_per_cell(self) -> np.ndarray:
-        self._log_caching("svd_feature_z_scores_per_cell")
-        features = self.svd_feature_loadings_per_cell
-        features_mean, features_std = np.mean(features, 0), np.std(features, 0)
-        features_z_score = (features - features_mean[None, :]) / (self.eps + features_std[None, :])
-        return features_z_score.astype(self.numpy_dtype)
+        # normalize by empirical droplet efficiency (total UMIs per cell)
+        empirical_cell_size = self.total_obs_molecules_per_cell / np.mean(self.total_obs_molecules_per_cell)
+        normed_count_matrix = raw_count_matrix / empirical_cell_size[:, None]
 
-    @cachedproperty
-    def svd_feature_components(self) -> np.ndarray:
-        return self.trans_trunc_count_matrix_features_truncated_svd_object.components_.astype(self.numpy_dtype)
+        # log1p transformation after droplet efficiency normalization
+        trans_normed_count_matrix = np.log1p(normed_count_matrix)
 
-    @cachedproperty
-    def total_obs_molecules_feature_z_scores_per_cell(self) -> np.ndarray:
-        self._log_caching("total_obs_molecules_feature_z_scores_per_cell")
-        raw_counts = self.total_obs_molecules_per_cell.astype(self.numpy_dtype)
-        log1p_counts = np.log1p(raw_counts)
-        raw_mean, raw_std = np.mean(raw_counts), np.std(raw_counts)
-        log1p_mean, log1p_std = np.mean(log1p_counts), np.std(log1p_counts)
-        raw_z_score = (raw_counts - raw_mean) / (self.eps + raw_std)
-        log1p_z_score = (log1p_counts - log1p_mean) / (self.eps + log1p_std)
-        return np.hstack((raw_z_score[:, None], log1p_z_score[:, None])).astype(self.numpy_dtype)
+        # perform PCA
+        pca_features = PCA(n_components=self.n_cell_pca_features, whiten=True).fit_transform(
+            trans_normed_count_matrix)
 
-    @cachedproperty
-    def feature_z_scores_per_cell(self) -> np.ndarray:
-        self._log_caching("feature_z_scores_per_cell")
-        return np.hstack(
-            (self.svd_feature_z_scores_per_cell,
-             self.total_obs_molecules_feature_z_scores_per_cell)).astype(self.numpy_dtype)
+        # log empirical cell size
+        log_empirical_cell_size = np.log(empirical_cell_size)
+
+        # concatenate
+        full_features = np.concatenate(
+            (log_empirical_cell_size[:, None],
+             pca_features),
+            axis=1)
+
+        return full_features.astype(self.numpy_dtype)
 
     @cachedproperty
     def gene_groups_dict(self) -> Dict[int, List[int]]:
@@ -839,11 +820,8 @@ class SingleCellFingerprintDTM:
         fingerprint_tensor = torch.tensor(
             fingerprint_array[:mb_size, :], device=self.device, dtype=self.dtype)
 
-        if self.enable_cell_features:
-            cell_features_array = self.feature_z_scores_per_cell[cell_index_array, :]
-            cell_features_tensor = torch.tensor(cell_features_array, device=self.device, dtype=self.dtype)
-        else:
-            cell_features_tensor = None
+        cell_features_array = self.features_per_cell[cell_index_array, :]
+        cell_features_tensor = torch.tensor(cell_features_array, device=self.device, dtype=self.dtype)
 
         return {
             'cell_index_tensor': torch.tensor(
