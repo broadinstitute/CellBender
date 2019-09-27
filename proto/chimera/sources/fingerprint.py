@@ -5,7 +5,7 @@ import torch
 import operator
 import pickle
 import logging
-from typing import List, Union, Dict, Callable, Optional
+from typing import List, Union, Dict, Callable, Optional, Tuple
 
 from boltons.cacheutils import cachedproperty, cachedmethod
 
@@ -293,6 +293,10 @@ class SingleCellFingerprintBase:
         return self.keep_top_k_genes_by_expression(
             first_rank=0,
             last_rank=self.n_genes)
+
+    def get_internal_gene_indices_by_gene_name_prefix(self, prefix: str) -> List[int]:
+        return [gene_index for gene_index in range(self.n_genes)
+                if self.gene_names_list[gene_index].find(prefix) == 0]
 
 
 class SingleCellFingerprintDTM:
@@ -721,6 +725,30 @@ class SingleCellFingerprintDTM:
             indices_sz=len(self.sparse_count_matrix_csc.indices),
             indptr=self.sparse_count_matrix_csc.indptr.astype(np.int32),
             indices=self.sparse_count_matrix_csc.indices.astype(np.int32))
+
+    @cachedproperty
+    def family_size_truncated_expression_mean_std(self) -> Tuple[np.ndarray, np.ndarray]:
+        self._log_caching("family_size_truncated_expression_mean_std")
+        # calculate raw mean and std expression
+        family_size_truncated_expression_mean_g = np.zeros((self.n_genes,))
+        family_size_truncated_expression_std_g = np.zeros((self.n_genes,))
+
+        for gene_index in range(self.n_genes):
+            raw_trunc_expression_n = np.asarray(
+                self.sparse_family_size_truncated_count_matrix_csc[:, gene_index].todense()).flatten()
+            family_size_truncated_expression_mean_g[gene_index] = np.mean(raw_trunc_expression_n)
+            family_size_truncated_expression_std_g[gene_index] = np.std(raw_trunc_expression_n)
+
+        return (family_size_truncated_expression_mean_g,
+                family_size_truncated_expression_std_g)
+
+    @property
+    def family_size_truncated_expression_mean(self):
+        return self.family_size_truncated_expression_mean_std[0]
+
+    @property
+    def family_size_truncated_expression_std(self):
+        return self.family_size_truncated_expression_mean_std[1]
 
     @cachedproperty
     def gene_groups_csr_binary_matrix(self) -> CSRBinaryMatrix:

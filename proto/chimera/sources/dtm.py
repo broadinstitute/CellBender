@@ -571,6 +571,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         return t_k, log_eta_empirical_mgf_k
 
+    # TODO deprecated -- consider removing
     def _get_mu_e_hi_eta_averaged_n(self, beta_nr: torch.Tensor):
         log_mu_e_hi_intercept_n = beta_nr[:, 0]
         log_mu_e_hi_slope_n = beta_nr[:, 1]
