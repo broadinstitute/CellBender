@@ -58,12 +58,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             scale=init_params_dict['global.chimera_beta_c_prior_scale'])
 
         # empirical normalization factors
-        self.mean_total_molecules_per_cell: float = np.mean(sc_fingerprint_dtm.total_obs_molecules_per_cell).item()
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
-        self.eta_empirical_n = torch.tensor(
-            sc_fingerprint_dtm.total_obs_molecules_per_cell / self.mean_total_molecules_per_cell,
-            device=device, dtype=dtype)
-        self.log_eta_empirical_n = self.eta_empirical_n.log()
 
         # logging
         self._logger = logging.getLogger()
@@ -94,19 +89,26 @@ class DropletTimeMachineModel(torch.nn.Module):
             ``r`` for family size, ``g`` for gene index, ``q`` for the dimensions of the encoded fsd repr,
             and ``j`` for fsd components (could be different for lo and hi components).
         """
+        assert 'fingerprint_tensor' in data
+        assert 'gene_sampling_site_scale_factor_tensor' in data
+        assert 'cell_sampling_site_scale_factor_tensor' in data
+        assert 'empirical_fsd_mu_hi_tensor' in data
+        assert 'arithmetic_mean_obs_expr_per_gene_tensor' in data
+        assert 'gene_index_tensor' in data
+        assert 'cell_index_tensor' in data
+        assert 'cell_features_tensor' in data
+        assert 'empirical_droplet_efficiency' in data
 
         # input tensors
         fingerprint_tensor_nr = data['fingerprint_tensor']
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
-        downsampling_rate_tensor_n = data['downsampling_rate_tensor']
         empirical_fsd_mu_hi_tensor_n = data['empirical_fsd_mu_hi_tensor']
-        empirical_mean_obs_expr_per_gene_tensor_n = data['empirical_mean_obs_expr_per_gene_tensor']
+        arithmetic_mean_obs_expr_per_gene_tensor_n = data['arithmetic_mean_obs_expr_per_gene_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_index_tensor_n = data['cell_index_tensor']
-        total_obs_reads_per_cell_tensor_n = data['total_obs_reads_per_cell_tensor']
-        total_obs_molecules_per_cell_tensor_n = data['total_obs_molecules_per_cell_tensor']
         cell_features_tensor_nf = data['cell_features_tensor']
+        eta_n = data['empirical_droplet_efficiency']
 
         # sizes
         mb_size = fingerprint_tensor_nr.shape[0]
@@ -153,11 +155,8 @@ class DropletTimeMachineModel(torch.nn.Module):
         # get e_hi prior parameters (per cell)
         beta_nr = self.gene_expression_prior.model(data)
 
-        # empirical droplet efficiency
-        eta_n = self.eta_empirical_n[cell_index_tensor_n]
-        log_eta_n = self.log_eta_empirical_n[cell_index_tensor_n]
-
         # calculate ZINB parameters
+        log_eta_n = eta_n.log()
         e_hi_params_dict = self.gene_expression_prior.decode(
             beta_nr=beta_nr,
             cell_features_nf=log_eta_n.unsqueeze(-1))
@@ -222,7 +221,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
             p_obs_lo_n=p_obs_lo_n,
             p_obs_hi_n=p_obs_hi_n,
-            total_obs_gene_expr_per_cell_n=empirical_mean_obs_expr_per_gene_tensor_n)
+            total_obs_gene_expr_per_cell_n=arithmetic_mean_obs_expr_per_gene_tensor_n)
 
         if posterior_sampling_mode:
 
@@ -616,7 +615,7 @@ class PosteriorGeneExpressionSampler(object):
             the trained model context.
         """
         assert run_mode in {"only_observed", "full"}
-        minibatch_data = self.dtm_model.sc_fingerprint_dtm.generate_single_gene_minibatch_data(
+        minibatch_data = self.dtm_model.sc_fingerprint_dtm.generate_single_gene_minibatch_data_for_dtm(
             gene_index=gene_index,
             cell_index_list=cell_index_list,
             n_particles_cell=n_particles_cell)

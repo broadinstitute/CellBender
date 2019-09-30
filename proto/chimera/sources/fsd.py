@@ -564,8 +564,10 @@ class FSDModelGPLVM(FSDModel):
 
     @autoname.scope(prefix="fsd")
     def model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        assert 'gene_sampling_site_scale_factor_tensor' in data
+
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
-        batch_size = data['fingerprint_tensor'].shape[0]
+        batch_size = gene_sampling_site_scale_factor_tensor_n.shape[0]
 
         # sample fsd latent from N(0, 1)
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
@@ -593,6 +595,9 @@ class FSDModelGPLVM(FSDModel):
 
     @autoname.scope(prefix="fsd")
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        assert 'gene_sampling_site_scale_factor_tensor' in data
+        assert 'gene_index_tensor' in data
+
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 

@@ -44,10 +44,8 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
                  n_inducing_points: int,
                  init_rbf_kernel_variance: float,
                  init_rbf_kernel_lengthscale: float,
-                 init_linear_kernel_variance: float,
                  init_whitenoise_kernel_variance: float,
-                 init_constant_kernel_variance: float,
-                 init_beta_posterior_scale: float,
+                 init_posterior_scale: float,
                  init_mean_intercept: np.ndarray,
                  init_mean_slope: np.ndarray,
                  cholesky_jitter: float,
@@ -60,12 +58,13 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         self.dtype = dtype
 
         # feature space
-        self.log_mean_obs_expr_g1 = torch.log(
-            torch.tensor(sc_fingerprint_dtm.mean_obs_expr_per_gene, device=device, dtype=dtype)).unsqueeze(-1)
+        self.log_geometric_mean_obs_expr_g1 = torch.log(
+            torch.tensor(sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene,
+                         device=device, dtype=dtype)).unsqueeze(-1)
 
         # inducing points
-        lo = torch.min(self.log_mean_obs_expr_g1)
-        hi = torch.max(self.log_mean_obs_expr_g1)
+        lo = torch.min(self.log_geometric_mean_obs_expr_g1).item()
+        hi = torch.max(self.log_geometric_mean_obs_expr_g1).item()
         r = hi - lo
         self.inducing_points_k1 = torch.linspace(
             lo - 0.25 * r,
@@ -78,27 +77,11 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
             variance=torch.tensor(init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=torch.tensor(init_rbf_kernel_lengthscale, device=device, dtype=dtype))
-        
-#         kernel_linear = kernels.Linear(
-#             input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
-#             variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
-        
-#         kernel_constant = kernels.Constant(
-#             input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
-#             variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype))
 
         kernel_whitenoise = kernels.WhiteNoise(
             input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
             variance=torch.tensor(init_whitenoise_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise.set_constraint("variance", constraints.greater_than(min_noise))
-        
-#         kernel_full = kernels.Sum(
-#             kernel_rbf,
-#             kernels.Sum(
-#                 kernel_linear,
-#                 kernels.Sum(
-#                     kernel_whitenoise,
-#                     kernel_constant)))
 
         kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
@@ -113,7 +96,7 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
         # instantiate VSGP model
         self.vsgp = VariationalSparseGP(
-            X=self.log_mean_obs_expr_g1,
+            X=self.log_geometric_mean_obs_expr_g1,
             y=None,
             kernel=kernel_full,
             Xu=self.inducing_points_k1,
@@ -126,10 +109,10 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         # posterior parameters
         pyro.param(
             "beta_posterior_loc_gr",
-            lambda: mean_function(self.log_mean_obs_expr_g1).permute(-1, -2).detach().clone())
+            lambda: mean_function(self.log_geometric_mean_obs_expr_g1).permute(-1, -2).detach().clone())
         pyro.param(
             "beta_posterior_scale_gr",
-            init_beta_posterior_scale * torch.ones(
+            init_posterior_scale * torch.ones(
                 (self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionPrior.LATENT_DIM), device=device, dtype=dtype),
             constraint=constraints.positive)
 
@@ -138,11 +121,14 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
     @autoname.scope(prefix="expr")
     def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
-        log_mean_obs_expr_n1 = data['empirical_mean_obs_expr_per_gene_tensor'].log().unsqueeze(-1)
+        assert 'geometric_mean_obs_expr_per_gene_tensor' in data
+        assert 'gene_sampling_site_scale_factor_tensor' in data
+
+        log_geometric_mean_obs_expr_n1 = data['geometric_mean_obs_expr_per_gene_tensor'].log().unsqueeze(-1)
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
 
         # sample all points
-        self.vsgp.set_data(X=log_mean_obs_expr_n1, y=None)
+        self.vsgp.set_data(X=log_geometric_mean_obs_expr_n1, y=None)
         beta_loc_rn, beta_var_rn = self.vsgp.model()
         beta_loc_nr = beta_loc_rn.permute(-1, -2)
         beta_scale_nr = beta_var_rn.permute(-1, -2).sqrt()
@@ -158,6 +144,9 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
     @autoname.scope(prefix="expr")
     def guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+        assert 'gene_sampling_site_scale_factor_tensor' in data
+        assert 'gene_index_tensor' in data
+
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 
@@ -200,9 +189,13 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
             vsgp_gene_expression_prior.sc_fingerprint_dtm.total_obs_molecules_per_cell)
 
     def model(self, data: Dict[str, torch.Tensor]):
+        assert 'fingerprint_tensor' in data
+        assert 'cell_sampling_site_scale_factor_tensor' in data
+        assert 'empirical_droplet_efficiency' in data
+
         fingerprint_tensor_nr = data['fingerprint_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
-        total_obs_molecules_per_cell_tensor_n = data['total_obs_molecules_per_cell_tensor']
+        eta_n = data['empirical_droplet_efficiency']
 
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
@@ -213,7 +206,6 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
         beta_nr = self.vsgp_gene_expression_prior.model(data)
 
         # calculate NB parameters
-        eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
         log_eta_n = eta_n.log()
         cell_features_nf = log_eta_n.unsqueeze(-1)
         e_hi_params_dict = self.vsgp_gene_expression_prior.decode(
