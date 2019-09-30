@@ -40,11 +40,13 @@ class GeneExpressionModel(Parameterized):
 
 
 class VSGPGeneExpressionModel(GeneExpressionModel):
+    DEFAULT_GENE_GROUP_NAME = 'all genes'
     INPUT_DIM = 1
     LATENT_DIM = 3
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
+                 gene_group_name: Optional[str],
                  n_inducing_points: int,
                  init_rbf_kernel_variance: float,
                  init_rbf_kernel_lengthscale: float,
@@ -60,6 +62,11 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.device = device
         self.dtype = dtype
+
+        if gene_group_name is not None:
+            self.gene_group_name = gene_group_name
+        else:
+            self.gene_group_name = VSGPGeneExpressionModel.DEFAULT_GENE_GROUP_NAME
 
         # feature space
         self.log_geometric_mean_obs_expr_g1 = torch.log(
@@ -122,6 +129,8 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
     @autoname.scope(prefix="expr")
     def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         self.set_mode("model")
+        pyro.module("vsgp", self.vsgp, update_module_params=True)
+
         assert 'geometric_mean_obs_expr_per_gene_tensor' in data
         assert 'gene_sampling_site_scale_factor_tensor' in data
 
@@ -146,6 +155,8 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
     @autoname.scope(prefix="expr")
     def guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         self.set_mode("guide")
+        pyro.module("vsgp", self.vsgp, update_module_params=True)
+
         assert 'gene_sampling_site_scale_factor_tensor' in data
         assert 'gene_index_tensor' in data
 
@@ -178,26 +189,17 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
         }
 
 
-# todo must pretrain on FST count matrix!
 class VSGPGeneExpressionModelPreTrainer:
-    DEFAULT_GENE_GROUP_NAME = 'all genes'
-
     def __init__(
             self,
             vsgp_gene_expression_model: VSGPGeneExpressionModel,
             sc_fingerprint_dtm: SingleCellFingerprintDTM,
-            gene_group_name: Optional[str],
             adam_lr: float = 1e-2,
             adam_betas: Tuple[float, float] = (0.9, 0.99)):
         super(VSGPGeneExpressionModelPreTrainer, self).__init__()
 
         self.vsgp_gene_expression_model = vsgp_gene_expression_model
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
-
-        if gene_group_name is not None:
-            self.gene_group_name = gene_group_name
-        else:
-            self.gene_group_name = VSGPGeneExpressionModelPreTrainer.DEFAULT_GENE_GROUP_NAME
 
         # training
         self.params = list(vsgp_gene_expression_model.parameters())
@@ -212,6 +214,9 @@ class VSGPGeneExpressionModelPreTrainer:
         self.trained = False
 
     def model(self, data: Dict[str, torch.Tensor]):
+        pyro.module(
+            "vsgp_gene_expression_model", self.vsgp_gene_expression_model,
+            update_module_params=True)
         assert 'fingerprint_tensor' in data
         assert 'cell_sampling_site_scale_factor_tensor' in data
         assert 'empirical_droplet_efficiency_tensor' in data
@@ -244,6 +249,9 @@ class VSGPGeneExpressionModelPreTrainer:
                 obs=e_obs_n)
 
     def guide(self, data):
+        pyro.module(
+            "vsgp_gene_expression_model", self.vsgp_gene_expression_model,
+            update_module_params=True)
         self.vsgp_gene_expression_model.guide(data)
 
     def run_training(self,
@@ -257,7 +265,8 @@ class VSGPGeneExpressionModelPreTrainer:
         i_iter = 0
         mb_loss_list = []
 
-        logging.warning(f"[VSGPGeneExpressionModelPreTrainer for {self.gene_group_name}] training started...")
+        logging.warning(f"[VSGPGeneExpressionModelPreTrainer for "
+                        f"{self.vsgp_gene_expression_model.gene_group_name}] training started...")
 
         while i_iter < n_training_iters:
             mb_data = self.sc_fingerprint_dtm.generate_stratified_sample_for_dtm(
@@ -285,7 +294,8 @@ class VSGPGeneExpressionModelPreTrainer:
                 mb_loss_list = []
                 t0 = t1
 
-        logging.warning(f"[ExpressionGPRegression for {self.gene_group_name}] training finished.")
+        logging.warning(f"[VSGPGeneExpressionModelPreTrainer for "
+                        f"{self.vsgp_gene_expression_model.gene_group_name}] training finished.")
 
         self.trained = True
 
