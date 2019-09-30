@@ -1,24 +1,28 @@
 import numpy as np
 from typing import Tuple, List, Dict, Union, Any, Callable, Generator, Optional
 from abc import abstractmethod
+import logging
+import time
 
 import torch
 from torch.distributions import constraints
 
 import pyro
-import pyro.distributions as dist
 from pyro import poutine
+import pyro.distributions as dist
 from pyro.contrib import autoname
 from pyro.contrib.gp.models import VariationalSparseGP
+from pyro.contrib.gp.parameterized import Parameterized, Parameter
+from pyro.infer import SVI, Trace_ELBO
 import pyro.contrib.gp.kernels as kernels
 
 from pyro_extras import NegativeBinomial
 from fingerprint import SingleCellFingerprintDTM
 
 
-class GeneExpressionPrior(torch.nn.Module):
+class GeneExpressionModel(Parameterized):
     def __init__(self):
-        super(GeneExpressionPrior, self).__init__()
+        super(GeneExpressionModel, self).__init__()
 
     @abstractmethod
     def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -35,7 +39,7 @@ class GeneExpressionPrior(torch.nn.Module):
         raise NotImplementedError
 
 
-class VSGPGeneExpressionPrior(GeneExpressionPrior):
+class VSGPGeneExpressionModel(GeneExpressionModel):
     INPUT_DIM = 1
     LATENT_DIM = 3
 
@@ -52,7 +56,7 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
                  min_noise: float,
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
-        super(VSGPGeneExpressionPrior, self).__init__()
+        super(VSGPGeneExpressionModel, self).__init__()
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.device = device
         self.dtype = dtype
@@ -74,21 +78,19 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
         # GP kernel setup
         kernel_rbf = kernels.RBF(
-            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
+            input_dim=VSGPGeneExpressionModel.INPUT_DIM,
             variance=torch.tensor(init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=torch.tensor(init_rbf_kernel_lengthscale, device=device, dtype=dtype))
-
         kernel_whitenoise = kernels.WhiteNoise(
-            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
+            input_dim=VSGPGeneExpressionModel.INPUT_DIM,
             variance=torch.tensor(init_whitenoise_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise.set_constraint("variance", constraints.greater_than(min_noise))
-
         kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
         # mean subtraction
-        self.f_mean_intercept_r = torch.nn.Parameter(
+        self.f_mean_intercept_r = Parameter(
             torch.tensor(init_mean_intercept, device=device, dtype=dtype))
-        self.f_mean_slope_r = torch.nn.Parameter(
+        self.f_mean_slope_r = Parameter(
             torch.tensor(init_mean_slope, device=device, dtype=dtype))
 
         def mean_function(x_n1: torch.Tensor):
@@ -102,25 +104,24 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             Xu=self.inducing_points_k1,
             likelihood=None,
             mean_function=mean_function,
-            latent_shape=torch.Size([VSGPGeneExpressionPrior.LATENT_DIM]),
+            latent_shape=torch.Size([VSGPGeneExpressionModel.LATENT_DIM]),
             whiten=True,
             jitter=cholesky_jitter)
 
         # posterior parameters
-        pyro.param(
-            "beta_posterior_loc_gr",
-            lambda: mean_function(self.log_geometric_mean_obs_expr_g1).permute(-1, -2).detach().clone())
-        pyro.param(
-            "beta_posterior_scale_gr",
+        self.beta_posterior_loc_gr = Parameter(
+            mean_function(self.log_geometric_mean_obs_expr_g1).permute(-1, -2).detach().clone())
+        self.beta_posterior_scale_gr = Parameter(
             init_posterior_scale * torch.ones(
-                (self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionPrior.LATENT_DIM), device=device, dtype=dtype),
-            constraint=constraints.positive)
+                (self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionModel.LATENT_DIM), device=device, dtype=dtype))
+        self.set_constraint("beta_posterior_scale_gr", constraints.positive)
 
         # send parameters to device
         self.to(device)
 
     @autoname.scope(prefix="expr")
     def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+        self.set_mode("model")
         assert 'geometric_mean_obs_expr_per_gene_tensor' in data
         assert 'gene_sampling_site_scale_factor_tensor' in data
 
@@ -144,6 +145,7 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
     @autoname.scope(prefix="expr")
     def guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+        self.set_mode("guide")
         assert 'gene_sampling_site_scale_factor_tensor' in data
         assert 'gene_index_tensor' in data
 
@@ -153,15 +155,12 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
         self.vsgp.guide()
 
-        beta_posterior_loc_gr = pyro.param("beta_posterior_loc_gr")
-        beta_posterior_scale_gr = pyro.param("beta_posterior_scale_gr")
-        
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
             beta_nr = pyro.sample(
                 "beta_nr",
                 dist.Normal(
-                    loc=beta_posterior_loc_gr[gene_index_tensor_n, :],
-                    scale=beta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1))
+                    loc=self.beta_posterior_loc_gr[gene_index_tensor_n, :],
+                    scale=self.beta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1))
 
         return beta_nr
 
@@ -179,14 +178,38 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         }
 
 
-class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
+# todo must pretrain on FST count matrix!
+class VSGPGeneExpressionModelPreTrainer:
+    DEFAULT_GENE_GROUP_NAME = 'all genes'
+
     def __init__(
             self,
-            vsgp_gene_expression_prior: VSGPGeneExpressionPrior):
-        super(VSGPGeneExpressionPriorPreTrainer, self).__init__()
-        self.vsgp_gene_expression_prior = vsgp_gene_expression_prior
-        self.mean_total_molecules_per_cell = np.mean(
-            vsgp_gene_expression_prior.sc_fingerprint_dtm.total_obs_molecules_per_cell)
+            vsgp_gene_expression_model: VSGPGeneExpressionModel,
+            sc_fingerprint_dtm: SingleCellFingerprintDTM,
+            gene_group_name: Optional[str],
+            adam_lr: float = 1e-2,
+            adam_betas: Tuple[float, float] = (0.9, 0.99)):
+        super(VSGPGeneExpressionModelPreTrainer, self).__init__()
+
+        self.vsgp_gene_expression_model = vsgp_gene_expression_model
+        self.sc_fingerprint_dtm = sc_fingerprint_dtm
+
+        if gene_group_name is not None:
+            self.gene_group_name = gene_group_name
+        else:
+            self.gene_group_name = VSGPGeneExpressionModelPreTrainer.DEFAULT_GENE_GROUP_NAME
+
+        # training
+        self.params = list(vsgp_gene_expression_model.parameters())
+        self.optim = pyro.optim.Adam({'lr': adam_lr, 'betas': adam_betas})
+        self.svi = SVI(
+            model=self.model,
+            guide=self.guide,
+            optim=self.optim,
+            loss=Trace_ELBO())
+        self.loss_scale = sc_fingerprint_dtm.n_genes * sc_fingerprint_dtm.n_cells
+        self.loss_hist = []
+        self.trained = False
 
     def model(self, data: Dict[str, torch.Tensor]):
         assert 'fingerprint_tensor' in data
@@ -199,16 +222,13 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
 
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
-        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior,
-                    update_module_params=True)
-
         # sample from GP prior
-        beta_nr = self.vsgp_gene_expression_prior.model(data)
+        beta_nr = self.vsgp_gene_expression_model.model(data)
 
         # calculate NB parameters
         log_eta_n = eta_n.log()
         cell_features_nf = log_eta_n.unsqueeze(-1)
-        e_hi_params_dict = self.vsgp_gene_expression_prior.decode(
+        e_hi_params_dict = self.vsgp_gene_expression_model.decode(
             beta_nr=beta_nr,
             cell_features_nf=cell_features_nf)
         mu_e_hi_n = e_hi_params_dict['log_mu_e_hi_n'].exp()
@@ -224,9 +244,50 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
                 obs=e_obs_n)
 
     def guide(self, data):
-        pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior,
-                    update_module_params=True)
-        self.vsgp_gene_expression_prior.guide(data)
+        self.vsgp_gene_expression_model.guide(data)
+
+    def run_training(self,
+                     n_training_iters: int = 1000,
+                     train_log_frequency: int = 100,
+                     minibatch_genes_per_gene_group: int = 20,
+                     minibatch_expressing_cells_per_gene: int = 20,
+                     minibatch_silent_cells_per_gene: int = 5,
+                     minibatch_sampling_strategy: str = 'without_replacement'):
+        t0 = time.time()
+        i_iter = 0
+        mb_loss_list = []
+
+        logging.warning(f"[VSGPGeneExpressionModelPreTrainer for {self.gene_group_name}] training started...")
+
+        while i_iter < n_training_iters:
+            mb_data = self.sc_fingerprint_dtm.generate_stratified_sample_for_dtm(
+                minibatch_genes_per_gene_group,
+                minibatch_expressing_cells_per_gene,
+                minibatch_silent_cells_per_gene,
+                minibatch_sampling_strategy)
+
+            mb_loss = self.svi.step(mb_data) / self.loss_scale
+
+            mb_loss_list.append(mb_loss)
+            self.loss_hist.append(mb_loss)
+            i_iter += 1
+
+            if i_iter % train_log_frequency == 0 and i_iter > 0:
+                # calculate loss stats
+                t1 = time.time()
+                mb_loss_mean, mb_loss_std = np.mean(mb_loss_list), np.std(mb_loss_list)
+
+                logging.warning(
+                    f'Iteration number: {i_iter}, loss: {mb_loss_mean:.3f} +- {mb_loss_std:.3f}, '
+                    f'time: {(t1 - t0):.3f}s')
+
+                # reset
+                mb_loss_list = []
+                t0 = t1
+
+        logging.warning(f"[ExpressionGPRegression for {self.gene_group_name}] training finished.")
+
+        self.trained = True
 
 
 ##############

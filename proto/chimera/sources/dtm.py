@@ -14,7 +14,7 @@ from pyro_extras import CustomLogProbTerm, logaddexp, get_log_prob_compl, \
     get_binomial_samples_sparse_counts
 from fingerprint import SingleCellFingerprintDTM
 from fsd import FSDModel
-from expr import GeneExpressionPrior
+from expr import GeneExpressionModel
 from importance_sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 from stats import int_ndarray_mode, gamma_loc_scale_to_concentration_rate
 
@@ -26,7 +26,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                  init_params_dict: Dict[str, Union[int, float, bool]],
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 gene_expression_prior: GeneExpressionPrior,
+                 gene_expression_model: GeneExpressionModel,
                  fsd_model: FSDModel,
                  device=torch.device('cuda'),
                  dtype=torch.float):
@@ -34,7 +34,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         self.model_constraint_params_dict = model_constraint_params_dict
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
-        self.gene_expression_prior = gene_expression_prior
+        self.gene_expression_model = gene_expression_model
         self.fsd_model = fsd_model
 
         self.device = device
@@ -117,7 +117,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # register the external modules
         pyro.module("fsd_model", self.fsd_model, update_module_params=True)
-        pyro.module("gene_expression_prior", self.gene_expression_prior, update_module_params=True)
+        pyro.module("gene_expression_model", self.gene_expression_model, update_module_params=True)
 
         # TODO move to __init__
         # chimera hyperparameters
@@ -153,11 +153,11 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(fsd_params_dict)
 
         # get e_hi prior parameters (per cell)
-        beta_nr = self.gene_expression_prior.model(data)
+        beta_nr = self.gene_expression_model.model(data)
 
         # calculate ZINB parameters
         log_eta_n = eta_n.log()
-        e_hi_params_dict = self.gene_expression_prior.decode(
+        e_hi_params_dict = self.gene_expression_model.decode(
             beta_nr=beta_nr,
             cell_features_nf=log_eta_n.unsqueeze(-1))
         log_mu_e_hi_n = e_hi_params_dict['log_mu_e_hi_n']
@@ -268,7 +268,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # register the external modules
         pyro.module("fsd_model", self.fsd_model, update_module_params=True)
-        pyro.module("gene_expression_prior", self.gene_expression_prior, update_module_params=True)
+        pyro.module("gene_expression_model", self.gene_expression_model, update_module_params=True)
 
         # point estimate for chimera parameters
         alpha_c_posterior_loc = pyro.param(
@@ -284,7 +284,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
 
         # e_Hi prior ZINB parameters
-        beta_nr = self.gene_expression_prior.guide(data)
+        beta_nr = self.gene_expression_model.guide(data)
 
         # fsd posterior parameters
         fsd_params_dict = self.fsd_model.guide(data)
