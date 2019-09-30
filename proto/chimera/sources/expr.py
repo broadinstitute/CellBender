@@ -12,9 +12,7 @@ from pyro.contrib import autoname
 from pyro.contrib.gp.models import VariationalSparseGP
 import pyro.contrib.gp.kernels as kernels
 
-from matplotlib import pylab
-
-from pyro_extras import ZeroInflatedNegativeBinomial
+from pyro_extras import NegativeBinomial
 from fingerprint import SingleCellFingerprintDTM
 
 
@@ -38,6 +36,9 @@ class GeneExpressionPrior(torch.nn.Module):
 
 
 class VSGPGeneExpressionPrior(GeneExpressionPrior):
+    INPUT_DIM = 1
+    LATENT_DIM = 3
+
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  n_inducing_points: int,
@@ -69,23 +70,21 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             device=device, dtype=dtype)
 
         # GP kernel setup
-        input_dim = 1
-        
         kernel_rbf = kernels.RBF(
-            input_dim=input_dim,
+            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
             variance=torch.tensor(init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=torch.tensor(init_rbf_kernel_lengthscale, device=device, dtype=dtype))
         
         kernel_linear = kernels.Linear(
-            input_dim=input_dim,
+            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
             variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
         
         kernel_constant = kernels.Constant(
-            input_dim=input_dim,
+            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
             variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype))
 
         kernel_whitenoise = kernels.WhiteNoise(
-            input_dim=input_dim,
+            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
             variance=torch.tensor(init_whitenoise_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise.set_constraint("variance", constraints.greater_than(min_noise))
         
@@ -101,6 +100,9 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         self.f_mean = torch.nn.Parameter(
             torch.tensor(init_beta_mean, device=device, dtype=dtype).unsqueeze(-1))
 
+        def mean_function(x: torch.Tensor):
+            return self.f_mean
+
         # instantiate VSGP model
         self.vsgp = VariationalSparseGP(
             X=self.log_mean_obs_expr_g,
@@ -108,8 +110,8 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             kernel=kernel_full,
             Xu=self.inducing_points,
             likelihood=None,
-            mean_function=lambda x: self.f_mean,
-            latent_shape=torch.Size([4]),
+            mean_function=mean_function,
+            latent_shape=torch.Size([VSGPGeneExpressionPrior.LATENT_DIM]),
             whiten=True,
             jitter=cholesky_jitter)
 
@@ -117,11 +119,11 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         pyro.param(
             "beta_posterior_loc_gr",
             lambda: self.f_mean.detach().clone().squeeze(-1).expand(
-                [self.sc_fingerprint_dtm.n_genes, 4]))
+                [self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionPrior.LATENT_DIM]))
         pyro.param(
             "beta_posterior_scale_gr",
             init_beta_posterior_scale * torch.ones(
-                (self.sc_fingerprint_dtm.n_genes, 4), device=device, dtype=dtype),
+                (self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionPrior.LATENT_DIM), device=device, dtype=dtype),
             constraint=constraints.positive)
 
         # send parameters to device
@@ -170,14 +172,15 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
     def decode(self,
                beta_nr: torch.Tensor,
                cell_features_nf: torch.Tensor) -> Dict[str, torch.Tensor]:
+
         log_eta_n = cell_features_nf[:, 0]
         log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n
         log_phi_e_hi_n = beta_nr[:, 2]
-        logit_p_zero_e_hi_n = beta_nr[:, 3]
+
         return {
             'log_mu_e_hi_n': log_mu_e_hi_n,
-            'log_phi_e_hi_n': log_phi_e_hi_n,
-            'logit_p_zero_e_hi_n': logit_p_zero_e_hi_n}
+            'log_phi_e_hi_n': log_phi_e_hi_n
+        }
 
 
 class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
@@ -199,21 +202,24 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
         pyro.module("vsgp_gene_expression_prior", self.vsgp_gene_expression_prior,
                     update_module_params=True)
 
+        # sample from GP prior
         beta_nr = self.vsgp_gene_expression_prior.model(data)
+
+        # calculate NB parameters
         eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
         log_eta_n = eta_n.log()
-
-        # calculate ZINB parameters
-        mu_e_hi_n = (beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n).exp()
-        phi_e_hi_n = beta_nr[:, 2].exp()
-        logit_p_zero_e_hi_n = beta_nr[:, 3]
+        cell_features_nf = log_eta_n.unsqueeze(-1)
+        e_hi_params_dict = self.gene_expression_prior.decode(
+            beta_nr=beta_nr,
+            cell_features_nf=cell_features_nf)
+        mu_e_hi_n = e_hi_params_dict['log_mu_e_hi_n'].exp()
+        phi_e_hi_n = e_hi_params_dict['log_phi_e_hi_n'].exp()
 
         with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
             # observe the empirical gene expression
             pyro.sample(
                 "e_obs",
-                ZeroInflatedNegativeBinomial(
-                    logit_p_zero=logit_p_zero_e_hi_n,
+                NegativeBinomial(
                     mu=mu_e_hi_n,
                     phi=phi_e_hi_n),
                 obs=e_obs_n)

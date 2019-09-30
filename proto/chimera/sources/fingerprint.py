@@ -369,6 +369,10 @@ class SingleCellFingerprintDTM:
         return np.finfo(self.numpy_dtype).eps
 
     def set_highly_variable_gene_indices(self, highly_variable_gene_indices: List[int]):
+        # assert that highly variable genes are not specified yet (as changing the indices will invalidate
+        # certain cached properties)
+        assert self.highly_variable_gene_indices is None, \
+            "Highly variable genes are already specified!"
         self.highly_variable_gene_indices = highly_variable_gene_indices
 
     @cachedproperty

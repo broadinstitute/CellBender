@@ -252,6 +252,19 @@ class HighlyVariableGenesSelector:
                 for prefix in hvg_gene_group_prefixes
             }
 
+            prev_indices = set()
+            for prefix, indices in self.hvg_gene_group_internal_indices_dict.items():
+                assert len(indices) > 0, \
+                    f"No genes could be associated to group '{prefix}' -- please either remove this"\
+                    f" group or assert that the prefix is specified correctly."
+                assert len(set(indices).intersection(prev_indices)) == 0, \
+                    "The provided gene group prefixes do not result in mutually exclusive group of genes!"
+                prev_indices = prev_indices.union(set(indices))
+
+            if len(prev_indices) < sc_fingerprint_dtm.n_genes:
+                logging.warning("Some of the genes in the fingerprint do not belong to any of the gene groups "
+                                "specified for highly variable gene selection!")
+
         # instantiate GP regressors
         self.expr_reg_dict: Dict[str, ExpressionGPRegression] = dict()
         for gene_group_name, internal_gene_indices in self.hvg_gene_group_internal_indices_dict.items():

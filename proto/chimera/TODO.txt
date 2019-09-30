@@ -1,0 +1,67 @@
+
+One JSON file to describe all parameters of the pipeline (for now)
+
+sub-tools:
+
+	1. generate-fingerprint
+
+
+	2. extract-droplet-features
+
+       inputs:
+         - fingerprint
+         - (optional) gene groups
+
+	   - always use family-size-truncated (FST) count matrix 
+
+	   - calculate droplet efficiencies
+	     Q: total UMIs? geometric mean? saturation curve? for now, let's use total UMIs
+
+	   - calculate log mean gene expression (geometric mean)
+
+	   - GP NB fit w/ linear droplet efficiency over log mean gene expression
+	     (similar to scTransform)
+
+	   - VST the FST count matrix wrt. to GP fit _prior_
+	   
+	   - select HVG from each gene group based on residual variance
+
+	   - perform PCA on VST count matrix
+
+	   outputs:
+	     - droplet pca features
+	     - droplet size features
+
+
+	3. model-fingerprint
+
+	   inputs:
+	     - droplet pca and size features
+
+       - pre-train gene expression prior over droplet pca and size features
+         (NB on FST count matrix)
+         
+         * a regularization to encourage smaller over-dispersion of NB
+
+       - train droplet-time-machine
+
+       - save model
+
+	4. back-to-droplets
+
+	   - inputs:
+	     - fingerprint
+	     - trained dtm model
+	     - gene indices
+
+	   - perform posterior sampling
+
+action items:
+
+  - get rid of zero inflation everywhere and produce a working version without zero 
+    inflation
+
+  - make a notebook for extract-droplet-features
+
+  - make a notebook for droplet-time-machine
+
