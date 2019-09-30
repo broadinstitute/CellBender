@@ -597,7 +597,8 @@ class SingleCellFingerprintDTM:
         self._log_caching("gene_groups_dict")
         # the "weight" of each gene is a monotonic (approximately logarithmic) function of its
         # total observed expression
-        weights = self.gene_grouping_trans(self.arithmetic_mean_obs_expr_per_gene)
+        total_obs_expr_per_gene = self.n_cells * self.arithmetic_mean_obs_expr_per_gene
+        weights = self.gene_grouping_trans(total_obs_expr_per_gene)
 
         # bucket genes into groups of equal total weight
         sorted_genes_idx_weight = sorted(enumerate(weights), key=operator.itemgetter(1), reverse=True)
