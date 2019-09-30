@@ -209,7 +209,7 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
         eta_n = total_obs_molecules_per_cell_tensor_n / self.mean_total_molecules_per_cell
         log_eta_n = eta_n.log()
         cell_features_nf = log_eta_n.unsqueeze(-1)
-        e_hi_params_dict = self.gene_expression_prior.decode(
+        e_hi_params_dict = self.vsgp_gene_expression_prior.decode(
             beta_nr=beta_nr,
             cell_features_nf=cell_features_nf)
         mu_e_hi_n = e_hi_params_dict['log_mu_e_hi_n'].exp()
