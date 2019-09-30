@@ -97,7 +97,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         assert 'gene_index_tensor' in data
         assert 'cell_index_tensor' in data
         assert 'cell_features_tensor' in data
-        assert 'empirical_droplet_efficiency' in data
+        assert 'empirical_droplet_efficiency_tensor' in data
 
         # input tensors
         fingerprint_tensor_nr = data['fingerprint_tensor']
@@ -108,7 +108,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         gene_index_tensor_n = data['gene_index_tensor']
         cell_index_tensor_n = data['cell_index_tensor']
         cell_features_tensor_nf = data['cell_features_tensor']
-        eta_n = data['empirical_droplet_efficiency']
+        eta_n = data['empirical_droplet_efficiency_tensor']
 
         # sizes
         mb_size = fingerprint_tensor_nr.shape[0]

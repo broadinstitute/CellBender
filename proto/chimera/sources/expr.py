@@ -191,11 +191,11 @@ class VSGPGeneExpressionPriorPreTrainer(torch.nn.Module):
     def model(self, data: Dict[str, torch.Tensor]):
         assert 'fingerprint_tensor' in data
         assert 'cell_sampling_site_scale_factor_tensor' in data
-        assert 'empirical_droplet_efficiency' in data
+        assert 'empirical_droplet_efficiency_tensor' in data
 
         fingerprint_tensor_nr = data['fingerprint_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
-        eta_n = data['empirical_droplet_efficiency']
+        eta_n = data['empirical_droplet_efficiency_tensor']
 
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
