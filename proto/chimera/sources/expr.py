@@ -48,7 +48,8 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
                  init_whitenoise_kernel_variance: float,
                  init_constant_kernel_variance: float,
                  init_beta_posterior_scale: float,
-                 init_beta_mean: np.ndarray,
+                 init_mean_intercept: np.ndarray,
+                 init_mean_slope: np.ndarray,
                  cholesky_jitter: float,
                  min_noise: float,
                  device: torch.device = torch.device('cuda'),
@@ -59,15 +60,18 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         self.dtype = dtype
 
         # feature space
-        self.log_mean_obs_expr_g = torch.log(
-            torch.tensor(sc_fingerprint_dtm.mean_obs_expr_per_gene, device=device, dtype=dtype))
+        self.log_mean_obs_expr_g1 = torch.log(
+            torch.tensor(sc_fingerprint_dtm.mean_obs_expr_per_gene, device=device, dtype=dtype)).unsqueeze(-1)
 
         # inducing points
-        self.inducing_points = torch.linspace(
-            torch.min(self.log_mean_obs_expr_g),
-            torch.max(self.log_mean_obs_expr_g),
+        lo = torch.min(self.log_mean_obs_expr_g1)
+        hi = torch.max(self.log_mean_obs_expr_g1)
+        r = hi - lo
+        self.inducing_points_k1 = torch.linspace(
+            lo - 0.25 * r,
+            hi + 0.25 * r,
             steps=n_inducing_points,
-            device=device, dtype=dtype)
+            device=device, dtype=dtype).unsqueeze(-1)
 
         # GP kernel setup
         kernel_rbf = kernels.RBF(
@@ -75,40 +79,44 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
             variance=torch.tensor(init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=torch.tensor(init_rbf_kernel_lengthscale, device=device, dtype=dtype))
         
-        kernel_linear = kernels.Linear(
-            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
-            variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
+#         kernel_linear = kernels.Linear(
+#             input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
+#             variance=torch.tensor(init_linear_kernel_variance, device=device, dtype=dtype))
         
-        kernel_constant = kernels.Constant(
-            input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
-            variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype))
+#         kernel_constant = kernels.Constant(
+#             input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
+#             variance=torch.tensor(init_constant_kernel_variance, device=device, dtype=dtype))
 
         kernel_whitenoise = kernels.WhiteNoise(
             input_dim=VSGPGeneExpressionPrior.INPUT_DIM,
             variance=torch.tensor(init_whitenoise_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise.set_constraint("variance", constraints.greater_than(min_noise))
         
-        kernel_full = kernels.Sum(
-            kernel_rbf,
-            kernels.Sum(
-                kernel_linear,
-                kernels.Sum(
-                    kernel_whitenoise,
-                    kernel_constant)))
+#         kernel_full = kernels.Sum(
+#             kernel_rbf,
+#             kernels.Sum(
+#                 kernel_linear,
+#                 kernels.Sum(
+#                     kernel_whitenoise,
+#                     kernel_constant)))
+
+        kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
         # mean subtraction
-        self.f_mean = torch.nn.Parameter(
-            torch.tensor(init_beta_mean, device=device, dtype=dtype).unsqueeze(-1))
+        self.f_mean_intercept_r = torch.nn.Parameter(
+            torch.tensor(init_mean_intercept, device=device, dtype=dtype))
+        self.f_mean_slope_r = torch.nn.Parameter(
+            torch.tensor(init_mean_slope, device=device, dtype=dtype))
 
-        def mean_function(x: torch.Tensor):
-            return self.f_mean
+        def mean_function(x_n1: torch.Tensor):
+            return (self.f_mean_intercept_r + self.f_mean_slope_r * x_n1).permute(-1, -2)
 
         # instantiate VSGP model
         self.vsgp = VariationalSparseGP(
-            X=self.log_mean_obs_expr_g,
+            X=self.log_mean_obs_expr_g1,
             y=None,
             kernel=kernel_full,
-            Xu=self.inducing_points,
+            Xu=self.inducing_points_k1,
             likelihood=None,
             mean_function=mean_function,
             latent_shape=torch.Size([VSGPGeneExpressionPrior.LATENT_DIM]),
@@ -118,8 +126,7 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
         # posterior parameters
         pyro.param(
             "beta_posterior_loc_gr",
-            lambda: self.f_mean.detach().clone().squeeze(-1).expand(
-                [self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionPrior.LATENT_DIM]))
+            lambda: mean_function(self.log_mean_obs_expr_g1).permute(-1, -2).detach().clone())
         pyro.param(
             "beta_posterior_scale_gr",
             init_beta_posterior_scale * torch.ones(
@@ -131,11 +138,11 @@ class VSGPGeneExpressionPrior(GeneExpressionPrior):
 
     @autoname.scope(prefix="expr")
     def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
-        log_mean_obs_expr_n = data['empirical_mean_obs_expr_per_gene_tensor'].log()
+        log_mean_obs_expr_n1 = data['empirical_mean_obs_expr_per_gene_tensor'].log().unsqueeze(-1)
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
 
         # sample all points
-        self.vsgp.set_data(X=log_mean_obs_expr_n, y=None)
+        self.vsgp.set_data(X=log_mean_obs_expr_n1, y=None)
         beta_loc_rn, beta_var_rn = self.vsgp.model()
         beta_loc_nr = beta_loc_rn.permute(-1, -2)
         beta_scale_nr = beta_var_rn.permute(-1, -2).sqrt()
