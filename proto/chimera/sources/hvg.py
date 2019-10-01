@@ -193,7 +193,7 @@ class HighlyVariableGenesSelector:
 
     @cachedproperty
     def pearson_residual_sorted_gene_indices_per_group(self) -> Dict[str, List[int]]:
-        pearson_residual_sorted_gene_indices_per_group_dict = Dict[str, List[int]]
+        pearson_residual_sorted_gene_indices_per_group_dict: Dict[str, List[int]] = dict()
         for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
             pearson_res_sorted_gene_indices_in_group = list(
                 map(itemgetter(0),
