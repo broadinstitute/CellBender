@@ -448,7 +448,7 @@ class SingleCellFingerprintDTM:
         return family_size_threshold_g
 
     @cachedproperty
-    def sparse_family_size_truncated_count_matrix_csr(self):
+    def sparse_family_size_truncated_count_matrix_csr(self) -> sp.csr_matrix:
         self._log_caching("sparse_family_size_truncated_count_matrix_csr")
         family_size_mask_g = (
                 np.arange(0, self.max_family_size)[:, None]
@@ -463,9 +463,14 @@ class SingleCellFingerprintDTM:
         return sp.vstack(rows, format='csr')
 
     @cachedproperty
-    def sparse_family_size_truncated_count_matrix_csc(self):
+    def sparse_family_size_truncated_count_matrix_csc(self) -> sp.csc_matrix:
         self._log_caching("sparse_family_size_truncated_count_matrix_csc")
         return sp.csc_matrix(self.sparse_family_size_truncated_count_matrix_csr)
+
+    @cachedproperty
+    def dense_family_size_truncated_count_matrix(self) -> np.ndarray:
+        self._log_caching("dense_family_size_truncated_count_matrix")
+        return np.asarray(self.sparse_family_size_truncated_count_matrix_csr.todense()).astype(self.numpy_dtype)
 
     @cachedproperty
     def dense_count_matrix_ndarray(self) -> np.ndarray:
@@ -918,20 +923,11 @@ class SingleCellFingerprintDTM:
         geometric_mean_obs_expr_per_gene_array = self.geometric_mean_obs_expr_per_gene[gene_index_array]
         empirical_droplet_efficiency_array = self.empirical_droplet_efficiency[cell_index_array]
 
-        collapsed_index_array = cell_index_array * self.n_genes + gene_index_array
         if counts_array is None:
             counts_array = np.zeros((mb_size,), dtype=self.numpy_dtype)
-        counts_array.fill(0)
-
-        # TODO
-        # TODO
-        # TODO
-        # TODO
-        # TODO slice counts
-        # TODO
-        # TODO
-        # TODO
-        # TODO
+        else:
+            counts_array.fill(0)
+        counts_array[:mb_size] = self.dense_family_size_truncated_count_matrix[cell_index_array, gene_index_array]
 
         counts_tensor = torch.tensor(
             counts_array[:mb_size], device=self.device, dtype=self.dtype)
