@@ -192,14 +192,24 @@ class HighlyVariableGenesSelector:
         return log_pearson_residual_std_per_group_dict
 
     @cachedproperty
-    def get_highly_variable_gene_indices(self) -> List[int]:
-        highly_variable_gene_per_group = int(np.ceil(self.hvg_n_selected_genes / self.n_groups))
-        highly_variable_gene_indices = []
+    def pearson_residual_sorted_gene_indices_per_group(self) -> Dict[str, List[int]]:
+        pearson_residual_sorted_gene_indices_per_group_dict = Dict[str, List[int]]
         for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
             pearson_res_sorted_gene_indices_in_group = list(
                 map(itemgetter(0),
                     sorted(enumerate(log_pearson_residual_std_g),
                            key=itemgetter(1), reverse=True)))
+            pearson_residual_sorted_gene_indices_per_group_dict[gene_group_name] = \
+                pearson_res_sorted_gene_indices_in_group
+        return pearson_residual_sorted_gene_indices_per_group_dict
+
+    @cachedproperty
+    def highly_variable_gene_indices(self) -> List[int]:
+        highly_variable_gene_per_group = int(np.ceil(self.hvg_n_selected_genes / self.n_groups))
+        highly_variable_gene_indices = []
+        for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
+            pearson_res_sorted_gene_indices_in_group = \
+                self.pearson_residual_sorted_gene_indices_per_group[gene_group_name]
             n_selected_in_group = min(highly_variable_gene_per_group, len(pearson_res_sorted_gene_indices_in_group))
             selected_gene_indices_in_group = pearson_res_sorted_gene_indices_in_group[:n_selected_in_group]
             gene_indices_in_group = self.gene_group_internal_indices_dict[gene_group_name]
@@ -208,82 +218,43 @@ class HighlyVariableGenesSelector:
             highly_variable_gene_indices += highly_variable_gene_indices_in_main_fingerprint
         return highly_variable_gene_indices
 
-    #
-    # def plot_diagnostics(self, plt: pylab):
-    #     # GP fits
-    #     fig, axs = plt.subplots(nrows=self.n_groups, ncols=2, figsize=(10, self.n_groups * 4))
-    #     if self.n_groups == 1:
-    #         axs = axs[None, :]
-    #     for gene_group_name, ax in zip(self.gene_group_internal_indices_dict.keys(), axs):
-    #         self.expr_reg_dict[gene_group_name].plot_gp_loss(ax[0])
-    #         self.expr_reg_dict[gene_group_name].plot_gp_fit(ax[1])
-    #     plt.tight_layout()
-    #
-    #     # HVG selection
-    #     for gene_group_name in self.gene_group_internal_indices_dict.keys():
-    #         plt.figure(figsize=(16, 16))
-    #         ax = plt.gca()
-    #         self.expr_reg_dict[gene_group_name].plot_highly_variable_genes(ax)
-    #         plt.tight_layout()
+    def plot_highly_variable_genes(self, gene_group_name: str, ax: Axes, top_n_annotate=10):
+        residual_log_std = self.log_pearson_residual_std_per_group[gene_group_name]
+        pearson_residual_sorted_gene_indices = \
+            self.pearson_residual_sorted_gene_indices_per_group[gene_group_name]
+        indices_to_annotate = pearson_residual_sorted_gene_indices[
+                              :min(top_n_annotate, len(pearson_residual_sorted_gene_indices))]
 
+        data_x = self.expr_model_dict[gene_group_name].log_geometric_mean_obs_expr_g1.detach().cpu().numpy()
+        gene_names_list_in_group = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]\
+            .sc_fingerprint_base.gene_names_list
+        data_y = residual_log_std
 
-#     def plot_gp_fit(self, ax: Axes, x_padding: float = 2.0, steps: int = 1000):
-#         x_test = torch.linspace(
-#             torch.min(self.data_x_t).item() - x_padding,
-#             torch.max(self.data_x_t).item() + x_padding,
-#             steps=steps,
-#             device=self.device, dtype=self.dtype)
-#
-#         with torch.no_grad():
-#             y_test_mean, y_test_std = self(x_test)
-#
-#         ax.scatter(
-#             self.data_x_t.cpu().numpy(), self.data_y_t.cpu().numpy(),
-#             s=1, alpha=0.2, color='black', label='data')
-#
-#         ax.fill_between(
-#             x_test.cpu().numpy(),
-#             (y_test_mean - 4.0 * y_test_std).cpu().numpy(),
-#             (y_test_mean + 4.0 * y_test_std).cpu().numpy(),
-#             color='C0', alpha=0.3)
-#
-#         ax.plot(x_test.cpu().numpy(), y_test_mean.cpu().numpy(),
-#                 '-', lw=2, color='red', label='GP full fit')
-#         ax.set_xlabel('log mean expression', fontsize=14)
-#         ax.set_ylabel('log std expression', fontsize=14)
-#         ax.set_title(f'GP regression (gene group: {self.gene_group_name})', fontsize=14)
-#         ax.legend()
-#
-#     def plot_gp_loss(self, ax: Axes):
-#         ax.plot(self.loss_hist)
-#         ax.set_title(f'GP training loss (gene group: {self.gene_group_name})', fontsize=14)
-#         ax.set_xlabel('iteration', fontsize=14)
-#         ax.set_ylabel('loss', fontsize=14)
-#
-#     def plot_highly_variable_genes(self, ax: Axes, top_n_annotate=50):
-#         residual_log_std = self.get_residual_log_std()
-#         highly_variable_indices = self.get_highly_variable_indices(top_n_annotate)
-#
-#         data_x = self.data_x_t.cpu().numpy()
-#         data_y = residual_log_std
-#
-#         # make scatter plot
-#         ax.scatter(
-#             data_x,
-#             data_y,
-#             s=10, alpha=0.9,
-#             c=residual_log_std,
-#             cmap=cm.coolwarm,
-#             vmin=np.min(residual_log_std),
-#             vmax=residual_log_std[highly_variable_indices[-1]])
-#
-#         # add gene names labels
-#         labels = []
-#         for gene_index in highly_variable_indices:
-#             labels.append(
-#                 ax.text(data_x[gene_index], data_y[gene_index], self.gene_names_array_g[gene_index], fontsize=10))
-#         adjust_text(labels, arrowprops=dict(arrowstyle="->", color='r', lw=0.5))
-#
-#         # add axis labels
-#         ax.set_xlabel('log mean expression', fontsize=14)
-#         ax.set_ylabel('log residual std expression', fontsize=14)
+        # make scatter plot
+        ax.scatter(data_x, data_y, s=10, alpha=0.5)
+
+        # add gene names labels
+        labels = []
+        for gene_index in indices_to_annotate:
+            labels.append(
+                ax.text(data_x[gene_index], data_y[gene_index], gene_names_list_in_group[gene_index], fontsize=10))
+        adjust_text(labels, arrowprops=dict(arrowstyle="->", color='r', lw=0.5))
+
+        # add axis labels
+        ax.set_xlabel('log mean expression', fontsize=14)
+        ax.set_ylabel('log residual std expression', fontsize=14)
+
+    def plot_diagnostics(self, plt: pylab):
+        fig, axs_matrix = plt.subplots(nrows=self.n_groups, ncols=2, figsize=(10, self.n_groups * 4))
+        if self.n_groups == 1:
+            axs_matrix = axs_matrix[None, :]
+        for gene_group_name, axs in zip(self.gene_group_internal_indices_dict.keys(), axs_matrix):
+            self.expr_model_trainer_dict[gene_group_name].plot_diagnostics(axs)
+        plt.tight_layout()
+
+        # HVG selection
+        for gene_group_name in self.gene_group_internal_indices_dict.keys():
+            plt.figure(figsize=(16, 16))
+            ax = plt.gca()
+            self.plot_highly_variable_genes(gene_group_name, ax)
+            plt.tight_layout()

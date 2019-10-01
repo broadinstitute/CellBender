@@ -196,6 +196,43 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             'log_phi_e_hi_n': log_phi_e_hi_n
         }
 
+    def plot_fit(self, axs):
+        # test x range
+        lo = self.log_geometric_mean_obs_expr_g1.min().item()
+        hi = self.log_geometric_mean_obs_expr_g1.max().item()
+        r = hi - lo
+        x_test_t = torch.linspace(
+            lo - 0.25 * r,
+            hi + 0.25 * r,
+            steps=500,
+            device=self.device, dtype=self.dtype).unsqueeze(-1)
+
+        with torch.no_grad():
+            self.vsgp.set_data(X=x_test_t, y=None)
+            beta_loc_rn, beta_var_rn = self.vsgp.model()
+            beta_loc_nr = beta_loc_rn.permute(-1, -2)
+            beta_scale_nr = beta_var_rn.permute(-1, -2).sqrt()
+        f_loc_numpy = beta_loc_nr.cpu().numpy()
+        f_scale_numpy = beta_scale_nr.cpu().numpy()
+
+        beta_posterior_loc_gr = self.beta_posterior_loc_gr.detach().cpu().numpy()
+
+        y_labels = ['$\\beta_0$', '$\\beta_1$', '$\\beta_2$']
+        x_test = x_test_t.cpu().numpy()
+        for i, ax in enumerate(axs):
+            ax.plot(x_test[:, 0], f_loc_numpy[:, i], color='red')
+            ax.fill_between(
+                x_test[:, 0],
+                f_loc_numpy[:, i] - 2.0 * f_scale_numpy[:, i],
+                f_loc_numpy[:, i] + 2.0 * f_scale_numpy[:, i],
+                color='C0', alpha=0.3)
+            gene_colors = np.zeros((beta_posterior_loc_gr.shape[0], 4))
+            gene_colors[:, 3] = 1
+            x_train = self.log_geometric_mean_obs_expr_g1.cpu().numpy()
+            ax.scatter(x_train, beta_posterior_loc_gr[:, i], s=1, color=gene_colors)
+            ax.set_ylabel(y_labels[i], fontsize=14)
+            ax.set_xlabel('$\log \,\, \\tilde{e}$', fontsize=14)
+
 
 class VSGPGeneExpressionModelTrainer:
     def __init__(
@@ -307,6 +344,19 @@ class VSGPGeneExpressionModelTrainer:
 
         self.trained = True
 
+    def plot_diagnostics(self, axs):
+        assert len(axs) == 4
+
+        # plot loss history
+        ax = axs[0]
+        ax.plot(self.loss_hist)
+        ax.set_title(f'GP training loss (gene group: '
+                     f'{self.vsgp_gene_expression_model.gene_group_name})', fontsize=14)
+        ax.set_xlabel('iteration', fontsize=14)
+        ax.set_ylabel('loss', fontsize=14)
+
+        # plot fit
+        self.vsgp_gene_expression_model.plot_fit(axs[1:])
 
 ##############
 # deprecated #
