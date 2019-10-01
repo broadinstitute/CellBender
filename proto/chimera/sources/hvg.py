@@ -206,7 +206,8 @@ class HighlyVariableGenesSelector:
             group_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
             sorted_cutoff_index = int(np.floor(
                 self.hvg_neglect_expr_bottom_fraction * group_sc_fingerprint_dtm.n_genes))
-            bottom_cutoff = np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index]
+            bottom_cutoff = np.log(
+                np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index])
             bottom_removed_gene_indices = [
                 gene_index for gene_index in range(group_sc_fingerprint_dtm.n_genes)
                 if group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene[gene_index] >= bottom_cutoff]
@@ -251,7 +252,7 @@ class HighlyVariableGenesSelector:
         group_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
         sorted_cutoff_index = int(np.floor(
             self.hvg_neglect_expr_bottom_fraction * group_sc_fingerprint_dtm.n_genes))
-        bottom_cutoff = np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index]
+        bottom_cutoff = np.log(np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index])
         colors = np.zeros((len(data_x), 4))
         colors[:, 3] = 0.5
         colors[data_x < bottom_cutoff, 0:3] = 0.5
