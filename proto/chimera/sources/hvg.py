@@ -114,6 +114,12 @@ class HighlyVariableGenesSelector:
                     other_sc_fingerprint_base=sc_fingerprint_dtm.sc_fingerprint_base.subset_genes(
                         [sc_fingerprint_dtm.sc_fingerprint_base.gene_idx_list[j]
                          for j in gene_group_fingerprint_indices]))
+
+                # workaround to make sure that all fingerprint share the same empirical droplet
+                # efficiency regardless of the included genes
+                grouped_sc_fingerprint_dtm.empirical_droplet_efficiency = \
+                    sc_fingerprint_dtm.empirical_droplet_efficiency
+
             else:
                 # no need to partition
                 grouped_sc_fingerprint_dtm = sc_fingerprint_dtm
@@ -253,7 +259,7 @@ class HighlyVariableGenesSelector:
         x_cutoff = np.sort(data_x)[sorted_cutoff_index]
         colors = np.zeros((len(data_x), 4))
         colors[:, 3] = 0.5
-        colors[data_x < x_cutoff, 0:3] = 0.5
+        colors[data_x < x_cutoff, 0] = 0.5
 
         # make scatter plot
         ax.scatter(data_x, data_y, s=10, c=colors)
