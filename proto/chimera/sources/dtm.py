@@ -615,7 +615,7 @@ class PosteriorGeneExpressionSampler(object):
             the trained model context.
         """
         assert run_mode in {"only_observed", "full"}
-        minibatch_data = self.dtm_model.sc_fingerprint_dtm.generate_single_gene_minibatch_data_for_dtm(
+        minibatch_data = self.dtm_model.sc_fingerprint_dtm.generate_single_gene_fingerprint_minibatch_data(
             gene_index=gene_index,
             cell_index_list=cell_index_list,
             n_particles_cell=n_particles_cell)

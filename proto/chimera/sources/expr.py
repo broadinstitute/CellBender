@@ -217,15 +217,13 @@ class VSGPGeneExpressionModelPreTrainer:
         pyro.module(
             "vsgp_gene_expression_model", self.vsgp_gene_expression_model,
             update_module_params=True)
-        assert 'fingerprint_tensor' in data
+        assert 'counts_tensor' in data
         assert 'cell_sampling_site_scale_factor_tensor' in data
         assert 'empirical_droplet_efficiency_tensor' in data
 
-        fingerprint_tensor_nr = data['fingerprint_tensor']
+        counts_tensor_n = data['counts_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
         eta_n = data['empirical_droplet_efficiency_tensor']
-
-        e_obs_n = fingerprint_tensor_nr.sum(-1)
 
         # sample from GP prior
         beta_nr = self.vsgp_gene_expression_model.model(data)
@@ -246,7 +244,7 @@ class VSGPGeneExpressionModelPreTrainer:
                 NegativeBinomial(
                     mu=mu_e_hi_n,
                     phi=phi_e_hi_n),
-                obs=e_obs_n)
+                obs=counts_tensor_n)
 
     def guide(self, data):
         pyro.module(
@@ -269,7 +267,7 @@ class VSGPGeneExpressionModelPreTrainer:
                         f"{self.vsgp_gene_expression_model.gene_group_name}] training started...")
 
         while i_iter < n_training_iters:
-            mb_data = self.sc_fingerprint_dtm.generate_stratified_sample_for_dtm(
+            mb_data = self.sc_fingerprint_dtm.generate_fingerprint_stratified_sample(
                 minibatch_genes_per_gene_group,
                 minibatch_expressing_cells_per_gene,
                 minibatch_silent_cells_per_gene,
