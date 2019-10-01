@@ -40,7 +40,7 @@ class GeneExpressionModel(Parameterized):
 
 
 class VSGPGeneExpressionModel(GeneExpressionModel):
-    DEFAULT_GENE_GROUP_NAME = 'all genes'
+    DEFAULT_GENE_GROUP_NAME = 'all'
     INPUT_DIM = 1
     LATENT_DIM = 3
 
@@ -126,8 +126,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
         # send parameters to device
         self.to(device)
 
-    @autoname.scope(prefix="expr")
-    def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         self.set_mode("model")
         pyro.module("vsgp", self.vsgp, update_module_params=True)
 
@@ -152,8 +151,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
         return beta_nr
 
-    @autoname.scope(prefix="expr")
-    def guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         self.set_mode("guide")
         pyro.module("vsgp", self.vsgp, update_module_params=True)
 
@@ -174,6 +172,12 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
                     scale=self.beta_posterior_scale_gr[gene_index_tensor_n, :]).to_event(1))
 
         return beta_nr
+
+    def model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+        return autoname.scope(fn=self._model, prefix="expr_" + self.gene_group_name)(data)
+
+    def guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+        return autoname.scope(fn=self._guide, prefix="expr_" + self.gene_group_name)(data)
 
     def decode(self,
                beta_nr: torch.Tensor,
@@ -267,7 +271,7 @@ class VSGPGeneExpressionModelPreTrainer:
                         f"{self.vsgp_gene_expression_model.gene_group_name}] training started...")
 
         while i_iter < n_training_iters:
-            mb_data = self.sc_fingerprint_dtm.generate_fingerprint_stratified_sample(
+            mb_data = self.sc_fingerprint_dtm.generate_counts_stratified_sample(
                 minibatch_genes_per_gene_group,
                 minibatch_expressing_cells_per_gene,
                 minibatch_silent_cells_per_gene,
