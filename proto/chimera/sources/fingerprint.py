@@ -294,9 +294,10 @@ class SingleCellFingerprintBase:
             first_rank=0,
             last_rank=self.n_genes)
 
-    def get_internal_gene_indices_by_gene_name_prefix(self, prefix: str) -> List[int]:
-        return [gene_index for gene_index in range(self.n_genes)
-                if self.gene_names_list[gene_index].find(prefix) == 0]
+    def get_internal_gene_indices_by_gene_name_prefix(self, prefix: str) -> np.ndarray:
+        return np.asarray([
+            gene_index for gene_index in range(self.n_genes)
+            if self.gene_names_list[gene_index].find(prefix) == 0])
 
 
 class SingleCellFingerprintDTM:
@@ -304,7 +305,7 @@ class SingleCellFingerprintDTM:
     training."""
 
     # minimum over-dispersion of an estimated negative binomial fit
-    _min_nb_phi = 1e-2
+    MIN_NB_PHI = 1e-2
 
     def __init__(self,
                  sc_fingerprint_base: SingleCellFingerprintBase,
@@ -336,6 +337,18 @@ class SingleCellFingerprintDTM:
 
         # placeholder for lazy initialization
         self.highly_variable_gene_indices: Optional[List[int]] = None
+
+    def new_from(self, other_sc_fingerprint_base: SingleCellFingerprintBase) -> 'SingleCellFingerprintDTM':
+        return SingleCellFingerprintDTM(
+            sc_fingerprint_base=other_sc_fingerprint_base,
+            low_family_size_cdf_threshold=self.low_family_size_cdf_threshold,
+            n_cell_pca_features=self.n_cell_pca_features,
+            gene_grouping_trans=self.gene_grouping_trans,
+            n_gene_groups=self.n_gene_groups,
+            allow_dense_int_ndarray=self.allow_dense_int_ndarray,
+            verbose=self.verbose,
+            device=self.device,
+            dtype=self.dtype)
 
     def _log_caching(self, name: str):
         if self.verbose:
@@ -655,7 +668,7 @@ class SingleCellFingerprintDTM:
 
             # estimate negative binomial fit using first two moments
             mu = family_size_mean
-            phi = max(self._min_nb_phi, (family_size_var - family_size_mean) / (family_size_mean ** 2))
+            phi = max(self.MIN_NB_PHI, (family_size_var - family_size_mean) / (family_size_mean ** 2))
 
             # calculate p_obs
             alpha = 1. / phi

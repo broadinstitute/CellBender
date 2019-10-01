@@ -47,6 +47,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  gene_group_name: Optional[str],
+                 gene_group_indices: Optional[np.ndarray],
                  n_inducing_points: int,
                  init_rbf_kernel_variance: float,
                  init_rbf_kernel_lengthscale: float,
@@ -59,19 +60,24 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
         super(VSGPGeneExpressionModel, self).__init__()
-        self.sc_fingerprint_dtm = sc_fingerprint_dtm
-        self.device = device
-        self.dtype = dtype
+        assert not ((gene_group_name is None) ^ (gene_group_indices is None))
 
         if gene_group_name is not None:
             self.gene_group_name = gene_group_name
+            self.gene_group_indices = gene_group_indices
         else:
+            # default to all genes
             self.gene_group_name = VSGPGeneExpressionModel.DEFAULT_GENE_GROUP_NAME
+            self.gene_group_indices = np.arange(sc_fingerprint_dtm.n_genes)
 
         # feature space
         self.log_geometric_mean_obs_expr_g1 = torch.log(
             torch.tensor(sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene,
                          device=device, dtype=dtype)).unsqueeze(-1)
+
+        self.sc_fingerprint_dtm = sc_fingerprint_dtm
+        self.device = device
+        self.dtype = dtype
 
         # inducing points
         lo = torch.min(self.log_geometric_mean_obs_expr_g1).item()
@@ -191,14 +197,14 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
         }
 
 
-class VSGPGeneExpressionModelPreTrainer:
+class VSGPGeneExpressionModelTrainer:
     def __init__(
             self,
             vsgp_gene_expression_model: VSGPGeneExpressionModel,
             sc_fingerprint_dtm: SingleCellFingerprintDTM,
             adam_lr: float = 1e-2,
             adam_betas: Tuple[float, float] = (0.9, 0.99)):
-        super(VSGPGeneExpressionModelPreTrainer, self).__init__()
+        super(VSGPGeneExpressionModelTrainer, self).__init__()
 
         self.vsgp_gene_expression_model = vsgp_gene_expression_model
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
@@ -257,8 +263,8 @@ class VSGPGeneExpressionModelPreTrainer:
         self.vsgp_gene_expression_model.guide(data)
 
     def run_training(self,
-                     n_training_iters: int = 1000,
-                     train_log_frequency: int = 100,
+                     n_training_iterations: int = 1000,
+                     training_log_frequency: int = 100,
                      minibatch_genes_per_gene_group: int = 20,
                      minibatch_expressing_cells_per_gene: int = 20,
                      minibatch_silent_cells_per_gene: int = 5,
@@ -267,10 +273,10 @@ class VSGPGeneExpressionModelPreTrainer:
         i_iter = 0
         mb_loss_list = []
 
-        logging.warning(f"[VSGPGeneExpressionModelPreTrainer for "
+        logging.warning(f"[VSGPGeneExpressionModelTrainer for "
                         f"{self.vsgp_gene_expression_model.gene_group_name}] training started...")
 
-        while i_iter < n_training_iters:
+        while i_iter < n_training_iterations:
             mb_data = self.sc_fingerprint_dtm.generate_counts_stratified_sample(
                 minibatch_genes_per_gene_group,
                 minibatch_expressing_cells_per_gene,
@@ -283,7 +289,7 @@ class VSGPGeneExpressionModelPreTrainer:
             self.loss_hist.append(mb_loss)
             i_iter += 1
 
-            if i_iter % train_log_frequency == 0 and i_iter > 0:
+            if i_iter % training_log_frequency == 0 and i_iter > 0:
                 # calculate loss stats
                 t1 = time.time()
                 mb_loss_mean, mb_loss_std = np.mean(mb_loss_list), np.std(mb_loss_list)
@@ -296,7 +302,7 @@ class VSGPGeneExpressionModelPreTrainer:
                 mb_loss_list = []
                 t0 = t1
 
-        logging.warning(f"[VSGPGeneExpressionModelPreTrainer for "
+        logging.warning(f"[VSGPGeneExpressionModelTrainer for "
                         f"{self.vsgp_gene_expression_model.gene_group_name}] training finished.")
 
         self.trained = True
