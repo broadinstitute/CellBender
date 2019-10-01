@@ -13,6 +13,7 @@ from pyro import poutine
 from pyro.contrib.gp.models import VariationalSparseGP
 from pyro.contrib import autoname
 import pyro.contrib.gp.kernels as kernels
+from pyro.contrib.gp.parameterized import Parameterized, Parameter
 
 from pyro_extras import NegativeBinomial, MixtureDistribution
 from fingerprint import SingleCellFingerprintDTM
@@ -20,7 +21,7 @@ from fingerprint import SingleCellFingerprintDTM
 from abc import abstractmethod
 
 
-class FSDModel(torch.nn.Module):
+class FSDModel(Parameterized):
     def __init__(self):
         super(FSDModel, self).__init__()
 
@@ -372,10 +373,6 @@ class FSDModelGPLVM(FSDModel):
             init_params_dict['fsd.gplvm.init_rbf_kernel_variance']
         self.fsd_gplvm_init_rbf_kernel_lengthscale = \
             init_params_dict['fsd.gplvm.init_rbf_kernel_lengthscale']
-        self.fsd_gplvm_init_linear_kernel_variance = \
-            init_params_dict['fsd.gplvm.init_linear_kernel_variance']
-        self.fsd_gplvm_init_constant_kernel_variance = \
-            init_params_dict['fsd.gplvm.init_constant_kernel_variance']
         self.fsd_gplvm_init_whitenoise_kernel_variance = \
             init_params_dict['fsd.gplvm.init_whitenoise_kernel_variance']
 
@@ -393,32 +390,20 @@ class FSDModelGPLVM(FSDModel):
         kernel_rbf = kernels.RBF(
             input_dim=self.fsd_gplvm_latent_dim,
             variance=torch.tensor(self.fsd_gplvm_init_rbf_kernel_variance, device=device, dtype=dtype),
-            lengthscale=self.fsd_gplvm_init_rbf_kernel_lengthscale
-                * torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype))
-#         kernel_linear = kernels.Linear(
-#             input_dim=self.fsd_gplvm_latent_dim,
-#             variance=torch.tensor(self.fsd_gplvm_init_linear_kernel_variance, device=device, dtype=dtype))
-#         kernel_constant = kernels.Constant(
-#             input_dim=self.fsd_gplvm_latent_dim,
-#             variance=torch.tensor(self.fsd_gplvm_init_constant_kernel_variance, device=device, dtype=dtype))
+            lengthscale=(self.fsd_gplvm_init_rbf_kernel_lengthscale
+                         * torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype)))
         kernel_whitenoise = kernels.WhiteNoise(
             input_dim=self.fsd_gplvm_latent_dim,
             variance=torch.tensor(self.fsd_gplvm_init_whitenoise_kernel_variance, device=device, dtype=dtype))
         kernel_whitenoise.set_constraint(
             "variance", constraints.greater_than(self.fsd_gplvm_min_noise))
-
-#         kernel_full = kernels.Sum(
-#             kernel_rbf,
-#             kernels.Sum(
-#                 kernel_linear,
-#                 kernels.Sum(
-#                     kernel_whitenoise,
-#                     kernel_constant)))
-
         kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
         # mean fsd xi
-        self.fsd_xi_mean = torch.nn.Parameter(self.init_fsd_xi_loc_prior.clone().detach().unsqueeze(-1))
+        self.fsd_xi_mean = Parameter(self.init_fsd_xi_loc_prior.clone().detach().unsqueeze(-1))
+
+        def mean_function(x: torch.Tensor):
+            return self.fsd_xi_dim
 
         # GPLVM inducing points initial values
         self.Xu_init = torch.randn(
@@ -433,34 +418,29 @@ class FSDModelGPLVM(FSDModel):
             Xu=self.Xu_init,
             num_data=sc_fingerprint_dtm.n_genes,
             likelihood=None,
-            mean_function=lambda x: self.fsd_xi_mean,
+            mean_function=mean_function,
             latent_shape=torch.Size([self.fsd_xi_dim]),
             whiten=True,
             jitter=self.fsd_gplvm_cholesky_jitter)
 
-        # register trainable parameters to Pyro param store
-        pyro.param(
-            "fsd_latent_posterior_loc_gl",
-            lambda: torch.zeros(
+        # trainable parameters
+        self.fsd_latent_posterior_loc_gl = Parameter(
+            torch.zeros(
                 (sc_fingerprint_dtm.n_genes, self.fsd_gplvm_latent_dim),
                 device=device, dtype=dtype))
-        pyro.param(
-            "fsd_latent_posterior_scale_gl",
-            lambda: torch.ones(
+        self.fsd_latent_posterior_scale_gl = Parameter(
+            torch.ones(
                 (sc_fingerprint_dtm.n_genes, self.fsd_gplvm_latent_dim),
-                device=device, dtype=dtype),
-            constraint=constraints.positive)
+                device=device, dtype=dtype))
+        self.set_constraint("fsd_latent_posterior_scale_gl", constraints.positive)
 
-        pyro.param(
-            "fsd_xi_posterior_loc_gq",
-            # lambda: self.init_fsd_xi_loc_prior.expand((sc_fingerprint_dtm.n_genes, self.fsd_xi_dim)))
-            lambda: self.init_fsd_xi_loc_posterior.clone().detach())
-        pyro.param(
-            "fsd_xi_posterior_scale_gq",
-            lambda: self.fsd_init_xi_posterior_scale * torch.ones(
+        self.fsd_xi_posterior_loc_gq = Parameter(
+            self.init_fsd_xi_loc_posterior.clone().detach())
+        self.fsd_xi_posterior_scale_gq = Parameter(
+            self.fsd_init_xi_posterior_scale * torch.ones(
                 (sc_fingerprint_dtm.n_genes, self.fsd_xi_dim),
-                device=device, dtype=dtype),
-            constraint=constraints.positive)
+                device=device, dtype=dtype))
+        self.set_constraint("fsd_xi_posterior_scale_gq", constraints.positive)
 
         # send parameters to device
         self.to(device)
@@ -564,6 +544,7 @@ class FSDModelGPLVM(FSDModel):
 
     @autoname.scope(prefix="fsd")
     def model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        self.set_mode("model")
         assert 'gene_sampling_site_scale_factor_tensor' in data
 
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
@@ -595,25 +576,20 @@ class FSDModelGPLVM(FSDModel):
 
     @autoname.scope(prefix="fsd")
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        self.set_mode("guide")
         assert 'gene_sampling_site_scale_factor_tensor' in data
         assert 'gene_index_tensor' in data
 
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 
-        fsd_latent_posterior_loc_gl = pyro.param("fsd_latent_posterior_loc_gl")
-        fsd_latent_posterior_scale_gl = pyro.param("fsd_latent_posterior_scale_gl")
-
-        fsd_xi_posterior_loc_gq = pyro.param("fsd_xi_posterior_loc_gq")
-        fsd_xi_posterior_scale_gq = pyro.param("fsd_xi_posterior_scale_gq")
-
         # sample fsd latent posterior
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
             pyro.sample(
                 "fsd_latent_nl",
                 dist.Normal(
-                    loc=fsd_latent_posterior_loc_gl[gene_index_tensor_n, :],
-                    scale=fsd_latent_posterior_scale_gl[gene_index_tensor_n, :]).to_event(1))
+                    loc=self.fsd_latent_posterior_loc_gl[gene_index_tensor_n, :],
+                    scale=self.fsd_latent_posterior_scale_gl[gene_index_tensor_n, :]).to_event(1))
 
         # sample inducing points posterior
         self.gplvm.guide()
@@ -624,8 +600,8 @@ class FSDModelGPLVM(FSDModel):
                 "fsd_xi_nq",
                 dist.TransformedDistribution(
                     dist.Normal(
-                        loc=fsd_xi_posterior_loc_gq[gene_index_tensor_n, :],
-                        scale=fsd_xi_posterior_scale_gq[gene_index_tensor_n, :]).to_event(1),
+                        loc=self.fsd_xi_posterior_loc_gq[gene_index_tensor_n, :],
+                        scale=self.fsd_xi_posterior_scale_gq[gene_index_tensor_n, :]).to_event(1),
                     [SortByComponentWeights(self)]))
 
         return self.decode(fsd_xi_nq)
