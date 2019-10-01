@@ -245,7 +245,7 @@ class HighlyVariableGenesSelector:
         ax.set_ylabel('log residual std expression', fontsize=14)
 
     def plot_diagnostics(self, plt: pylab):
-        fig, axs_matrix = plt.subplots(nrows=self.n_groups, ncols=4, figsize=(10, self.n_groups * 4))
+        fig, axs_matrix = plt.subplots(nrows=self.n_groups, ncols=4, figsize=(16, self.n_groups * 4))
         if self.n_groups == 1:
             axs_matrix = axs_matrix[None, :]
         for gene_group_name, axs in zip(self.gene_group_internal_indices_dict.keys(), axs_matrix):
@@ -254,7 +254,7 @@ class HighlyVariableGenesSelector:
 
         # HVG selection
         for gene_group_name in self.gene_group_internal_indices_dict.keys():
-            plt.figure(figsize=(16, 16))
+            plt.figure(figsize=(12, 12))
             ax = plt.gca()
             self.plot_highly_variable_genes(gene_group_name, ax)
             plt.tight_layout()
