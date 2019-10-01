@@ -33,6 +33,8 @@ class HighlyVariableGenesSelector:
 
         self.hvg_n_selected_genes: int = init_params_dict[
             'hvg.n_selected_genes']
+        self.hvg_neglect_expr_bottom_fraction: float = init_params_dict[
+            'hvg.neglect_expr_bottom_fraction']
         self.hvg_gene_group_prefixes: Optional[List[str]] = init_params_dict[
             'hvg.gene_group_prefixes']
 
@@ -172,7 +174,6 @@ class HighlyVariableGenesSelector:
                 device=self.device, dtype=self.dtype).log()
 
             log_pearson_res_g = np.zeros((grouped_sc_fingerprint_dtm.n_genes,))
-
             for gene_index in range(grouped_sc_fingerprint_dtm.n_genes):
                 # get FST counts for gene_index
                 fst_counts_n = torch.tensor(
@@ -192,26 +193,42 @@ class HighlyVariableGenesSelector:
         return log_pearson_residual_std_per_group_dict
 
     @cachedproperty
-    def pearson_residual_sorted_gene_indices_per_group(self) -> Dict[str, List[int]]:
-        pearson_residual_sorted_gene_indices_per_group_dict: Dict[str, List[int]] = dict()
+    def highly_variable_gene_indices_per_group(self) -> Dict[str, List[int]]:
+        """
+
+        .. note:: the returned indices corresponds to within-group internal indices (not indices
+        in the master fingerprint container).
+
+        :return:
+        """
+        highly_variable_gene_indices_per_group_dict: Dict[str, List[int]] = dict()
         for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
-            pearson_res_sorted_gene_indices_in_group = list(
+            group_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
+            sorted_cutoff_index = int(np.floor(
+                self.hvg_neglect_expr_bottom_fraction * group_sc_fingerprint_dtm.n_genes))
+            bottom_cutoff = np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index]
+            bottom_removed_gene_indices = [
+                gene_index for gene_index in range(group_sc_fingerprint_dtm.n_genes)
+                if group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene[gene_index] >= bottom_cutoff]
+            indexed_log_pearson_residual_std_g = [
+                (gene_index, log_pearson_residual_std_g[gene_index])
+                for gene_index in bottom_removed_gene_indices]
+            group_highly_variable_gene_indices = list(
                 map(itemgetter(0),
-                    sorted(enumerate(log_pearson_residual_std_g),
+                    sorted(indexed_log_pearson_residual_std_g,
                            key=itemgetter(1), reverse=True)))
-            pearson_residual_sorted_gene_indices_per_group_dict[gene_group_name] = \
-                pearson_res_sorted_gene_indices_in_group
-        return pearson_residual_sorted_gene_indices_per_group_dict
+            highly_variable_gene_indices_per_group_dict[gene_group_name] = group_highly_variable_gene_indices
+        return highly_variable_gene_indices_per_group_dict
 
     @cachedproperty
     def highly_variable_gene_indices(self) -> List[int]:
         highly_variable_gene_per_group = int(np.ceil(self.hvg_n_selected_genes / self.n_groups))
         highly_variable_gene_indices = []
         for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
-            pearson_res_sorted_gene_indices_in_group = \
-                self.pearson_residual_sorted_gene_indices_per_group[gene_group_name]
-            n_selected_in_group = min(highly_variable_gene_per_group, len(pearson_res_sorted_gene_indices_in_group))
-            selected_gene_indices_in_group = pearson_res_sorted_gene_indices_in_group[:n_selected_in_group]
+            highly_variable_gene_indices_in_group = \
+                self.highly_variable_gene_indices_per_group[gene_group_name]
+            n_selected_in_group = min(highly_variable_gene_per_group, len(highly_variable_gene_indices_in_group))
+            selected_gene_indices_in_group = highly_variable_gene_indices_in_group[:n_selected_in_group]
             gene_indices_in_group = self.gene_group_internal_indices_dict[gene_group_name]
             highly_variable_gene_indices_in_main_fingerprint = [
                 gene_indices_in_group[i] for i in selected_gene_indices_in_group]
@@ -220,10 +237,10 @@ class HighlyVariableGenesSelector:
 
     def plot_highly_variable_genes(self, gene_group_name: str, ax: Axes, top_n_annotate=10):
         residual_log_std = self.log_pearson_residual_std_per_group[gene_group_name]
-        pearson_residual_sorted_gene_indices = \
-            self.pearson_residual_sorted_gene_indices_per_group[gene_group_name]
-        indices_to_annotate = pearson_residual_sorted_gene_indices[
-                              :min(top_n_annotate, len(pearson_residual_sorted_gene_indices))]
+        highly_variable_gene_indices_in_group = \
+            self.highly_variable_gene_indices_per_group[gene_group_name]
+        indices_to_annotate = highly_variable_gene_indices_in_group[
+                              :min(top_n_annotate, len(highly_variable_gene_indices_in_group))]
 
         data_x = self.expr_model_dict[gene_group_name].log_geometric_mean_obs_expr_g1.detach().cpu().numpy()
         gene_names_list_in_group = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]\
@@ -231,7 +248,14 @@ class HighlyVariableGenesSelector:
         data_y = residual_log_std
 
         # make scatter plot
-        ax.scatter(data_x, data_y, s=10, alpha=0.5)
+        group_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
+        sorted_cutoff_index = int(np.floor(
+            self.hvg_neglect_expr_bottom_fraction * group_sc_fingerprint_dtm.n_genes))
+        bottom_cutoff = np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index]
+        colors = np.zeros((len(data_x), 4))
+        colors[:, 3] = 0.5
+        colors[data_x < bottom_cutoff, :3] = 0.5
+        ax.scatter(data_x, data_y, s=10, c=colors)
 
         # add gene names labels
         labels = []
