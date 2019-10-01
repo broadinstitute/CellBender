@@ -128,7 +128,6 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
     def _model(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         self.set_mode("model")
-        pyro.module("vsgp", self.vsgp, update_module_params=True)
 
         assert 'geometric_mean_obs_expr_per_gene_tensor' in data
         assert 'gene_sampling_site_scale_factor_tensor' in data
@@ -153,7 +152,6 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
     def _guide(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         self.set_mode("guide")
-        pyro.module("vsgp", self.vsgp, update_module_params=True)
 
         assert 'gene_sampling_site_scale_factor_tensor' in data
         assert 'gene_index_tensor' in data
@@ -219,7 +217,8 @@ class VSGPGeneExpressionModelPreTrainer:
 
     def model(self, data: Dict[str, torch.Tensor]):
         pyro.module(
-            "vsgp_gene_expression_model", self.vsgp_gene_expression_model,
+            "expr_" + self.vsgp_gene_expression_model.gene_group_name,
+            self.vsgp_gene_expression_model,
             update_module_params=True)
         assert 'counts_tensor' in data
         assert 'cell_sampling_site_scale_factor_tensor' in data
@@ -252,7 +251,8 @@ class VSGPGeneExpressionModelPreTrainer:
 
     def guide(self, data):
         pyro.module(
-            "vsgp_gene_expression_model", self.vsgp_gene_expression_model,
+            "expr_" + self.vsgp_gene_expression_model.gene_group_name,
+            self.vsgp_gene_expression_model,
             update_module_params=True)
         self.vsgp_gene_expression_model.guide(data)
 
