@@ -254,7 +254,7 @@ class HighlyVariableGenesSelector:
 
         # HVG selection
         for gene_group_name in self.gene_group_internal_indices_dict.keys():
-            plt.figure(figsize=(12, 12))
+            plt.figure(figsize=(8, 8))
             ax = plt.gca()
             self.plot_highly_variable_genes(gene_group_name, ax)
             plt.tight_layout()
