@@ -254,7 +254,9 @@ class HighlyVariableGenesSelector:
         bottom_cutoff = np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index]
         colors = np.zeros((len(data_x), 4))
         colors[:, 3] = 0.5
-        colors[data_x < bottom_cutoff, :3] = 0.5
+        colors[data_x < bottom_cutoff, 0] = 0.5
+        colors[data_x < bottom_cutoff, 1] = 0.5
+        colors[data_x < bottom_cutoff, 2] = 0.5
         ax.scatter(data_x, data_y, s=10, c=colors)
 
         # add gene names labels
