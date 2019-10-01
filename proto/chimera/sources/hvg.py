@@ -242,21 +242,21 @@ class HighlyVariableGenesSelector:
         indices_to_annotate = highly_variable_gene_indices_in_group[
                               :min(top_n_annotate, len(highly_variable_gene_indices_in_group))]
 
-        data_x = self.expr_model_dict[gene_group_name].log_geometric_mean_obs_expr_g1.detach().cpu().numpy()
+        data_x = self.expr_model_dict[gene_group_name].log_geometric_mean_obs_expr_g1.detach().cpu().numpy().flatten()
         gene_names_list_in_group = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]\
             .sc_fingerprint_base.gene_names_list
         data_y = residual_log_std
 
-        # make scatter plot
+        # shade out lowly expressed genes that are not included in HVG analysis
         group_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
         sorted_cutoff_index = int(np.floor(
             self.hvg_neglect_expr_bottom_fraction * group_sc_fingerprint_dtm.n_genes))
         bottom_cutoff = np.sort(group_sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene)[sorted_cutoff_index]
         colors = np.zeros((len(data_x), 4))
         colors[:, 3] = 0.5
-        colors[data_x < bottom_cutoff, 0] = 0.5
-        colors[data_x < bottom_cutoff, 1] = 0.5
-        colors[data_x < bottom_cutoff, 2] = 0.5
+        colors[data_x < bottom_cutoff, 0:3] = 0.5
+
+        # make scatter plot
         ax.scatter(data_x, data_y, s=10, c=colors)
 
         # add gene names labels
