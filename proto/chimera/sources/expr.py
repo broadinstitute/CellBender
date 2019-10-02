@@ -392,12 +392,11 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
 
         # log alpha (posterior)
         self.log_alpha_posterior_loc_g = Parameter(
-            - np.log(self.phi_scale) * torch.ones((self.n_input_features,), device=device, dtype=dtype))
+            - np.log(self.phi_scale) * torch.ones((self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype))
 
         # log mu bias (posterior)
         self.beta_posterior_loc_g = Parameter(
-            torch.tensor(sc_fingerprint_dtm.arithmetic_mean_obs_expr_per_gene,
-                         device=device, dtype=dtype).log())
+            torch.tensor(sc_fingerprint_dtm.arithmetic_mean_obs_expr_per_gene, device=device, dtype=dtype).log())
 
         # log mu weights (posterior)
         self.gamma_posterior_loc_gf = Parameter(
@@ -421,11 +420,8 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
             gamma_nf = pyro.sample(
                 "gamma_nf",
                 dist.Normal(
-                    loc=torch.zeros(
-                        (mb_size, self.n_input_features),
-                        device=self.device, dtype=self.dtype),
-                    scale=self.gamma_ard_scale_f.expand(
-                        (mb_size, self.n_input_features))
+                    loc=torch.zeros((mb_size, self.n_input_features), device=self.device, dtype=self.dtype),
+                    scale=self.gamma_ard_scale_f.expand((mb_size, self.n_input_features))
                 ).to_event(1))
 
             # sample log alpha
