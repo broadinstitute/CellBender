@@ -479,6 +479,8 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         gamma_nf = output_dict['gamma_nf']
         log_alpha_n = output_dict['log_alpha_n']
         cell_features_nf = data['cell_features_tensor']
+        print(gamma_nf)
+        print(cell_features_nf)
 
         log_mu_e_hi_n = torch.sum(gamma_nf * cell_features_nf, dim=-1)
         log_phi_e_hi_n = - log_alpha_n
