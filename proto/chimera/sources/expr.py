@@ -421,14 +421,18 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
             gamma_nf = pyro.sample(
                 "gamma_nf",
                 dist.Normal(
-                    loc=0.,
-                    scale=self.gamma_ard_scale_f.expand((mb_size, self.n_input_features))).to_event(1))
+                    loc=torch.zeros(
+                        (mb_size, self.n_input_features),
+                        device=self.device, dtype=self.dtype),
+                    scale=self.gamma_ard_scale_f.expand(
+                        (mb_size, self.n_input_features))
+                ).to_event(1))
 
             # sample log alpha
             log_alpha_n = pyro.sample(
                 "log_alpha_n",
                 dist.Gumbel(
-                    loc=-np.log(self.phi_scale),
+                    loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
                     scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
 
         return {
