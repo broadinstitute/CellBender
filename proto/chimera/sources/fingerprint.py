@@ -1054,6 +1054,41 @@ class SingleCellFingerprintDTM:
             gene_sampling_site_scale_factor_array=gene_sampling_site_scale_factor_array,
             fingerprint_array=fingerprint_array)
 
+    def generate_single_gene_counts_minibatch_data(
+            self,
+            gene_index: int,
+            cell_index_list: List[int],
+            n_particles_cell: int) -> Dict[str, torch.Tensor]:
+        """Generate model input tensors for a given gene index and the cell index range
+
+        :param gene_index:
+        :param cell_index_list:
+        :param n_particles_cell: repeat factor for every cell (see the notes)
+
+        .. note: for n_particles_cell > 1, the entire ``cell_index_list`` is repeated that many times
+
+        .. note: The generated minibatch has scale-factor set to 1.0 for all gene and cell sampling
+            sites (because they are not necessary for our purposes here). As such, the minibatches
+            produced by this method should not be used for training.
+        """
+        assert n_particles_cell >= 1
+        cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell).astype(np.int32)
+        gene_index_array = gene_index * np.ones_like(cell_index_array).astype(np.int32)
+        cell_sampling_site_scale_factor_array = np.ones_like(
+            cell_index_array, dtype=self.numpy_dtype)
+        gene_sampling_site_scale_factor_array = np.ones_like(
+            cell_index_array, dtype=self.numpy_dtype)
+        counts_array = np.zeros(
+            (len(cell_index_array),),
+            dtype=self.numpy_dtype)
+
+        return self.generate_counts_torch_minibatch_data(
+            cell_index_array=cell_index_array,
+            gene_index_array=gene_index_array,
+            cell_sampling_site_scale_factor_array=cell_sampling_site_scale_factor_array,
+            gene_sampling_site_scale_factor_array=gene_sampling_site_scale_factor_array,
+            counts_array=counts_array)
+
     def generate_counts_stratified_sample(
                 self,
                 genes_per_gene_group: int,
