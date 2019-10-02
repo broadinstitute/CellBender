@@ -945,7 +945,7 @@ class SingleCellFingerprintDTM:
         counts_tensor = torch.tensor(
             counts_array[:mb_size], device=self.device, dtype=self.dtype)
 
-        return {
+        output_dict = {
             'cell_index_tensor': torch.tensor(
                 cell_index_array,
                 device=self.device).long(),
@@ -976,6 +976,18 @@ class SingleCellFingerprintDTM:
 
             'counts_tensor': counts_tensor
         }
+
+        # inject cell features tensor if available
+        if self.highly_variable_gene_indices is not None:
+            cell_features_array = self.features_per_cell[cell_index_array, :]
+            cell_features_tensor = torch.tensor(cell_features_array, device=self.device, dtype=self.dtype)
+
+            output_dict = {
+                **output_dict,
+                'cell_features_tensor': cell_features_tensor
+            }
+
+        return output_dict
 
     def generate_fingerprint_stratified_sample(
                 self,

@@ -153,15 +153,14 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(fsd_params_dict)
 
         # get e_hi prior parameters (per cell)
-        beta_nr = self.gene_expression_model.model(data)
+        gene_expression_model_output_dict = self.gene_expression_model.model(data)
 
         # calculate ZINB parameters
-        log_eta_n = eta_n.log()
-        e_hi_params_dict = self.gene_expression_model.decode(
-            beta_nr=beta_nr,
-            cell_features_nf=log_eta_n.unsqueeze(-1))
-        log_mu_e_hi_n = e_hi_params_dict['log_mu_e_hi_n']
-        log_phi_e_hi_n = e_hi_params_dict['log_phi_e_hi_n']
+        e_hi_nb_params_dict = self.gene_expression_model.decode_output_to_nb_params_dict(
+            output_dict=gene_expression_model_output_dict,
+            data=data)
+        log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n']
+        log_phi_e_hi_n = e_hi_nb_params_dict['log_phi_e_hi_n']
 
         mu_e_hi_n = log_mu_e_hi_n.exp()
         phi_e_hi_n = log_phi_e_hi_n.exp()

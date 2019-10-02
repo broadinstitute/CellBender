@@ -8,14 +8,8 @@ import logging
 from typing import List
 
 import pyro
-from pyro import poutine
-import pyro.distributions as dist
 from pyro.distributions.torch_distribution import TorchDistribution, TorchDistributionMixin
 from pyro.distributions.util import broadcast_shape
-from pyro.optim import Adam
-from pyro.infer import SVI, TraceEnum_ELBO, config_enumerate, infer_discrete
-from pyro.contrib.autoguide import AutoDiagonalNormal
-from torch.utils.data import TensorDataset, DataLoader
 
 import torch
 from torch.distributions import Distribution, constraints
