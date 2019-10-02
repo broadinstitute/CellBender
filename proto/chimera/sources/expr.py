@@ -372,6 +372,8 @@ class VSGPGeneExpressionModelTrainer:
 class FeatureBasedGeneExpressionModel(GeneExpressionModel):
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
+                 init_features_ard_scale: float = 1.0,
+                 phi_scale: float = 0.1,
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
         super(FeatureBasedGeneExpressionModel, self).__init__()
@@ -380,14 +382,14 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.device = device
         self.dtype = dtype
 
-        self.init_ard_scale = 1.0
-        self.phi_scale = 0.1
+        self.init_features_ard_scale = init_features_ard_scale
+        self.phi_scale = phi_scale
 
         self.n_input_features = sc_fingerprint_dtm.features_per_cell.shape[1]
 
         # log mu weights ARD precisions
         self.gamma_ard_scale_f = Parameter(
-            self.init_ard_scale * torch.ones((self.n_input_features,), device=device, dtype=dtype))
+            self.init_features_ard_scale * torch.ones((self.n_input_features,), device=device, dtype=dtype))
         self.set_constraint("gamma_ard_scale_f", constraints.positive)
 
         # log alpha (posterior)
