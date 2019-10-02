@@ -446,9 +446,6 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
 
-        # sample the inducing points from a MVN (see ``VariationalSparseGP.guide``)
-        self.vsgp.guide()
-
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
 
             # sample log mu weights
