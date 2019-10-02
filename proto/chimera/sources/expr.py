@@ -479,8 +479,8 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         cell_features_nf = data['cell_features_tensor']
 
         log_mu_e_hi_n = (
-                self.self.beta_posterior_loc_g[gene_index_tensor_n]
-                + torch.sum(gamma_nf * cell_features_nf, dim=-1))
+                self.beta_posterior_loc_g[gene_index_tensor_n]
+                + torch.einsum('nf,nf->n', gamma_nf, cell_features_nf))
         log_phi_e_hi_n = - log_alpha_n
 
         return {
