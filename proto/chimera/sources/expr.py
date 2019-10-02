@@ -480,7 +480,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         log_alpha_n = output_dict['log_alpha_n']
         cell_features_nf = data['cell_features_tensor']
 
-        log_mu_e_hi_n = torch.einsum('nf,nf->n', gamma_nf, cell_features_nf)
+        log_mu_e_hi_n = torch.sum(gamma_nf * cell_features_nf, dim=-1)
         log_phi_e_hi_n = - log_alpha_n
 
         return {
@@ -514,7 +514,7 @@ class FeatureBasedGeneExpressionModelTrainer:
 
     def model(self, data: Dict[str, torch.Tensor]):
         pyro.module(
-            "feature_based_expr_trainer",
+            "feature_based_expr",
             self.feature_based_gene_expression_model,
             update_module_params=True)
 
@@ -545,7 +545,7 @@ class FeatureBasedGeneExpressionModelTrainer:
 
     def guide(self, data):
         pyro.module(
-            "feature_based_expr_trainer",
+            "feature_based_expr",
             self.feature_based_gene_expression_model,
             update_module_params=True)
 
