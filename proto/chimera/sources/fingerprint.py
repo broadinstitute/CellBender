@@ -563,6 +563,12 @@ class SingleCellFingerprintDTM:
         return np.asarray(self.sparse_count_matrix_csr.sum(0)).squeeze(0).astype(self.numpy_dtype) / self.n_cells
 
     @cachedproperty
+    def arithmetic_mean_obs_fst_expr_per_gene(self) -> np.ndarray:
+        self._log_caching("arithmetic_mean_obs_fst_expr_per_gene")
+        return np.asarray(self.sparse_family_size_truncated_count_matrix_csr.sum(0)).squeeze(0).astype(
+            self.numpy_dtype) / self.n_cells
+
+    @cachedproperty
     def geometric_mean_obs_expr_per_gene(self) -> np.ndarray:
         self._log_caching("geometric_mean_obs_expr_per_gene")
         log1p_sparse_count_matrix_csr = sp.csr_matrix(
@@ -571,6 +577,18 @@ class SingleCellFingerprintDTM:
              self.sparse_count_matrix_csr.indptr))
         return np.asarray(
             np.exp(np.mean(log1p_sparse_count_matrix_csr, axis=0)) - 1).flatten().astype(self.numpy_dtype)
+
+    @cachedproperty
+    def geometric_mean_obs_fst_expr_per_gene(self) -> np.ndarray:
+        self._log_caching("geometric_mean_obs_fst_expr_per_gene")
+        log1p_sparse_family_size_truncated_count_matrix_csr = sp.csr_matrix(
+            (np.log1p(self.sparse_family_size_truncated_count_matrix_csr.data),
+             self.sparse_family_size_truncated_count_matrix_csr.indices,
+             self.sparse_family_size_truncated_count_matrix_csr.indptr))
+        return np.asarray(
+            np.exp(np.mean(
+                log1p_sparse_family_size_truncated_count_matrix_csr,
+                axis=0)) - 1).flatten().astype(self.numpy_dtype)
 
     @cachedproperty
     def empirical_droplet_efficiency(self) -> np.ndarray:
@@ -935,6 +953,7 @@ class SingleCellFingerprintDTM:
             assert counts_array.ndim == 1
             assert counts_array.shape[0] >= mb_size
 
+        arithmetic_mean_obs_expr_per_gene_array = self.arithmetic_mean_obs_expr_per_gene[gene_index_array]
         geometric_mean_obs_expr_per_gene_array = self.geometric_mean_obs_expr_per_gene[gene_index_array]
         empirical_droplet_efficiency_array = self.empirical_droplet_efficiency[cell_index_array]
 
@@ -968,6 +987,11 @@ class SingleCellFingerprintDTM:
 
             'geometric_mean_obs_expr_per_gene_tensor': torch.tensor(
                 geometric_mean_obs_expr_per_gene_array,
+                device=self.device,
+                dtype=self.dtype),
+
+            'arithmetic_mean_obs_expr_per_gene_tensor': torch.tensor(
+                arithmetic_mean_obs_expr_per_gene_array,
                 device=self.device,
                 dtype=self.dtype),
 

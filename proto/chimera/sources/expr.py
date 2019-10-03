@@ -72,8 +72,8 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             self.gene_group_indices = np.arange(sc_fingerprint_dtm.n_genes)
 
         # feature space
-        self.log_geometric_mean_obs_expr_g1 = torch.log(
-            torch.tensor(sc_fingerprint_dtm.geometric_mean_obs_expr_per_gene,
+        self.log_mean_obs_expr_g1 = torch.log(
+            torch.tensor(sc_fingerprint_dtm.arithmetic_mean_obs_fst_expr_per_gene,
                          device=device, dtype=dtype)).unsqueeze(-1)
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
@@ -81,8 +81,8 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
         self.dtype = dtype
 
         # inducing points
-        lo = torch.min(self.log_geometric_mean_obs_expr_g1).item()
-        hi = torch.max(self.log_geometric_mean_obs_expr_g1).item()
+        lo = torch.min(self.log_mean_obs_expr_g1).item()
+        hi = torch.max(self.log_mean_obs_expr_g1).item()
         r = hi - lo
         self.inducing_points_k1 = torch.linspace(
             lo - 0.25 * r,
@@ -115,7 +115,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
         # instantiate VSGP model
         self.vsgp = VariationalSparseGP(
-            X=self.log_geometric_mean_obs_expr_g1,
+            X=self.log_mean_obs_expr_g1,
             y=None,
             kernel=kernel_full,
             Xu=self.inducing_points_k1,
@@ -127,7 +127,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
         # posterior parameters
         self.beta_posterior_loc_gr = Parameter(
-            mean_function(self.log_geometric_mean_obs_expr_g1).permute(-1, -2).detach().clone())
+            mean_function(self.log_mean_obs_expr_g1).permute(-1, -2).detach().clone())
         self.beta_posterior_scale_gr = Parameter(
             init_posterior_scale * torch.ones(
                 (self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionModel.LATENT_DIM), device=device, dtype=dtype))
@@ -139,14 +139,14 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
     def _model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode("model")
 
-        assert 'geometric_mean_obs_expr_per_gene_tensor' in data
+        assert 'arithmetic_mean_obs_expr_per_gene_tensor' in data
         assert 'gene_sampling_site_scale_factor_tensor' in data
 
-        log_geometric_mean_obs_expr_n1 = data['geometric_mean_obs_expr_per_gene_tensor'].log().unsqueeze(-1)
+        log_arithmetic_mean_obs_expr_n1 = data['arithmetic_mean_obs_expr_per_gene_tensor'].log().unsqueeze(-1)
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
 
         # sample all points
-        self.vsgp.set_data(X=log_geometric_mean_obs_expr_n1, y=None)
+        self.vsgp.set_data(X=log_arithmetic_mean_obs_expr_n1, y=None)
         beta_loc_rn, beta_var_rn = self.vsgp.model()
         beta_loc_nr = beta_loc_rn.permute(-1, -2)
         beta_scale_nr = beta_var_rn.permute(-1, -2).sqrt()
@@ -211,8 +211,8 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
     def plot_fit(self, axs):
         # test x range
-        lo = self.log_geometric_mean_obs_expr_g1.min().item()
-        hi = self.log_geometric_mean_obs_expr_g1.max().item()
+        lo = self.log_mean_obs_expr_g1.min().item()
+        hi = self.log_mean_obs_expr_g1.max().item()
         r = hi - lo
         x_test_t = torch.linspace(
             lo - 0.25 * r,
@@ -240,7 +240,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
                 color='C0', alpha=0.3)
             gene_colors = np.zeros((beta_posterior_loc_gr.shape[0], 4))
             gene_colors[:, 3] = 1
-            x_train = self.log_geometric_mean_obs_expr_g1.cpu().numpy()
+            x_train = self.log_mean_obs_expr_g1.cpu().numpy()
             ax.scatter(x_train, beta_posterior_loc_gr[:, i], s=1, color=gene_colors)
             ax.set_ylabel(f'$\\beta_{i}$', fontsize=14)
             ax.set_xlabel('$\log \,\, \\tilde{e}$', fontsize=14)

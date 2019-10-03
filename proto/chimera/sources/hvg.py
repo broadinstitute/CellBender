@@ -170,7 +170,7 @@ class HighlyVariableGenesSelector:
 
             with torch.no_grad():
                 expr_model.vsgp.set_data(
-                    X=expr_model.log_geometric_mean_obs_expr_g1,
+                    X=expr_model.log_mean_obs_expr_g1,
                     y=None)
                 beta_loc_rg, _ = expr_model.vsgp.model()
                 beta_loc_gr = beta_loc_rg.permute(-1, -2)
@@ -211,7 +211,7 @@ class HighlyVariableGenesSelector:
         for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
             group_n_genes = self.grouped_sc_fingerprint_dtm_dict[gene_group_name].n_genes
             sorted_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
-            x_data = self.expr_model_dict[gene_group_name].log_geometric_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
+            x_data = self.expr_model_dict[gene_group_name].log_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
             x_cutoff = np.sort(x_data)[sorted_cutoff_index]
             bottom_removed_gene_indices = [
                 gene_index for gene_index in range(group_n_genes)
@@ -248,7 +248,7 @@ class HighlyVariableGenesSelector:
         indices_to_annotate = highly_variable_gene_indices_in_group[
                               :min(top_n_annotate, len(highly_variable_gene_indices_in_group))]
 
-        data_x = self.expr_model_dict[gene_group_name].log_geometric_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
+        data_x = self.expr_model_dict[gene_group_name].log_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
         gene_names_list_in_group = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]\
             .sc_fingerprint_base.gene_names_list
         data_y = residual_log_std
