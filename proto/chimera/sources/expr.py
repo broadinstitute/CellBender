@@ -43,7 +43,7 @@ class GeneExpressionModel(Parameterized):
 class VSGPGeneExpressionModel(GeneExpressionModel):
     DEFAULT_GENE_GROUP_NAME = 'all'
     INPUT_DIM = 1
-    LATENT_DIM = 3
+    LATENT_DIM = 2
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
@@ -193,14 +193,13 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             output_dict: Dict[str, torch.Tensor],
             data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         assert 'beta_nr' in output_dict
-        assert 'cell_features_tensor' in data
+        assert 'empirical_droplet_efficiency_tensor' in data
 
         beta_nr = output_dict['beta_nr']
-        cell_features_nf = data['cell_features_tensor']
+        eta_n = data['empirical_droplet_efficiency_tensor']
 
-        log_eta_n = cell_features_nf[:, 0]
-        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * log_eta_n
-        log_phi_e_hi_n = beta_nr[:, 2]
+        log_mu_e_hi_n = beta_nr[:, 0] + eta_n.log()
+        log_phi_e_hi_n = beta_nr[:, 1]
 
         return {
             'log_mu_e_hi_n': log_mu_e_hi_n,
@@ -228,7 +227,6 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
         beta_posterior_loc_gr = self.beta_posterior_loc_gr.detach().cpu().numpy()
 
-        y_labels = ['$\\beta_0$', '$\\beta_1$', '$\\beta_2$']
         x_test = x_test_t.cpu().numpy()
         for i, ax in enumerate(axs):
             ax.plot(x_test[:, 0], f_loc_numpy[:, i], color='red')
@@ -241,7 +239,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             gene_colors[:, 3] = 1
             x_train = self.log_geometric_mean_obs_expr_g1.cpu().numpy()
             ax.scatter(x_train, beta_posterior_loc_gr[:, i], s=1, color=gene_colors)
-            ax.set_ylabel(y_labels[i], fontsize=14)
+            ax.set_ylabel(f'$\\beta_{i}$', fontsize=14)
             ax.set_xlabel('$\log \,\, \\tilde{e}$', fontsize=14)
 
 
@@ -275,21 +273,17 @@ class VSGPGeneExpressionModelTrainer:
             update_module_params=True)
         assert 'counts_tensor' in data
         assert 'cell_sampling_site_scale_factor_tensor' in data
-        assert 'empirical_droplet_efficiency_tensor' in data
 
         counts_tensor_n = data['counts_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
-        eta_n = data['empirical_droplet_efficiency_tensor']
 
         # sample from GP prior
         model_output_dict = self.vsgp_gene_expression_model.model(data)
 
         # calculate NB parameters
-        log_eta_n = eta_n.log()
-        cell_features_nf = log_eta_n.unsqueeze(-1)
         e_hi_nb_params_dict = self.vsgp_gene_expression_model.decode_output_to_nb_params_dict(
             output_dict=model_output_dict,
-            data={'cell_features_tensor': cell_features_nf})
+            data=data)
         log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n']
         log_phi_e_hi_n = e_hi_nb_params_dict['log_phi_e_hi_n']
 
@@ -355,7 +349,7 @@ class VSGPGeneExpressionModelTrainer:
         self.trained = True
 
     def plot_diagnostics(self, axs):
-        assert len(axs) == 4
+        assert len(axs) == 3
 
         # plot loss history
         ax = axs[0]
@@ -474,15 +468,18 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         assert 'log_alpha_n' in output_dict
         assert 'gene_index_tensor' in data
         assert 'cell_features_tensor' in data
+        assert 'empirical_droplet_efficiency_tensor' in data
 
         gamma_nf = output_dict['gamma_nf']
         log_alpha_n = output_dict['log_alpha_n']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_features_nf = data['cell_features_tensor']
+        eta_n = data['empirical_droplet_efficiency_tensor']
 
         log_mu_e_hi_n = (
                 self.beta_posterior_loc_g[gene_index_tensor_n]
-                + torch.einsum('nf,nf->n', gamma_nf, cell_features_nf))
+                + torch.einsum('nf,nf->n', gamma_nf, cell_features_nf)
+                + eta_n.log())
         log_phi_e_hi_n = - log_alpha_n
 
         return {

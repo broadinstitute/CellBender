@@ -159,6 +159,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         e_hi_nb_params_dict = self.gene_expression_model.decode_output_to_nb_params_dict(
             output_dict=gene_expression_model_output_dict,
             data=data)
+
         log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n']
         log_phi_e_hi_n = e_hi_nb_params_dict['log_phi_e_hi_n']
 

@@ -599,16 +599,18 @@ class SingleCellFingerprintDTM:
         pca_features = PCA(n_components=self.n_cell_pca_features, whiten=True).fit_transform(
             trans_normed_count_matrix)
 
-        # log empirical cell size
-        log_empirical_cell_size = np.log(self.empirical_droplet_efficiency)
+        # # log empirical cell size
+        # log_empirical_cell_size = np.log(self.empirical_droplet_efficiency)
+        #
+        # # concatenate
+        # full_features = np.concatenate(
+        #     (log_empirical_cell_size[:, None],
+        #      pca_features),
+        #     axis=1)
+        #
+        # return full_features.astype(self.numpy_dtype)
 
-        # concatenate
-        full_features = np.concatenate(
-            (log_empirical_cell_size[:, None],
-             pca_features),
-            axis=1)
-
-        return full_features.astype(self.numpy_dtype)
+        return pca_features.astype(self.numpy_dtype)
 
     @cachedproperty
     def gene_groups_dict(self) -> Dict[int, List[int]]:
