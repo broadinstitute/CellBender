@@ -102,6 +102,9 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
         kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
         # mean subtraction
+        assert init_mean_intercept.shape == (self.LATENT_DIM,)
+        assert init_mean_slope.shape == (self.LATENT_DIM,)
+
         self.f_mean_intercept_r = Parameter(
             torch.tensor(init_mean_intercept, device=device, dtype=dtype))
         self.f_mean_slope_r = Parameter(
