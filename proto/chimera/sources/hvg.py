@@ -187,8 +187,8 @@ class HighlyVariableGenesSelector:
                     device=self.device, dtype=self.dtype)
 
                 # calculate NB prior loc and scale for each particle
-                prior_loc_n = (beta_loc_gr[gene_index, 0] + beta_loc_gr[gene_index, 1] * log_eta_n).exp()
-                prior_scale_n = (prior_loc_n + beta_loc_gr[gene_index, 2].exp() * prior_loc_n.pow(2)).sqrt()
+                prior_loc_n = (beta_loc_gr[gene_index, 0] + log_eta_n).exp()
+                prior_scale_n = (prior_loc_n + beta_loc_gr[gene_index, 1].exp() * prior_loc_n.pow(2)).sqrt()
 
                 # calculate the one-sided p-value of having excess variance for each particle
                 pearson_res_n = (fst_counts_n - prior_loc_n) / prior_scale_n
