@@ -957,7 +957,7 @@ class SingleCellFingerprintDTM:
                 cell_index_array, gene_index_array]
             counts_truncation_rate_array = self.family_size_truncation_rate_per_gene[gene_index_array]
         elif count_matrix_type == 'raw':
-            count_matrix_type[:mb_size] = self.dense_count_matrix_ndarray[cell_index_array, gene_index_array]
+            counts_array[:mb_size] = self.dense_count_matrix_ndarray[cell_index_array, gene_index_array]
             counts_truncation_rate_array = np.ones_like(count_matrix_type[:mb_size])
         else:
             raise ValueError("Unknown count matrix type! allowed values are: 'truncated', 'raw'")
