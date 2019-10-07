@@ -666,14 +666,15 @@ class SingleCellFingerprintDTM:
                     sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index]))
         return gene_groups_dict
 
+    # TODO truncation of empirical FSD make unreliable empirical FSD params estimation
     @cachedproperty
     def empirical_fsd_params(self) -> np.ndarray:
         self._log_caching("empirical_fsd_params")
 
-        # heuristic quantile-based FS threshold mask with shape (n_genes, max_family_size)
-        family_size_mask_g = (
-                np.arange(0, self.max_family_size)[:, None]
-                    >= (self.family_size_threshold_per_gene - 1)).T.astype(np.int)
+        # # heuristic quantile-based FS threshold mask with shape (n_genes, max_family_size)
+        # family_size_mask_g = (
+        #         np.arange(0, self.max_family_size)[:, None]
+        #             >= (self.family_size_threshold_per_gene - 1)).T.astype(np.int)
 
         empirical_fsd_params = np.zeros((self.n_genes, 3), dtype=self.numpy_dtype)
         single_gene_fingerprint_array = np.zeros((self.n_cells, self.max_family_size), dtype=self.numpy_dtype)
@@ -683,8 +684,12 @@ class SingleCellFingerprintDTM:
                 gene_index=gene_index,
                 buffer=single_gene_fingerprint_array)
 
-            # apply the heuristic quantile-based FS threshold to remove some of the chimeras
-            counts_per_family_size = single_gene_fingerprint_array.sum(0) * family_size_mask_g[gene_index, :]
+            # # apply the heuristic quantile-based FS threshold to remove some of the chimeras
+            # counts_per_family_size = single_gene_fingerprint_array.sum(0) * family_size_mask_g[gene_index, :]
+            # total_kept_molecules = np.sum(counts_per_family_size)
+            # assert total_kept_molecules > 0
+
+            counts_per_family_size = single_gene_fingerprint_array.sum(0)
             total_kept_molecules = np.sum(counts_per_family_size)
             assert total_kept_molecules > 0
 
