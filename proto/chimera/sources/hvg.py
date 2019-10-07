@@ -183,9 +183,9 @@ class HighlyVariableGenesSelector:
 
             log_pearson_res_g = np.zeros((grouped_sc_fingerprint_dtm.n_genes,))
             for gene_index in range(grouped_sc_fingerprint_dtm.n_genes):
-                # get FST counts for gene_index
-                fst_counts_n = torch.tensor(
-                    grouped_sc_fingerprint_dtm.dense_family_size_truncated_count_matrix_ndarray[:, gene_index],
+                # get counts for gene_index
+                counts_n = torch.tensor(
+                    grouped_sc_fingerprint_dtm.dense_count_matrix_ndarray[:, gene_index],
                     device=self.device, dtype=self.dtype)
 
                 # calculate NB prior loc and scale for each particle
@@ -193,7 +193,7 @@ class HighlyVariableGenesSelector:
                 prior_scale_n = (prior_loc_n + beta_loc_gr[gene_index, 1].exp() * prior_loc_n.pow(2)).sqrt()
 
                 # calculate the one-sided p-value of having excess variance for each particle
-                pearson_res_n = (fst_counts_n - prior_loc_n) / prior_scale_n
+                pearson_res_n = (counts_n - prior_loc_n) / prior_scale_n
                 log_pearson_res_g[gene_index] = torch.std(pearson_res_n).log().item()
 
             log_pearson_residual_std_per_group_dict[gene_group_name] = log_pearson_res_g
@@ -217,12 +217,12 @@ class HighlyVariableGenesSelector:
             x_data = self.expr_model_dict[gene_group_name].log_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
             x_lo_cutoff = np.sort(x_data)[sorted_lo_cutoff_index]
             x_hi_cutoff = np.sort(x_data)[sorted_hi_cutoff_index]
-            bottom_removed_gene_indices = [
+            censored_gene_indices = [
                 gene_index for gene_index in range(group_n_genes)
                 if x_lo_cutoff <= x_data[gene_index] <= x_hi_cutoff]
             indexed_log_pearson_residual_std_g = [
                 (gene_index, log_pearson_residual_std_g[gene_index])
-                for gene_index in bottom_removed_gene_indices]
+                for gene_index in censored_gene_indices]
             group_highly_variable_gene_indices = list(
                 map(itemgetter(0),
                     sorted(indexed_log_pearson_residual_std_g,
