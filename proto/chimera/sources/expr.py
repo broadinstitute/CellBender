@@ -73,7 +73,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
 
         # feature space
         self.log_mean_obs_expr_g1 = torch.log(
-            torch.tensor(sc_fingerprint_dtm.arithmetic_mean_obs_fst_expr_per_gene,
+            torch.tensor(sc_fingerprint_dtm.arithmetic_mean_obs_expr_per_gene,
                          device=device, dtype=dtype)).unsqueeze(-1)
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
@@ -275,9 +275,11 @@ class VSGPGeneExpressionModelTrainer:
             self.vsgp_gene_expression_model,
             update_module_params=True)
         assert 'counts_tensor' in data
+        assert 'counts_truncation_rate_tensor' in data
         assert 'cell_sampling_site_scale_factor_tensor' in data
 
         counts_tensor_n = data['counts_tensor']
+        counts_truncation_rate_n = data['counts_truncation_rate_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
 
         # sample from GP prior
@@ -287,7 +289,7 @@ class VSGPGeneExpressionModelTrainer:
         e_hi_nb_params_dict = self.vsgp_gene_expression_model.decode_output_to_nb_params_dict(
             output_dict=model_output_dict,
             data=data)
-        log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n']
+        log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n'] + counts_truncation_rate_n.log()
         log_phi_e_hi_n = e_hi_nb_params_dict['log_phi_e_hi_n']
 
         with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
@@ -325,7 +327,8 @@ class VSGPGeneExpressionModelTrainer:
                 minibatch_genes_per_gene_group,
                 minibatch_expressing_cells_per_gene,
                 minibatch_silent_cells_per_gene,
-                minibatch_sampling_strategy)
+                minibatch_sampling_strategy,
+                count_matrix_type='truncated')
 
             mb_loss = self.svi.step(mb_data) / self.loss_scale
 
@@ -521,9 +524,11 @@ class FeatureBasedGeneExpressionModelTrainer:
             update_module_params=True)
 
         assert 'counts_tensor' in data
+        assert 'counts_truncation_rate_tensor' in data
         assert 'cell_sampling_site_scale_factor_tensor' in data
 
         counts_tensor_n = data['counts_tensor']
+        counts_truncation_rate_n = data['counts_truncation_rate_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
 
         # sample from the prior
@@ -533,7 +538,7 @@ class FeatureBasedGeneExpressionModelTrainer:
         e_hi_nb_params_dict = self.feature_based_gene_expression_model.decode_output_to_nb_params_dict(
             output_dict=model_output_dict,
             data=data)
-        log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n']
+        log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n'] + counts_truncation_rate_n.log()
         log_phi_e_hi_n = e_hi_nb_params_dict['log_phi_e_hi_n']
 
         with poutine.scale(scale=cell_sampling_site_scale_factor_tensor_n):
@@ -571,7 +576,8 @@ class FeatureBasedGeneExpressionModelTrainer:
                 minibatch_genes_per_gene_group,
                 minibatch_expressing_cells_per_gene,
                 minibatch_silent_cells_per_gene,
-                minibatch_sampling_strategy)
+                minibatch_sampling_strategy,
+                count_matrix_type='truncated')
 
             mb_loss = self.svi.step(mb_data) / self.loss_scale
 

@@ -481,14 +481,22 @@ class SingleCellFingerprintDTM:
         return sp.csc_matrix(self.sparse_family_size_truncated_count_matrix_csr)
 
     @cachedproperty
-    def dense_family_size_truncated_count_matrix(self) -> np.ndarray:
+    def family_size_truncation_rate_per_gene(self) -> np.ndarray:
+        count_matrix_truncation_factor_per_gene = np.zeros((self.n_genes,), dtype=self.numpy_dtype)
+        for gene_index in range(self.n_genes):
+            raw_counts = np.sum(self.sparse_count_matrix_csc[:, gene_index])
+            fst_counts = np.sum(self.sparse_family_size_truncated_count_matrix_csc[:, gene_index])
+            count_matrix_truncation_factor_per_gene[gene_index] = fst_counts / raw_counts
+        return count_matrix_truncation_factor_per_gene
+
+    @cachedproperty
+    def dense_family_size_truncated_count_matrix_ndarray(self) -> np.ndarray:
         self._log_caching("dense_family_size_truncated_count_matrix")
         return np.asarray(self.sparse_family_size_truncated_count_matrix_csr.todense()).astype(self.numpy_dtype)
 
     @cachedproperty
     def dense_count_matrix_ndarray(self) -> np.ndarray:
         self._log_caching("dense_count_matrix_ndarray")
-        assert self.allow_dense_int_ndarray
         return np.sum(self.dense_fingerprint_ndarray, -1)
 
     @cachedproperty
@@ -790,30 +798,6 @@ class SingleCellFingerprintDTM:
             indices=self.sparse_count_matrix_csc.indices.astype(np.int32))
 
     @cachedproperty
-    def family_size_truncated_expression_mean_std(self) -> Tuple[np.ndarray, np.ndarray]:
-        self._log_caching("family_size_truncated_expression_mean_std")
-        # calculate raw mean and std expression
-        family_size_truncated_expression_mean_g = np.zeros((self.n_genes,))
-        family_size_truncated_expression_std_g = np.zeros((self.n_genes,))
-
-        for gene_index in range(self.n_genes):
-            raw_trunc_expression_n = np.asarray(
-                self.sparse_family_size_truncated_count_matrix_csc[:, gene_index].todense()).flatten()
-            family_size_truncated_expression_mean_g[gene_index] = np.mean(raw_trunc_expression_n)
-            family_size_truncated_expression_std_g[gene_index] = np.std(raw_trunc_expression_n)
-
-        return (family_size_truncated_expression_mean_g,
-                family_size_truncated_expression_std_g)
-
-    @property
-    def family_size_truncated_expression_mean(self):
-        return self.family_size_truncated_expression_mean_std[0]
-
-    @property
-    def family_size_truncated_expression_std(self):
-        return self.family_size_truncated_expression_mean_std[1]
-
-    @cachedproperty
     def gene_groups_csr_binary_matrix(self) -> CSRBinaryMatrix:
         indptr = [0]
         indices = []
@@ -937,6 +921,7 @@ class SingleCellFingerprintDTM:
             gene_index_array: np.ndarray,
             cell_sampling_site_scale_factor_array: np.ndarray,
             gene_sampling_site_scale_factor_array: np.ndarray,
+            count_matrix_type: str,
             counts_array: Optional[np.ndarray] = None) \
             -> Dict[str, Optional[torch.Tensor]]:
         mb_size = len(cell_index_array)
@@ -961,7 +946,16 @@ class SingleCellFingerprintDTM:
             counts_array = np.zeros((mb_size,), dtype=self.numpy_dtype)
         else:
             counts_array.fill(0)
-        counts_array[:mb_size] = self.dense_family_size_truncated_count_matrix[cell_index_array, gene_index_array]
+
+        if count_matrix_type == 'truncated':
+            counts_array[:mb_size] = self.dense_family_size_truncated_count_matrix_ndarray[
+                cell_index_array, gene_index_array]
+            counts_truncation_rate_array = self.family_size_truncation_rate_per_gene[gene_index_array]
+        elif count_matrix_type == 'raw':
+            count_matrix_type[:mb_size] = self.dense_count_matrix_ndarray[cell_index_array, gene_index_array]
+            counts_truncation_rate_array = np.ones_like(count_matrix_type[:mb_size])
+        else:
+            raise ValueError("Unknown count matrix type! allowed values are: 'truncated', 'raw'")
 
         counts_tensor = torch.tensor(
             counts_array[:mb_size], device=self.device, dtype=self.dtype)
@@ -1000,7 +994,12 @@ class SingleCellFingerprintDTM:
                 device=self.device,
                 dtype=self.dtype),
 
-            'counts_tensor': counts_tensor
+            'counts_tensor': counts_tensor,
+
+            'counts_truncation_rate_tensor': torch.tensor(
+                counts_truncation_rate_array,
+                device=self.device,
+                dtype=self.dtype)
         }
 
         # inject cell features tensor if available
@@ -1083,6 +1082,7 @@ class SingleCellFingerprintDTM:
     def generate_single_gene_counts_minibatch_data(
             self,
             gene_index: int,
+            count_matrix_type: str,
             cell_index_list: List[int],
             n_particles_cell: int) -> Dict[str, torch.Tensor]:
         """Generate model input tensors for a given gene index and the cell index range
@@ -1113,6 +1113,7 @@ class SingleCellFingerprintDTM:
             gene_index_array=gene_index_array,
             cell_sampling_site_scale_factor_array=cell_sampling_site_scale_factor_array,
             gene_sampling_site_scale_factor_array=gene_sampling_site_scale_factor_array,
+            count_matrix_type=count_matrix_type,
             counts_array=counts_array)
 
     def generate_counts_stratified_sample(
@@ -1120,7 +1121,8 @@ class SingleCellFingerprintDTM:
                 genes_per_gene_group: int,
                 expressing_cells_per_gene: int,
                 silent_cells_per_gene: int,
-                sampling_strategy: str) -> Dict[str, torch.Tensor]:
+                sampling_strategy: str,
+                count_matrix_type: str) -> Dict[str, torch.Tensor]:
 
         np_buff_dict = self._get_counts_minibatch_ndarray_buffers(
             genes_per_gene_group=genes_per_gene_group,
@@ -1143,6 +1145,7 @@ class SingleCellFingerprintDTM:
             gene_index_array=np_buff_dict['gene_index_array'][:n_samples],
             cell_sampling_site_scale_factor_array=np_buff_dict['cell_sampling_site_scale_factor_array'][:n_samples],
             gene_sampling_site_scale_factor_array=np_buff_dict['gene_sampling_site_scale_factor_array'][:n_samples],
+            count_matrix_type=count_matrix_type,
             counts_array=np_buff_dict['counts_array'])
 
 # def downsample_single_fingerprint_numpy(fingerprint_array: np.ndarray, downsampling_rate: float):

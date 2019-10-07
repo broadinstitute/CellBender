@@ -183,7 +183,7 @@ class HighlyVariableGenesSelector:
             for gene_index in range(grouped_sc_fingerprint_dtm.n_genes):
                 # get FST counts for gene_index
                 fst_counts_n = torch.tensor(
-                    grouped_sc_fingerprint_dtm.dense_family_size_truncated_count_matrix[:, gene_index],
+                    grouped_sc_fingerprint_dtm.dense_family_size_truncated_count_matrix_ndarray[:, gene_index],
                     device=self.device, dtype=self.dtype)
 
                 # calculate NB prior loc and scale for each particle
