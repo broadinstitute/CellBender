@@ -35,6 +35,8 @@ class HighlyVariableGenesSelector:
             'hvg.n_selected_genes']
         self.hvg_neglect_expr_bottom_fraction: float = init_params_dict[
             'hvg.neglect_expr_bottom_fraction']
+        self.hvg_neglect_expr_top_fraction: float = init_params_dict[
+            'hvg.neglect_expr_top_fraction']
         self.hvg_gene_group_prefixes: Optional[List[str]] = init_params_dict[
             'hvg.gene_group_prefixes']
 
@@ -210,12 +212,14 @@ class HighlyVariableGenesSelector:
         highly_variable_gene_indices_per_group_dict: Dict[str, List[int]] = dict()
         for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
             group_n_genes = self.grouped_sc_fingerprint_dtm_dict[gene_group_name].n_genes
-            sorted_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
+            sorted_lo_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
+            sorted_hi_cutoff_index = int(np.floor((1 - self.hvg_neglect_expr_top_fraction) * group_n_genes))
             x_data = self.expr_model_dict[gene_group_name].log_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
-            x_cutoff = np.sort(x_data)[sorted_cutoff_index]
+            x_lo_cutoff = np.sort(x_data)[sorted_lo_cutoff_index]
+            x_hi_cutoff = np.sort(x_data)[sorted_hi_cutoff_index]
             bottom_removed_gene_indices = [
                 gene_index for gene_index in range(group_n_genes)
-                if x_data[gene_index] >= x_cutoff]
+                if x_lo_cutoff <= x_data[gene_index] <= x_hi_cutoff]
             indexed_log_pearson_residual_std_g = [
                 (gene_index, log_pearson_residual_std_g[gene_index])
                 for gene_index in bottom_removed_gene_indices]
@@ -255,11 +259,14 @@ class HighlyVariableGenesSelector:
 
         # shade out lowly expressed genes that are not included in HVG analysis
         group_n_genes = self.grouped_sc_fingerprint_dtm_dict[gene_group_name].n_genes
-        sorted_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
-        x_cutoff = np.sort(data_x)[sorted_cutoff_index]
+        sorted_lo_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
+        sorted_hi_cutoff_index = int(np.floor((1 - self.hvg_neglect_expr_top_fraction) * group_n_genes))
+        x_lo_cutoff = np.sort(data_x)[sorted_lo_cutoff_index]
+        x_hi_cutoff = np.sort(data_x)[sorted_hi_cutoff_index]
         colors = np.zeros((len(data_x), 4))
         colors[:, 3] = 0.5
-        colors[data_x < x_cutoff, 0] = 0.5
+        colors[data_x < x_lo_cutoff, 0] = 0.5
+        colors[data_x > x_hi_cutoff, 0] = 0.5
 
         # make scatter plot
         ax.scatter(data_x, data_y, s=10, c=colors)
