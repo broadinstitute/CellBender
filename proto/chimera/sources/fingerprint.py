@@ -497,7 +497,7 @@ class SingleCellFingerprintDTM:
     @cachedproperty
     def dense_count_matrix_ndarray(self) -> np.ndarray:
         self._log_caching("dense_count_matrix_ndarray")
-        return np.sum(self.dense_fingerprint_ndarray, -1)
+        np.asarray(self.sparse_count_matrix_csr.todense()).astype(self.numpy_dtype)
 
     @cachedproperty
     def expressing_cells_per_gene_dict(self) -> Dict[int, List[int]]:
