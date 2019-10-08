@@ -490,6 +490,13 @@ class SingleCellFingerprintDTM:
         return count_matrix_truncation_factor_per_gene
 
     @cachedproperty
+    def median_based_hard_expression_mask(self) -> np.ndarray:
+        dense_fst_count_matrix = self.dense_family_size_truncated_count_matrix_ndarray
+        normed_fst_count_matrix: np.ndarray = dense_fst_count_matrix / self.empirical_droplet_efficiency[:, None]
+        median_normed_expr_per_gene = np.median(normed_fst_count_matrix, axis=0)
+        return normed_fst_count_matrix > median_normed_expr_per_gene[None, :]
+
+    @cachedproperty
     def dense_family_size_truncated_count_matrix_ndarray(self) -> np.ndarray:
         self._log_caching("dense_family_size_truncated_count_matrix")
         return np.asarray(self.sparse_family_size_truncated_count_matrix_csr.todense()).astype(self.numpy_dtype)
@@ -611,19 +618,22 @@ class SingleCellFingerprintDTM:
             "Highly variable genes for PCA features are not provided yet -- cannot continue."
 
         # obtain raw counts of HVG
-        raw_count_matrix = np.asarray(
+        fst_count_matrix = np.asarray(
             self.sparse_family_size_truncated_count_matrix_csc[:, self.highly_variable_gene_indices].todense()
         ).astype(self.numpy_dtype)
 
+        # set the expression of genes below median to zero
+        median_thresholded_fst_count_matrix = fst_count_matrix * self.median_based_hard_expression_mask
+
         # normalize by empirical droplet efficiency (total UMIs per cell)
-        normed_count_matrix = raw_count_matrix / self.empirical_droplet_efficiency[:, None]
+        normed_mt_fst_count_matrix = median_thresholded_fst_count_matrix / self.empirical_droplet_efficiency[:, None]
 
         # log1p transformation after droplet efficiency normalization
-        trans_normed_count_matrix = np.log1p(normed_count_matrix)
+        log1p_normed_mt_fst_count_matrix = np.log1p(normed_mt_fst_count_matrix)
 
         # perform PCA
         pca_features = PCA(n_components=self.n_cell_pca_features, whiten=True).fit_transform(
-            trans_normed_count_matrix)
+            log1p_normed_mt_fst_count_matrix)
 
         # # log empirical cell size
         # log_empirical_cell_size = np.log(self.empirical_droplet_efficiency)
@@ -952,15 +962,20 @@ class SingleCellFingerprintDTM:
         else:
             counts_array.fill(0)
 
-        if count_matrix_type == 'truncated':
+        if count_matrix_type == 'mt-fst':  # median-thresholded + family-size-truncated
+            counts_array[:mb_size] = (
+                    self.dense_family_size_truncated_count_matrix_ndarray[cell_index_array, gene_index_array]
+                    * self.median_based_hard_expression_mask[cell_index_array, gene_index_array])
+            counts_truncation_rate_array = self.family_size_truncation_rate_per_gene[gene_index_array]
+        elif count_matrix_type == 'fst':  # family-size-truncated
             counts_array[:mb_size] = self.dense_family_size_truncated_count_matrix_ndarray[
                 cell_index_array, gene_index_array]
             counts_truncation_rate_array = self.family_size_truncation_rate_per_gene[gene_index_array]
-        elif count_matrix_type == 'raw':
+        elif count_matrix_type == 'raw':  # raw
             counts_array[:mb_size] = self.dense_count_matrix_ndarray[cell_index_array, gene_index_array]
             counts_truncation_rate_array = np.ones_like(counts_array[:mb_size])
         else:
-            raise ValueError("Unknown count matrix type! allowed values are: 'truncated', 'raw'")
+            raise ValueError("Unknown count matrix type! allowed values are: 'mt-fst', 'fst', 'raw'")
 
         counts_tensor = torch.tensor(
             counts_array[:mb_size], device=self.device, dtype=self.dtype)

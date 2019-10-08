@@ -577,7 +577,7 @@ class FeatureBasedGeneExpressionModelTrainer:
                 minibatch_expressing_cells_per_gene,
                 minibatch_silent_cells_per_gene,
                 minibatch_sampling_strategy,
-                count_matrix_type='truncated')
+                count_matrix_type='mt-fst')
 
             mb_loss = self.svi.step(mb_data) / self.loss_scale
 
