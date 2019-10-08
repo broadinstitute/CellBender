@@ -623,7 +623,9 @@ class SingleCellFingerprintDTM:
         ).astype(self.numpy_dtype)
 
         # set the expression of genes below median to zero
-        median_thresholded_fst_count_matrix = fst_count_matrix * self.median_based_hard_expression_mask
+        median_thresholded_fst_count_matrix = (
+                fst_count_matrix
+                * self.median_based_hard_expression_mask[:, self.highly_variable_gene_indices])
 
         # normalize by empirical droplet efficiency (total UMIs per cell)
         normed_mt_fst_count_matrix = median_thresholded_fst_count_matrix / self.empirical_droplet_efficiency[:, None]
