@@ -283,9 +283,13 @@ class HighlyVariableGenesSelector:
         ax.set_ylabel('log residual std expression', fontsize=14)
 
     def plot_diagnostics(self, plt: pylab):
-        fig, axs_matrix = plt.subplots(nrows=self.n_groups, ncols=3, figsize=(16, self.n_groups * 4))
+        fig, axs_matrix = plt.subplots(
+            nrows=self.n_groups,
+            ncols=VSGPGeneExpressionModel.LATENT_DIM + 1,
+            figsize=(16, self.n_groups * 4))
         if self.n_groups == 1:
             axs_matrix = axs_matrix[None, :]
+
         for gene_group_name, axs in zip(self.gene_group_internal_indices_dict.keys(), axs_matrix):
             self.expr_model_trainer_dict[gene_group_name].plot_diagnostics(axs)
         plt.tight_layout()

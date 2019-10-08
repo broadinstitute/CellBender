@@ -283,7 +283,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         pyro.sample("alpha_c", dist.Delta(v=alpha_c_posterior_loc))
         pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
 
-        # e_Hi prior ZINB parameters
+        # gene expression posterior parameters
         beta_nr = self.gene_expression_model.guide(data)
 
         # fsd posterior parameters
@@ -341,7 +341,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         :return: Poisson rate of chimeric molecule formation
         """
         scaled_mu_fsd_hi_n = mu_fsd_hi_n / mean_empirical_fsd_mu_hi
-        rho_n = (alpha_c * eta_n + beta_c) # * scaled_mu_fsd_hi_n
+        rho_n = (alpha_c * eta_n + beta_c) * scaled_mu_fsd_hi_n
         total_fragments_n = total_obs_gene_expr_per_cell_n / (rho_n * p_obs_lo_n + p_obs_hi_n)
         mu_e_lo_n = rho_n * total_fragments_n
         return mu_e_lo_n
