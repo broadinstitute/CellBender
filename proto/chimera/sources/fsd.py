@@ -745,15 +745,10 @@ class FSDModelGPLVMRestricted(FSDModel):
             jitter=self.fsd_gplvm_cholesky_jitter)
 
         # trainable parameters
-        init_fsd_mu_lo, _, _, _, _, _ = \
-            self.generate_fsd_init_params(
-                mu_hi_guess=np.mean(self.sc_fingerprint_dtm.empirical_fsd_mu_hi),
-                phi_hi_guess=np.mean(self.sc_fingerprint_dtm.empirical_fsd_phi_hi))
-
         self.log_mu_lo_intercept = Parameter(
-            torch.tensor(np.log(init_fsd_mu_lo), device=self.device, dtype=self.dtype))
+            torch.tensor(np.log(self.fsd_init_mu_lo_to_mu_hi_ratio), device=self.device, dtype=self.dtype))
         self.log_mu_lo_slope = Parameter(
-            torch.tensor(0.0, device=self.device, dtype=self.dtype))
+            torch.tensor(1.0, device=self.device, dtype=self.dtype))
 
         self.fsd_latent_posterior_loc_gl = Parameter(
             torch.zeros(
