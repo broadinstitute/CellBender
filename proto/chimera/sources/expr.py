@@ -384,8 +384,20 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
 
         self.init_features_ard_scale = init_features_ard_scale
         self.phi_scale = phi_scale
+        self.hidden_dims = [10, 10, 10]
+        self.activation = torch.nn.Softplus()
 
+        # input and output dims
         self.n_input_features = sc_fingerprint_dtm.features_per_cell.shape[1]
+
+        # hidden layers
+        self.hidden_layers: torch.nn.ModuleList = torch.nn.ModuleList()
+        last_dim = self.n_input_features
+        for hidden_dim in self.hidden_dims:
+            layer = torch.nn.Linear(last_dim, hidden_dim)
+            self.hidden_layers.append(layer)
+            last_dim = hidden_dim
+        self.n_intermediate_features = last_dim
 
         # log mu weights ARD precisions
         self.gamma_ard_scale_f = Parameter(
@@ -402,7 +414,8 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
 
         # log mu weights (posterior)
         self.gamma_posterior_loc_gf = Parameter(
-            torch.zeros((self.sc_fingerprint_dtm.n_genes, self.n_input_features), device=device, dtype=dtype))
+            torch.zeros(
+                (self.sc_fingerprint_dtm.n_genes, self.n_intermediate_features), device=device, dtype=dtype))
 
         # send parameters to device
         self.to(device)
@@ -414,8 +427,6 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         assert 'gene_sampling_site_scale_factor_tensor' in data
 
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
-        gene_index_tensor_n = data['gene_index_tensor']
-
         mb_size = gene_sampling_site_scale_factor_tensor_n.shape[0]
 
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
@@ -425,19 +436,19 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                 "gamma_nf",
                 dist.Normal(
                     loc=torch.zeros((mb_size, self.n_input_features), device=self.device, dtype=self.dtype),
-                    scale=self.gamma_ard_scale_f.expand((mb_size, self.n_input_features))
+                    scale=self.gamma_ard_scale_f.expand((mb_size, self.n_intermediate_features))
                 ).to_event(1))
 
-            # # sample log alpha
-            # log_alpha_n = pyro.sample(
-            #     "log_alpha_n",
-            #     dist.Gumbel(
-            #         loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
-            #         scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
+            # sample log alpha
+            log_alpha_n = pyro.sample(
+                "log_alpha_n",
+                dist.Gumbel(
+                    loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
+                    scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
 
         return {
             'gamma_nf': gamma_nf,
-            'log_alpha_n': self.log_alpha_posterior_loc_g[gene_index_tensor_n]#log_alpha_n
+            'log_alpha_n': log_alpha_n
         }
 
     @autoname.scope(prefix="feature_based_expr")
@@ -457,14 +468,14 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                 "gamma_nf",
                 dist.Delta(v=self.gamma_posterior_loc_gf[gene_index_tensor_n, :]).to_event(1))
 
-            # # sample log alpha
-            # log_alpha_n = pyro.sample(
-            #     "log_alpha_n",
-            #     dist.Delta(v=self.log_alpha_posterior_loc_g[gene_index_tensor_n]))
+            # sample log alpha
+            log_alpha_n = pyro.sample(
+                "log_alpha_n",
+                dist.Delta(v=self.log_alpha_posterior_loc_g[gene_index_tensor_n]))
 
         return {
             'gamma_nf': gamma_nf,
-            'log_alpha_n': self.log_alpha_posterior_loc_g[gene_index_tensor_n]#log_alpha_n
+            'log_alpha_n': log_alpha_n
         }
 
     def decode_output_to_nb_params_dict(
@@ -484,9 +495,13 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         cell_features_nf = data['cell_features_tensor']
         eta_n = data['empirical_droplet_efficiency_tensor']
 
+        processed_features_nf = cell_features_nf
+        for layer in self.hidden_layers:
+            processed_features_nf = self.activation(layer(processed_features_nf))
+
         log_mu_e_hi_n = (
                 self.beta_posterior_loc_g[gene_index_tensor_n]
-                + torch.einsum('nf,nf->n', gamma_nf, cell_features_nf)
+                + torch.einsum('nf,nf->n', gamma_nf, processed_features_nf)
                 + eta_n.log())
         log_phi_e_hi_n = - log_alpha_n
 
