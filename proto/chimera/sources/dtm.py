@@ -228,7 +228,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             total_obs_gene_expr_per_cell_n=arithmetic_mean_obs_expr_per_gene_tensor_n)
 
         # prior fraction of observable chimeric molecules
-        e_lo_obs_prior_fraction = p_obs_lo_n * mu_e_hi_n / arithmetic_mean_obs_expr_per_gene_tensor_n
+        e_lo_obs_prior_fraction_n = p_obs_lo_n * mu_e_lo_n / arithmetic_mean_obs_expr_per_gene_tensor_n
 
         if posterior_sampling_mode:
 
