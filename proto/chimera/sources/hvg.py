@@ -171,6 +171,7 @@ class HighlyVariableGenesSelector:
             grouped_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
 
             with torch.no_grad():
+                expr_model.set_mode("model")
                 expr_model.vsgp.set_data(
                     X=expr_model.log_mean_obs_expr_g1,
                     y=None)
@@ -189,8 +190,11 @@ class HighlyVariableGenesSelector:
                     device=self.device, dtype=self.dtype)
 
                 # calculate NB prior loc and scale for each particle
-                prior_loc_n = (beta_loc_gr[gene_index, 0] + log_eta_n).exp()
-                prior_scale_n = (prior_loc_n + beta_loc_gr[gene_index, 1].exp() * prior_loc_n.pow(2)).sqrt()
+                beta_0 = beta_loc_gr[gene_index, 0]
+                beta_1 = beta_loc_gr[gene_index, 1]
+                beta_2 = beta_loc_gr[gene_index, 2]
+                prior_loc_n = (beta_0 + beta_1 * log_eta_n).exp()
+                prior_scale_n = (prior_loc_n + beta_2.exp() * prior_loc_n.pow(2)).sqrt()
 
                 # calculate the one-sided p-value of having excess variance for each particle
                 pearson_res_n = (counts_n - prior_loc_n) / prior_scale_n

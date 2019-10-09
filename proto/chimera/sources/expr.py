@@ -43,7 +43,7 @@ class GeneExpressionModel(Parameterized):
 class VSGPGeneExpressionModel(GeneExpressionModel):
     DEFAULT_GENE_GROUP_NAME = 'all'
     INPUT_DIM = 1
-    LATENT_DIM = 2
+    LATENT_DIM = 3
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
@@ -201,8 +201,8 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
         beta_nr = output_dict['beta_nr']
         eta_n = data['empirical_droplet_efficiency_tensor']
 
-        log_mu_e_hi_n = beta_nr[:, 0] + eta_n.log()
-        log_phi_e_hi_n = beta_nr[:, 1]
+        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * eta_n.log()
+        log_phi_e_hi_n = beta_nr[:, 2]
 
         return {
             'log_mu_e_hi_n': log_mu_e_hi_n,
@@ -355,7 +355,7 @@ class VSGPGeneExpressionModelTrainer:
         self.trained = True
 
     def plot_diagnostics(self, axs):
-        assert len(axs) == 3
+        assert len(axs) == self.vsgp_gene_expression_model.LATENT_DIM + 1
 
         # plot loss history
         ax = axs[0]
@@ -494,7 +494,6 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         log_alpha_n = output_dict['log_alpha_n']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_features_nf = data['cell_features_tensor']
-        # eta_n = data['empirical_droplet_efficiency_tensor']
 
         processed_features_nf = cell_features_nf
         for layer in self.hidden_layers:
@@ -503,7 +502,6 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         log_mu_e_hi_n = (
                 self.beta_posterior_loc_g[gene_index_tensor_n]
                 + torch.einsum('nf,nf->n', gamma_nf, processed_features_nf))
-                # + eta_n.log())
         log_phi_e_hi_n = - log_alpha_n
 
         return {
