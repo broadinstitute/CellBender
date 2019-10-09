@@ -227,7 +227,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             p_obs_hi_n=p_obs_hi_n,
             total_obs_gene_expr_per_cell_n=arithmetic_mean_obs_expr_per_gene_tensor_n)
 
-        phi_e_lo_n = phi_e_hi_n
+        # (test)
+        phi_e_lo_n = None
 
         if posterior_sampling_mode:
 
@@ -395,16 +396,17 @@ class DropletTimeMachineModel(torch.nn.Module):
         alpha_e_hi_n = phi_e_hi_n.reciprocal()
         omega_hi_mn = dist.Gamma(concentration=alpha_e_hi_n, rate=alpha_e_hi_n).rsample((n_particles,))
 
-        alpha_e_lo_n = phi_e_lo_n.reciprocal()
-        omega_lo_mn = dist.Gamma(concentration=alpha_e_lo_n, rate=alpha_e_lo_n).rsample((n_particles,))
+        # alpha_e_lo_n = phi_e_lo_n.reciprocal()
+        # omega_lo_mn = dist.Gamma(concentration=alpha_e_lo_n, rate=alpha_e_lo_n).rsample((n_particles,))
 
         # step 2. calculate the conditional log likelihood for each of the Gamma particles
         log_rate_combined_mnr = logaddexp(
-            log_rate_e_lo_nr + omega_lo_mn.log().unsqueeze(-1),
+            log_rate_e_lo_nr,  # + omega_lo_mn.log().unsqueeze(-1),
             log_rate_e_hi_nr + omega_hi_mn.log().unsqueeze(-1))
         log_poisson_e_hi_mn = (
             (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
-            - (total_obs_rate_lo_n * omega_lo_mn + total_obs_rate_hi_n * omega_hi_mn)
+            - total_obs_rate_lo_n  # * omega_lo_mn
+            - total_obs_rate_hi_n * omega_hi_mn
             - fingerprint_log_norm_factor_n)  # data-dependent norm factor can be dropped
 
         # step 3. average over the Gamma particles
