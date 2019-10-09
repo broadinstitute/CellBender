@@ -494,7 +494,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         log_alpha_n = output_dict['log_alpha_n']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_features_nf = data['cell_features_tensor']
-        eta_n = data['empirical_droplet_efficiency_tensor']
+        # eta_n = data['empirical_droplet_efficiency_tensor']
 
         processed_features_nf = cell_features_nf
         for layer in self.hidden_layers:
@@ -502,8 +502,8 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
 
         log_mu_e_hi_n = (
                 self.beta_posterior_loc_g[gene_index_tensor_n]
-                + torch.einsum('nf,nf->n', gamma_nf, processed_features_nf)
-                + eta_n.log())
+                + torch.einsum('nf,nf->n', gamma_nf, processed_features_nf))
+                # + eta_n.log())
         log_phi_e_hi_n = - log_alpha_n
 
         return {
