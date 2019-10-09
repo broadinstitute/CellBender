@@ -217,7 +217,9 @@ class HighlyVariableGenesSelector:
         for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
             group_n_genes = self.grouped_sc_fingerprint_dtm_dict[gene_group_name].n_genes
             sorted_lo_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
-            sorted_hi_cutoff_index = int(np.floor((1 - self.hvg_neglect_expr_top_fraction) * group_n_genes))
+            sorted_hi_cutoff_index = min(
+                int(np.floor((1 - self.hvg_neglect_expr_top_fraction) * group_n_genes)),
+                group_n_genes - 1)
             x_data = self.expr_model_dict[gene_group_name].log_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
             x_lo_cutoff = np.sort(x_data)[sorted_lo_cutoff_index]
             x_hi_cutoff = np.sort(x_data)[sorted_hi_cutoff_index]
@@ -264,7 +266,9 @@ class HighlyVariableGenesSelector:
         # shade out lowly expressed genes that are not included in HVG analysis
         group_n_genes = self.grouped_sc_fingerprint_dtm_dict[gene_group_name].n_genes
         sorted_lo_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
-        sorted_hi_cutoff_index = int(np.floor((1 - self.hvg_neglect_expr_top_fraction) * group_n_genes))
+        sorted_hi_cutoff_index = min(
+            int(np.floor((1 - self.hvg_neglect_expr_top_fraction) * group_n_genes)),
+            group_n_genes - 1)
         x_lo_cutoff = np.sort(data_x)[sorted_lo_cutoff_index]
         x_hi_cutoff = np.sort(data_x)[sorted_hi_cutoff_index]
         colors = np.zeros((len(data_x), 4))
