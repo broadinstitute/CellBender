@@ -62,6 +62,9 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         # logging
         self._logger = logging.getLogger()
+
+        # training toggles
+        self.train_gene_expression_model = True
                 
     def forward(self, _):
         raise NotImplementedError
@@ -153,7 +156,11 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(fsd_params_dict)
 
         # get e_hi prior parameters (per cell)
-        gene_expression_model_output_dict = self.gene_expression_model.model(data)
+        if self.train_gene_expression_model:
+            gene_expression_model_output_dict = self.gene_expression_model.model(data)
+        else:
+            with torch.no_grad():
+                gene_expression_model_output_dict = self.gene_expression_model.model(data)
 
         # calculate ZINB parameters
         e_hi_nb_params_dict = self.gene_expression_model.decode_output_to_nb_params_dict(
@@ -284,7 +291,11 @@ class DropletTimeMachineModel(torch.nn.Module):
         pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
 
         # gene expression posterior parameters
-        beta_nr = self.gene_expression_model.guide(data)
+        if self.train_gene_expression_model:
+            beta_nr = self.gene_expression_model.guide(data)
+        else:
+            with torch.no_grad():
+                beta_nr = self.gene_expression_model.guide(data)
 
         # fsd posterior parameters
         fsd_params_dict = self.fsd_model.guide(data)
