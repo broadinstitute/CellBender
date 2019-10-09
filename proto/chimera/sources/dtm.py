@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, List, Dict, Union, Any, Callable, Generator
+from typing import Tuple, List, Dict, Union, Any, Callable, Generator, Optional
 
 from boltons.cacheutils import cachedproperty
 
@@ -227,8 +227,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             p_obs_hi_n=p_obs_hi_n,
             total_obs_gene_expr_per_cell_n=arithmetic_mean_obs_expr_per_gene_tensor_n)
 
-        # (test)
-        phi_e_lo_n = None
+        # prior fraction of observable chimeric molecules
+        e_lo_obs_prior_fraction = p_obs_lo_n * mu_e_hi_n / arithmetic_mean_obs_expr_per_gene_tensor_n
 
         if posterior_sampling_mode:
 
@@ -245,7 +245,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
                 log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
                 mu_e_lo_n=mu_e_lo_n,
-                phi_e_lo_n=phi_e_lo_n,
+                phi_e_lo_n=None,
                 mu_e_hi_n=mu_e_hi_n,
                 phi_e_hi_n=phi_e_hi_n,
                 n_particles=self.n_particles_fingerprint_log_like)
@@ -312,7 +312,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                             log_prob_fsd_lo_obs_nr: torch.Tensor,
                             log_prob_fsd_hi_obs_nr: torch.Tensor,
                             mu_e_lo_n: torch.Tensor,
-                            phi_e_lo_n: torch.Tensor,
+                            phi_e_lo_n: Optional[torch.Tensor],
                             mu_e_hi_n: torch.Tensor,
                             phi_e_hi_n: torch.Tensor,
                             n_particles: int):
@@ -365,7 +365,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                                                     log_prob_fsd_lo_obs_nr: torch.Tensor,
                                                     log_prob_fsd_hi_obs_nr: torch.Tensor,
                                                     mu_e_lo_n: torch.Tensor,
-                                                    phi_e_lo_n: torch.Tensor,
+                                                    phi_e_lo_n: Optional[torch.Tensor],
                                                     mu_e_hi_n: torch.Tensor,
                                                     phi_e_hi_n: torch.Tensor,
                                                     n_particles: int) -> torch.Tensor:
@@ -381,6 +381,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         :param n_particles: number of MC samples to draw for marginalizing the ZIG prior for :math:`e^>`.
         :return: fingerprint log likelihood
         """
+
+        assert phi_e_lo_n is None  # (debug)
+
         # pre-compute useful tensors
         p_lo_obs_nr = log_prob_fsd_lo_obs_nr.exp()
         total_obs_rate_lo_n = mu_e_lo_n * p_lo_obs_nr.sum(-1)
