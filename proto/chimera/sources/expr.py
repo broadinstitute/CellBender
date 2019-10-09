@@ -414,6 +414,8 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         assert 'gene_sampling_site_scale_factor_tensor' in data
 
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+        gene_index_tensor_n = data['gene_index_tensor']
+
         mb_size = gene_sampling_site_scale_factor_tensor_n.shape[0]
 
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
@@ -426,16 +428,16 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                     scale=self.gamma_ard_scale_f.expand((mb_size, self.n_input_features))
                 ).to_event(1))
 
-            # sample log alpha
-            log_alpha_n = pyro.sample(
-                "log_alpha_n",
-                dist.Gumbel(
-                    loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
-                    scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
+            # # sample log alpha
+            # log_alpha_n = pyro.sample(
+            #     "log_alpha_n",
+            #     dist.Gumbel(
+            #         loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
+            #         scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
 
         return {
             'gamma_nf': gamma_nf,
-            'log_alpha_n': log_alpha_n
+            'log_alpha_n': self.log_alpha_posterior_loc_g[gene_index_tensor_n]#log_alpha_n
         }
 
     @autoname.scope(prefix="feature_based_expr")
@@ -455,14 +457,14 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                 "gamma_nf",
                 dist.Delta(v=self.gamma_posterior_loc_gf[gene_index_tensor_n, :]).to_event(1))
 
-            # sample log alpha
-            log_alpha_n = pyro.sample(
-                "log_alpha_n",
-                dist.Delta(v=self.log_alpha_posterior_loc_g[gene_index_tensor_n]))
+            # # sample log alpha
+            # log_alpha_n = pyro.sample(
+            #     "log_alpha_n",
+            #     dist.Delta(v=self.log_alpha_posterior_loc_g[gene_index_tensor_n]))
 
         return {
             'gamma_nf': gamma_nf,
-            'log_alpha_n': log_alpha_n
+            'log_alpha_n': self.log_alpha_posterior_loc_g[gene_index_tensor_n]#log_alpha_n
         }
 
     def decode_output_to_nb_params_dict(
