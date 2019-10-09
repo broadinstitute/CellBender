@@ -217,9 +217,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
         # calculate the (poisson) rate of chimeric molecule formation
-
-        # # mean e_hi per gene per cell
-        # mu_e_hi_cell_averaged_n = self._get_mu_e_hi_eta_averaged_n(beta_nr=beta_nr)
         mu_e_lo_n = self._get_mu_e_lo_n(
             alpha_c=alpha_c,
             beta_c=beta_c,
@@ -229,6 +226,8 @@ class DropletTimeMachineModel(torch.nn.Module):
             p_obs_lo_n=p_obs_lo_n,
             p_obs_hi_n=p_obs_hi_n,
             total_obs_gene_expr_per_cell_n=arithmetic_mean_obs_expr_per_gene_tensor_n)
+
+        phi_e_lo_n = phi_e_hi_n
 
         if posterior_sampling_mode:
 
@@ -245,6 +244,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
                 log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
                 mu_e_lo_n=mu_e_lo_n,
+                phi_e_lo_n=phi_e_lo_n,
                 mu_e_hi_n=mu_e_hi_n,
                 phi_e_hi_n=phi_e_hi_n,
                 n_particles=self.n_particles_fingerprint_log_like)
@@ -311,6 +311,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                             log_prob_fsd_lo_obs_nr: torch.Tensor,
                             log_prob_fsd_hi_obs_nr: torch.Tensor,
                             mu_e_lo_n: torch.Tensor,
+                            phi_e_lo_n: torch.Tensor,
                             mu_e_hi_n: torch.Tensor,
                             phi_e_hi_n: torch.Tensor,
                             n_particles: int):
@@ -321,6 +322,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
             log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
             mu_e_lo_n=mu_e_lo_n,
+            phi_e_lo_n=phi_e_lo_n,
             mu_e_hi_n=mu_e_hi_n,
             phi_e_hi_n=phi_e_hi_n,
             n_particles=n_particles)
@@ -362,6 +364,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                                                     log_prob_fsd_lo_obs_nr: torch.Tensor,
                                                     log_prob_fsd_hi_obs_nr: torch.Tensor,
                                                     mu_e_lo_n: torch.Tensor,
+                                                    phi_e_lo_n: torch.Tensor,
                                                     mu_e_hi_n: torch.Tensor,
                                                     phi_e_hi_n: torch.Tensor,
                                                     n_particles: int) -> torch.Tensor:
@@ -381,23 +384,27 @@ class DropletTimeMachineModel(torch.nn.Module):
         p_lo_obs_nr = log_prob_fsd_lo_obs_nr.exp()
         total_obs_rate_lo_n = mu_e_lo_n * p_lo_obs_nr.sum(-1)
         log_rate_e_lo_nr = mu_e_lo_n.log().unsqueeze(-1) + log_prob_fsd_lo_obs_nr
-        fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
 
         p_hi_obs_nr = log_prob_fsd_hi_obs_nr.exp()
         total_obs_rate_hi_n = mu_e_hi_n * p_hi_obs_nr.sum(-1)
         log_rate_e_hi_nr = mu_e_hi_n.log().unsqueeze(-1) + log_prob_fsd_hi_obs_nr
 
+        fingerprint_log_norm_factor_n = (fingerprint_tensor_nr + 1).lgamma().sum(-1)
+
         # step 1. draw re-parametrized Gamma particles
         alpha_e_hi_n = phi_e_hi_n.reciprocal()
-        omega_mn = dist.Gamma(concentration=alpha_e_hi_n, rate=alpha_e_hi_n).rsample((n_particles,))
+        omega_hi_mn = dist.Gamma(concentration=alpha_e_hi_n, rate=alpha_e_hi_n).rsample((n_particles,))
+
+        alpha_e_lo_n = phi_e_lo_n.reciprocal()
+        omega_lo_mn = dist.Gamma(concentration=alpha_e_lo_n, rate=alpha_e_lo_n).rsample((n_particles,))
 
         # step 2. calculate the conditional log likelihood for each of the Gamma particles
         log_rate_combined_mnr = logaddexp(
-            log_rate_e_lo_nr,
-            log_rate_e_hi_nr + omega_mn.log().unsqueeze(-1))
+            log_rate_e_lo_nr + omega_lo_mn.log().unsqueeze(-1),
+            log_rate_e_hi_nr + omega_hi_mn.log().unsqueeze(-1))
         log_poisson_e_hi_mn = (
             (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
-            - (total_obs_rate_lo_n + total_obs_rate_hi_n * omega_mn)
+            - (total_obs_rate_lo_n * omega_lo_mn + total_obs_rate_hi_n * omega_hi_mn)
             - fingerprint_log_norm_factor_n)  # data-dependent norm factor can be dropped
 
         # step 3. average over the Gamma particles
