@@ -374,6 +374,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  init_features_ard_scale: float = 1.0,
                  phi_scale: float = 0.1,
+                 enable_phi_prior: bool = True,
                  hidden_dims: List[int] = [],
                  activation: torch.nn.Module = torch.nn.Softplus(),
                  device: torch.device = torch.device('cuda'),
@@ -385,6 +386,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.dtype = dtype
         self.init_features_ard_scale = init_features_ard_scale
         self.phi_scale = phi_scale
+        self.enable_phi_prior = enable_phi_prior
         self.hidden_dims = hidden_dims
         self.activation = activation
 
@@ -426,8 +428,10 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.set_mode("model")
 
         assert 'gene_sampling_site_scale_factor_tensor' in data
+        assert 'gene_index_tensor' in data
 
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
+        gene_index_tensor_n = data['gene_index_tensor']
         mb_size = gene_sampling_site_scale_factor_tensor_n.shape[0]
 
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
@@ -440,12 +444,15 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                     scale=self.gamma_ard_scale_f.expand((mb_size, self.n_intermediate_features))
                 ).to_event(1))
 
-            # sample log alpha
-            log_alpha_n = pyro.sample(
-                "log_alpha_n",
-                dist.Gumbel(
-                    loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
-                    scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
+            if self.enable_phi_prior:
+                # sample log alpha
+                log_alpha_n = pyro.sample(
+                    "log_alpha_n",
+                    dist.Gumbel(
+                        loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
+                        scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
+            else:
+                log_alpha_n = self.log_alpha_posterior_loc_g[gene_index_tensor_n]
 
         return {
             'gamma_nf': gamma_nf,
@@ -469,10 +476,13 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                 "gamma_nf",
                 dist.Delta(v=self.gamma_posterior_loc_gf[gene_index_tensor_n, :]).to_event(1))
 
-            # sample log alpha
-            log_alpha_n = pyro.sample(
-                "log_alpha_n",
-                dist.Delta(v=self.log_alpha_posterior_loc_g[gene_index_tensor_n]))
+            if self.enable_phi_prior:
+                # sample log alpha
+                log_alpha_n = pyro.sample(
+                    "log_alpha_n",
+                    dist.Delta(v=self.log_alpha_posterior_loc_g[gene_index_tensor_n]))
+            else:
+                log_alpha_n = self.log_alpha_posterior_loc_g[gene_index_tensor_n]
 
         return {
             'gamma_nf': gamma_nf,
