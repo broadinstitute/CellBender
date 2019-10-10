@@ -53,9 +53,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             loc=init_params_dict['global.chimera_alpha_c_prior_loc'],
             scale=init_params_dict['global.chimera_alpha_c_prior_scale'])
 
-        # self.beta_c_prior_a, self.beta_c_prior_b = gamma_loc_scale_to_concentration_rate(
-        #     loc=init_params_dict['global.chimera_beta_c_prior_loc'],
-        #     scale=init_params_dict['global.chimera_beta_c_prior_scale'])
+        self.beta_c_prior_a, self.beta_c_prior_b = gamma_loc_scale_to_concentration_rate(
+            loc=init_params_dict['global.chimera_beta_c_prior_loc'],
+            scale=init_params_dict['global.chimera_beta_c_prior_scale'])
 
         # empirical normalization factors
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
@@ -128,10 +128,10 @@ class DropletTimeMachineModel(torch.nn.Module):
             self.alpha_c_prior_a, device=self.device, dtype=self.dtype)
         alpha_c_rate_scalar = torch.tensor(
             self.alpha_c_prior_b, device=self.device, dtype=self.dtype)
-        # beta_c_concentration_scalar = torch.tensor(
-        #     self.beta_c_prior_a, device=self.device, dtype=self.dtype)
-        # beta_c_rate_scalar = torch.tensor(
-        #     self.beta_c_prior_b, device=self.device, dtype=self.dtype)
+        beta_c_concentration_scalar = torch.tensor(
+            self.beta_c_prior_a, device=self.device, dtype=self.dtype)
+        beta_c_rate_scalar = torch.tensor(
+            self.beta_c_prior_b, device=self.device, dtype=self.dtype)
 
         # TODO move to __init__
         # useful auxiliary quantities
@@ -145,9 +145,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         alpha_c = pyro.sample(
             "alpha_c",
             dist.Gamma(concentration=alpha_c_concentration_scalar, rate=alpha_c_rate_scalar))
-        # beta_c = pyro.sample(
-        #     "beta_c",
-        #     dist.Gamma(concentration=beta_c_concentration_scalar, rate=beta_c_rate_scalar))
+        beta_c = pyro.sample(
+            "beta_c",
+            dist.Gamma(concentration=beta_c_concentration_scalar, rate=beta_c_rate_scalar))
 
         # sample fsd params
         fsd_params_dict = self.fsd_model.model(data)
@@ -219,7 +219,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         # calculate the (poisson) rate of chimeric molecule formation
         mu_e_lo_n = self._get_mu_e_lo_n(
             alpha_c=alpha_c,
-            #beta_c=beta_c,
+            beta_c=beta_c,
             eta_n=eta_n,
             mu_fsd_hi_n=mu_fsd_hi_n,
             mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
@@ -227,8 +227,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             p_obs_hi_n=p_obs_hi_n,
             total_obs_gene_expr_per_cell_n=arithmetic_mean_obs_expr_per_gene_tensor_n)
 
-        # prior fraction of observable chimeric molecules
-        e_lo_obs_prior_fraction_n = p_obs_lo_n * mu_e_lo_n / arithmetic_mean_obs_expr_per_gene_tensor_n
+        # prior fraction of observable chimeric molecules (for regularization)
+        rho_ave_n = (alpha_c + beta_c) * mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
+        e_lo_obs_prior_fraction_n = rho_ave_n * p_obs_lo_n / (rho_ave_n * p_obs_lo_n + p_obs_hi_n)
 
         if posterior_sampling_mode:
 
@@ -283,13 +284,13 @@ class DropletTimeMachineModel(torch.nn.Module):
             "alpha_c_posterior_loc",
             lambda: torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype),
             constraint=constraints.positive)
-        # beta_c_posterior_loc = pyro.param(
-        #     "beta_c_posterior_loc",
-        #     lambda: torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
-        #     constraint=constraints.positive)
+        beta_c_posterior_loc = pyro.param(
+            "beta_c_posterior_loc",
+            lambda: torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
+            constraint=constraints.positive)
 
         pyro.sample("alpha_c", dist.Delta(v=alpha_c_posterior_loc))
-        # pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
+        pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
 
         # gene expression posterior parameters
         if self.train_gene_expression_model:
@@ -340,7 +341,7 @@ class DropletTimeMachineModel(torch.nn.Module):
     @staticmethod
     def _get_mu_e_lo_n(
             alpha_c: torch.Tensor,
-            # beta_c: torch.Tensor,
+            beta_c: torch.Tensor,
             eta_n: torch.Tensor,
             mu_fsd_hi_n: torch.Tensor,
             mean_empirical_fsd_mu_hi: float,
@@ -355,9 +356,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         :return: Poisson rate of chimeric molecule formation
         """
         scaled_mu_fsd_hi_n = mu_fsd_hi_n / mean_empirical_fsd_mu_hi
-        # rho_n = (alpha_c * eta_n + beta_c) * scaled_mu_fsd_hi_n
-        rho_n = alpha_c * eta_n * scaled_mu_fsd_hi_n
-        total_fragments_n = total_obs_gene_expr_per_cell_n / (rho_n * p_obs_lo_n + p_obs_hi_n)
+        rho_n = (alpha_c + beta_c * eta_n) * scaled_mu_fsd_hi_n
+        rho_ave = (alpha_c + beta_c) * scaled_mu_fsd_hi_n
+        total_fragments_n = total_obs_gene_expr_per_cell_n / (rho_ave * p_obs_lo_n + p_obs_hi_n)
         mu_e_lo_n = rho_n * total_fragments_n
         return mu_e_lo_n
 
