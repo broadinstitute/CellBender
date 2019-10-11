@@ -440,7 +440,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
             gamma_nf = pyro.sample(
                 "gamma_nf",
                 dist.Normal(
-                    loc=torch.zeros((mb_size, self.n_input_features), device=self.device, dtype=self.dtype),
+                    loc=torch.zeros((mb_size, self.n_intermediate_features), device=self.device, dtype=self.dtype),
                     scale=self.gamma_ard_scale_f.expand((mb_size, self.n_intermediate_features))
                 ).to_event(1))
 
