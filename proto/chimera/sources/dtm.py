@@ -15,8 +15,9 @@ from pyro_extras import CustomLogProbTerm, logaddexp, get_log_prob_compl, \
 from fingerprint import SingleCellFingerprintDTM
 from fsd import FSDModel
 from expr import GeneExpressionModel
+from chimera import ChimeraRateModel
 from importance_sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
-from stats import int_ndarray_mode, gamma_loc_scale_to_concentration_rate
+from stats import int_ndarray_mode
 
 import logging
 
@@ -27,6 +28,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  gene_expression_model: GeneExpressionModel,
+                 chimera_rate_model: ChimeraRateModel,
                  fsd_model: FSDModel,
                  device=torch.device('cuda'),
                  dtype=torch.float):
@@ -35,6 +37,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.model_constraint_params_dict = model_constraint_params_dict
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.gene_expression_model = gene_expression_model
+        self.chimera_rate_model = chimera_rate_model
         self.fsd_model = fsd_model
 
         self.device = device
@@ -48,14 +51,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.w_hi_dirichlet_concentration: float = init_params_dict['fsd.w_hi_dirichlet_concentration']
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
-
-        self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
-            loc=init_params_dict['global.chimera_alpha_c_prior_loc'],
-            scale=init_params_dict['global.chimera_alpha_c_prior_scale'])
-
-        self.beta_c_prior_a, self.beta_c_prior_b = gamma_loc_scale_to_concentration_rate(
-            loc=init_params_dict['global.chimera_beta_c_prior_loc'],
-            scale=init_params_dict['global.chimera_beta_c_prior_scale'])
 
         # empirical normalization factors
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
@@ -121,33 +116,14 @@ class DropletTimeMachineModel(torch.nn.Module):
         # register the external modules
         pyro.module("fsd_model", self.fsd_model, update_module_params=True)
         pyro.module("gene_expression_model", self.gene_expression_model, update_module_params=True)
+        pyro.module("chimera_rate_model", self.chimera_rate_model, update_module_params=True)
 
-        # TODO move to __init__
-        # chimera hyperparameters
-        alpha_c_concentration_scalar = torch.tensor(
-            self.alpha_c_prior_a, device=self.device, dtype=self.dtype)
-        alpha_c_rate_scalar = torch.tensor(
-            self.alpha_c_prior_b, device=self.device, dtype=self.dtype)
-        beta_c_concentration_scalar = torch.tensor(
-            self.beta_c_prior_a, device=self.device, dtype=self.dtype)
-        beta_c_rate_scalar = torch.tensor(
-            self.beta_c_prior_b, device=self.device, dtype=self.dtype)
-
-        # TODO move to __init__
         # useful auxiliary quantities
         family_size_vector_obs_r = torch.arange(
             1, max_family_size + 1, device=self.device, dtype=self.dtype)
         family_size_vector_full_r = torch.arange(
             0, max_family_size + 1, device=self.device, dtype=self.dtype)
         zero = torch.tensor(0, device=self.device, dtype=self.dtype)
-
-        # sample chimera parameters
-        alpha_c = pyro.sample(
-            "alpha_c",
-            dist.Gamma(concentration=alpha_c_concentration_scalar, rate=alpha_c_rate_scalar))
-        beta_c = pyro.sample(
-            "beta_c",
-            dist.Gamma(concentration=beta_c_concentration_scalar, rate=beta_c_rate_scalar))
 
         # sample fsd params
         fsd_params_dict = self.fsd_model.model(data)
@@ -156,13 +132,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(fsd_params_dict)
 
         # get e_hi prior parameters (per cell)
-        if self.train_gene_expression_model:
-            gene_expression_model_output_dict = self.gene_expression_model.model(data)
-        else:
-            with torch.no_grad():
-                gene_expression_model_output_dict = self.gene_expression_model.model(data)
+        gene_expression_model_output_dict = self.gene_expression_model.model(data)
 
-        # calculate ZINB parameters
+        # calculate NB parameters
         e_hi_nb_params_dict = self.gene_expression_model.decode_output_to_nb_params_dict(
             output_dict=gene_expression_model_output_dict,
             data=data)
@@ -216,20 +188,23 @@ class DropletTimeMachineModel(torch.nn.Module):
         # total observed molecules per cell
         e_obs_n = fingerprint_tensor_nr.sum(-1)
 
-        # calculate the (poisson) rate of chimeric molecule formation
-        mu_e_lo_n = self._get_mu_e_lo_n(
-            alpha_c=alpha_c,
-            beta_c=beta_c,
-            eta_n=eta_n,
-            mu_fsd_hi_n=mu_fsd_hi_n,
-            mean_empirical_fsd_mu_hi=self.mean_empirical_fsd_mu_hi,
-            p_obs_lo_n=p_obs_lo_n,
-            p_obs_hi_n=p_obs_hi_n,
-            total_obs_gene_expr_per_cell_n=arithmetic_mean_obs_expr_per_gene_tensor_n)
+        # sample chimera parameters
+        chimera_rate_model_output_dict = self.chimera_rate_model.model(data)
 
-        # prior fraction of observable chimeric molecules (for regularization)
-        rho_ave_n = (alpha_c + beta_c) * mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
-        e_lo_obs_prior_fraction_n = rho_ave_n * p_obs_lo_n / (rho_ave_n * p_obs_lo_n + p_obs_hi_n)
+        # extract chimera rate parameters
+        chimera_rate_params_dict = self.chimera_rate_model.decode_output_to_chimera_rate(
+            output_dict=chimera_rate_model_output_dict,
+            data_dict=data,
+            parents_dict={
+                'mu_fsd_hi_n': mu_fsd_hi_n,
+                'eta_n': eta_n,
+                'total_obs_gene_expr_per_cell_n': arithmetic_mean_obs_expr_per_gene_tensor_n,
+                'p_obs_lo_n': p_obs_lo_n,
+                'p_obs_hi_n': p_obs_hi_n
+            })
+
+        mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']
+        e_lo_obs_prior_fraction_n = chimera_rate_params_dict['e_lo_obs_prior_fraction_n']
 
         if posterior_sampling_mode:
 
@@ -278,33 +253,21 @@ class DropletTimeMachineModel(torch.nn.Module):
         # register the external modules
         pyro.module("fsd_model", self.fsd_model, update_module_params=True)
         pyro.module("gene_expression_model", self.gene_expression_model, update_module_params=True)
-
-        # point estimate for chimera parameters
-        alpha_c_posterior_loc = pyro.param(
-            "alpha_c_posterior_loc",
-            lambda: torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype),
-            constraint=constraints.positive)
-        beta_c_posterior_loc = pyro.param(
-            "beta_c_posterior_loc",
-            lambda: torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
-            constraint=constraints.positive)
-
-        pyro.sample("alpha_c", dist.Delta(v=alpha_c_posterior_loc))
-        pyro.sample("beta_c", dist.Delta(v=beta_c_posterior_loc))
+        pyro.module("chimera_rate_model", self.chimera_rate_model, update_module_params=True)
 
         # gene expression posterior parameters
-        if self.train_gene_expression_model:
-            beta_nr = self.gene_expression_model.guide(data)
-        else:
-            with torch.no_grad():
-                beta_nr = self.gene_expression_model.guide(data)
+        gene_expr_guide_output_dict = self.gene_expression_model.guide(data)
 
         # fsd posterior parameters
-        fsd_params_dict = self.fsd_model.guide(data)
-        
+        fsd_guide_output_dict = self.fsd_model.guide(data)
+
+        # sample chimera parameters
+        chimera_rate_guide_output_dict = self.chimera_rate_model.guide(data)
+
         return {
-            'beta_nr': beta_nr,
-            'fsd_params_dict': fsd_params_dict}
+            'gene_expr_guide_output_dict': gene_expr_guide_output_dict,
+            'fsd_guide_output_dict': fsd_guide_output_dict,
+            'chimera_rate_guide_output_dict': chimera_rate_guide_output_dict}
 
     @staticmethod
     def _sample_fingerprint(batch_shape: torch.Size,
