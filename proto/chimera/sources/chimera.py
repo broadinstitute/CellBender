@@ -50,12 +50,12 @@ class UniformChimeraRateModel(ChimeraRateModel):
         self.dtype = dtype
 
         self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
-            loc=init_params_dict['chimera_alpha_c_prior_loc'],
-            scale=init_params_dict['chimera_alpha_c_prior_scale'])
+            loc=init_params_dict['chimera.alpha_c_prior_loc'],
+            scale=init_params_dict['chimera.alpha_c_prior_scale'])
 
         self.beta_c_prior_a, self.beta_c_prior_b = gamma_loc_scale_to_concentration_rate(
-            loc=init_params_dict['chimera_beta_c_prior_loc'],
-            scale=init_params_dict['chimera_beta_c_prior_scale'])
+            loc=init_params_dict['chimera.beta_c_prior_loc'],
+            scale=init_params_dict['chimera.beta_c_prior_scale'])
 
         # chimera hyperparameters
         self.alpha_c_concentration_scalar = torch.tensor(
