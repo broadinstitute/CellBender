@@ -741,7 +741,7 @@ class FSDModelGPLVMRestricted(FSDModel):
             likelihood=None,
             mean_function=mean_function,
             latent_shape=torch.Size([self.fsd_xi_dim]),
-            whiten=True,
+            whiten=False,
             jitter=self.fsd_gplvm_cholesky_jitter)
 
         # trainable parameters
