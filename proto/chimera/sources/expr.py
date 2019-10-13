@@ -122,7 +122,7 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             likelihood=None,
             mean_function=mean_function,
             latent_shape=torch.Size([VSGPGeneExpressionModel.LATENT_DIM]),
-            whiten=True,
+            whiten=False,
             jitter=cholesky_jitter)
 
         # posterior parameters
