@@ -382,6 +382,7 @@ class FSDModelGPLVM(FSDModel):
         self.fsd_gplvm_cholesky_jitter = init_params_dict['fsd.gplvm.cholesky_jitter']
         self.fsd_gplvm_min_noise = init_params_dict['fsd.gplvm.min_noise']
         self.fsd_init_xi_posterior_scale = init_params_dict['fsd.init_fsd_xi_posterior_scale']
+        self.fsd_xi_posterior_min_scale = init_params_dict['fsd.xi_posterior_min_scale']
 
         self.device = device
         self.dtype = dtype
@@ -432,7 +433,9 @@ class FSDModelGPLVM(FSDModel):
             torch.ones(
                 (sc_fingerprint_dtm.n_genes, self.fsd_gplvm_latent_dim),
                 device=device, dtype=dtype))
-        self.set_constraint("fsd_latent_posterior_scale_gl", constraints.positive)
+        self.set_constraint(
+            "fsd_latent_posterior_scale_gl",
+            constraints.greater_than(self.fsd_gplvm_min_noise))
 
         self.fsd_xi_posterior_loc_gq = Parameter(
             self.init_fsd_xi_loc_posterior.clone().detach()
@@ -441,7 +444,9 @@ class FSDModelGPLVM(FSDModel):
             self.fsd_init_xi_posterior_scale * torch.ones(
                 (sc_fingerprint_dtm.n_genes, self.fsd_xi_dim),
                 device=device, dtype=dtype))
-        self.set_constraint("fsd_xi_posterior_scale_gq", constraints.positive)
+        self.set_constraint(
+            "fsd_xi_posterior_scale_gq",
+            constraints.greater_than(self.fsd_xi_posterior_min_scale))
 
         # send parameters to device
         self.to(device)
