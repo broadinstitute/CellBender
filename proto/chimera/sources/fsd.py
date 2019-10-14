@@ -435,7 +435,8 @@ class FSDModelGPLVM(FSDModel):
         self.set_constraint("fsd_latent_posterior_scale_gl", constraints.positive)
 
         self.fsd_xi_posterior_loc_gq = Parameter(
-            self.init_fsd_xi_loc_posterior.clone().detach())
+            self.init_fsd_xi_loc_posterior.clone().detach()
+            + self.fsd_init_xi_posterior_scale * torch.randn_like(self.init_fsd_xi_loc_posterior))
         self.fsd_xi_posterior_scale_gq = Parameter(
             self.fsd_init_xi_posterior_scale * torch.ones(
                 (sc_fingerprint_dtm.n_genes, self.fsd_xi_dim),
