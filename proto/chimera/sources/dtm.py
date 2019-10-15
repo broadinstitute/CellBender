@@ -30,6 +30,8 @@ class DropletTimeMachineModel(torch.nn.Module):
                  gene_expression_model: GeneExpressionModel,
                  chimera_rate_model: ChimeraRateModel,
                  fsd_model: FSDModel,
+                 monitor_constraint_pressure: bool = False,
+                 constraint_pressure_forgetting_factor: float = 0.995,
                  device=torch.device('cuda'),
                  dtype=torch.float):
         super(DropletTimeMachineModel, self).__init__()
@@ -39,6 +41,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.gene_expression_model = gene_expression_model
         self.chimera_rate_model = chimera_rate_model
         self.fsd_model = fsd_model
+
+        self.monitor_constraint_pressure = monitor_constraint_pressure
+        self.constraint_pressure_forgetting_factor = constraint_pressure_forgetting_factor
 
         self.device = device
         self.dtype = dtype
@@ -58,9 +63,18 @@ class DropletTimeMachineModel(torch.nn.Module):
         # logging
         self._logger = logging.getLogger()
 
-        # training toggles
-        self.train_gene_expression_model = True
-                
+        # constraint pressure
+        if self.monitor_constraint_pressure:
+            self.constraint_pressure_dict = dict()
+            for var_name, var_constraint_params in model_constraint_params_dict.items():
+                self.constraint_pressure_dict[var_name] = dict()
+                if 'lower_bound_value' in var_constraint_params:
+                    self.constraint_pressure_dict[var_name]['lower_bound_pressure'] = 0.0
+                if 'upper_bound_value' in var_constraint_params:
+                    self.constraint_pressure_dict[var_name]['upper_bound_pressure'] = 0.0
+                if 'pin_value' in var_constraint_params:
+                    self.constraint_pressure_dict[var_name]['pinning_pressure'] = 0.0
+
     def forward(self, _):
         raise NotImplementedError
 
@@ -382,8 +396,8 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         return log_like_n
 
-    @staticmethod
     def _sample_gene_plate_soft_constraints(
+            self,
             model_constraint_params_dict: Dict[str, Dict[str, float]],
             model_vars_dict: Dict[str, torch.Tensor],
             gene_sampling_site_scale_factor_tensor_n: torch.Tensor,
@@ -417,6 +431,13 @@ class DropletTimeMachineModel(torch.nn.Module):
                                           event_shape=torch.Size([])),
                         obs=torch.zeros_like(constraint_log_prob))
 
+                    if self.monitor_constraint_pressure:
+                        self.constraint_pressure_dict[var_name]['lower_bound_pressure'] = (
+                            self.constraint_pressure_forgetting_factor
+                            * self.constraint_pressure_dict[var_name]['lower_bound_pressure']
+                            + (1 - self.constraint_pressure_forgetting_factor)
+                            * constraint_log_prob.abs().sum().item())
+
                 if 'upper_bound_value' in var_constraint_params:
                     value = var_constraint_params['upper_bound_value']
                     width = var_constraint_params['upper_bound_width']
@@ -435,6 +456,13 @@ class DropletTimeMachineModel(torch.nn.Module):
                                           event_shape=torch.Size([])),
                         obs=torch.zeros_like(constraint_log_prob))
 
+                    if self.monitor_constraint_pressure:
+                        self.constraint_pressure_dict[var_name]['upper_bound_pressure'] = (
+                                self.constraint_pressure_forgetting_factor
+                                * self.constraint_pressure_dict[var_name]['upper_bound_pressure']
+                                + (1 - self.constraint_pressure_forgetting_factor)
+                                * constraint_log_prob.abs().sum().item())
+
                 if 'pin_value' in var_constraint_params:
                     value = var_constraint_params['pin_value']
                     exponent = var_constraint_params['pin_exponent']
@@ -451,6 +479,13 @@ class DropletTimeMachineModel(torch.nn.Module):
                                           batch_shape=batch_shape,
                                           event_shape=torch.Size([])),
                         obs=torch.zeros_like(constraint_log_prob))
+
+                    if self.monitor_constraint_pressure:
+                        self.constraint_pressure_dict[var_name]['pinning_pressure'] = (
+                                self.constraint_pressure_forgetting_factor
+                                * self.constraint_pressure_dict[var_name]['pinning_pressure']
+                                + (1 - self.constraint_pressure_forgetting_factor)
+                                * constraint_log_prob.abs().sum().item())
 
     @staticmethod
     def _sample_fsd_weight_sparsity_regularization(
