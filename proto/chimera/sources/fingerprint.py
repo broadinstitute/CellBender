@@ -332,8 +332,13 @@ class SingleCellFingerprintDTM:
 
         # total observed expression of all genes
         if np.any(sc_fingerprint_base.total_molecules_per_gene_g == 0):
-            self._logger.warning("Some of the genes in the provided fingerprint have zero counts in the "
-                                 "entire dataset!")
+            raise ValueError(
+                "Some of the genes in the provided fingerprint have zero counts for all droplets!")
+
+        # total observed counts per cell
+        if np.any(np.asarray(self.sparse_count_matrix_csr.sum(axis=-1))[0, :] == 0):
+            raise ValueError(
+                "Some of the droplets in the provided fingerprint have zero counts for all genes")
 
         # placeholder for lazy initialization
         self.highly_variable_gene_indices: Optional[List[int]] = None
@@ -622,13 +627,16 @@ class SingleCellFingerprintDTM:
             self.sparse_family_size_truncated_count_matrix_csc[:, self.highly_variable_gene_indices].todense()
         ).astype(self.numpy_dtype)
 
-        # set the expression of genes below median to zero
-        median_thresholded_fst_count_matrix = (
-                fst_count_matrix
-                * self.median_based_hard_expression_mask[:, self.highly_variable_gene_indices])
+        # # set the expression of genes below median to zero
+        # median_thresholded_fst_count_matrix = (
+        #         fst_count_matrix
+        #         * self.median_based_hard_expression_mask[:, self.highly_variable_gene_indices])
+        #
+        # # normalize by empirical droplet efficiency (total UMIs per cell)
+        # normed_mt_fst_count_matrix = median_thresholded_fst_count_matrix / self.empirical_droplet_efficiency[:, None]
 
         # normalize by empirical droplet efficiency (total UMIs per cell)
-        normed_mt_fst_count_matrix = median_thresholded_fst_count_matrix / self.empirical_droplet_efficiency[:, None]
+        normed_mt_fst_count_matrix = fst_count_matrix / self.empirical_droplet_efficiency[:, None]
 
         # log1p transformation after droplet efficiency normalization
         log1p_normed_mt_fst_count_matrix = np.log1p(normed_mt_fst_count_matrix)
