@@ -1,5 +1,5 @@
 # Start from nvidia-docker image with drivers pre-installed to use a GPU
-FROM nvcr.io/nvidia/cuda:9.0-base-ubuntu16.04
+FROM nvcr.io/nvidia/cuda:9.2-base-ubuntu16.04
 
 LABEL maintainer="Stephen Fleming <sfleming@broadinstitute.org>"
 
@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && chmod +x ~/miniconda.sh \
  && ~/miniconda.sh -b -p ~/miniconda \
  && rm ~/miniconda.sh \
- && ~/miniconda/bin/conda install -y pytorch torchvision cudatoolkit=9.0 -c pytorch \
+ && ~/miniconda/bin/conda install -y pytorch torchvision cudatoolkit=9.2 -c pytorch \
  && ~/miniconda/bin/conda install -y -c anaconda pytables \
  && ~/miniconda/bin/conda clean -ya \
  && git clone https://github.com/broadinstitute/CellBender.git cellbender \
