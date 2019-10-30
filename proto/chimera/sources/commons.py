@@ -95,7 +95,7 @@ class MoleculeInfo:
             self.reads_array = mol_h5_tab.root.count.read()
             if extended:
                 logging.warning('Extended mode: loading H5 additional columns in memory...')
-                self.umi_array= mol_h5_tab.root.umi.raed()
+                self.umi_array = mol_h5_tab.root.umi.read()
                 self.conf_mapped_uniq_read_pos_array = None
                 self.nonconf_mapped_reads_array = None
                 self.unmapped_reads_array = None
@@ -105,7 +105,7 @@ class MoleculeInfo:
             gene_names_tsv_pd = pd.read_csv(genes_tsv_path, delimiter='\t', header=None)
             self.gene_names_array = gene_names_tsv_pd.values[:, 0].astype(str)
             self.gene_ids_array = self.gene_names_array
-            self.unmappable_gene_idx = len(gene_names_array)
+            self.unmappable_gene_idx = len(self.gene_names_array)
         elif cr_version == 'v2':
             self.gene_names_array = mol_h5_tab.root.gene_names.read()
             self.gene_ids_array = mol_h5_tab.root.gene_ids.read()
