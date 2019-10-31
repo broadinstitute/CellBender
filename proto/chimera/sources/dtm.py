@@ -155,6 +155,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n']
         log_phi_e_hi_n = e_hi_nb_params_dict['log_phi_e_hi_n']
+        mu_e_hi_cell_averaged_n = e_hi_nb_params_dict['mu_e_hi_cell_averaged_n']
 
         mu_e_hi_n = log_mu_e_hi_n.exp()
         phi_e_hi_n = log_phi_e_hi_n.exp()
@@ -212,9 +213,10 @@ class DropletTimeMachineModel(torch.nn.Module):
             parents_dict={
                 'mu_fsd_hi_n': mu_fsd_hi_n,
                 'eta_n': eta_n,
-                'total_obs_gene_expr_per_cell_n': arithmetic_mean_obs_expr_per_gene_tensor_n,
-                'p_obs_lo_n': p_obs_lo_n,
-                'p_obs_hi_n': p_obs_hi_n
+                'mu_e_hi_cell_averaged_n': mu_e_hi_cell_averaged_n
+                # 'total_obs_gene_expr_per_cell_n': arithmetic_mean_obs_expr_per_gene_tensor_n,
+                # 'p_obs_lo_n': p_obs_lo_n,
+                # 'p_obs_hi_n': p_obs_hi_n
             })
 
         mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']

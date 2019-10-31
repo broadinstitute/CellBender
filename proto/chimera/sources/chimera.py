@@ -125,28 +125,34 @@ class UniformChimeraRateModel(ChimeraRateModel):
 
         assert 'mu_fsd_hi_n' in parents_dict
         assert 'eta_n' in parents_dict
+
         assert 'total_obs_gene_expr_per_cell_n' in parents_dict
         assert 'p_obs_lo_n' in parents_dict
-        assert 'p_obs_hi_n' in parents_dict
+        # assert 'p_obs_hi_n' in parents_dict
+
+        assert 'mu_e_hi_cell_averaged_n' in parents_dict
 
         alpha_c = output_dict['alpha_c']
         beta_c = output_dict['beta_c']
 
         mu_fsd_hi_n = parents_dict['mu_fsd_hi_n']
         eta_n = parents_dict['eta_n']
+        mu_e_hi_cell_averaged_n = parents_dict['mu_e_hi_cell_averaged_n']
+
         total_obs_gene_expr_per_cell_n = parents_dict['total_obs_gene_expr_per_cell_n']
         p_obs_lo_n = parents_dict['p_obs_lo_n']
-        p_obs_hi_n = parents_dict['p_obs_hi_n']
+        # p_obs_hi_n = parents_dict['p_obs_hi_n']
 
         # calculate chimera rate
         scaled_mu_fsd_hi_n = mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
         rho_n = (alpha_c + beta_c * eta_n) * scaled_mu_fsd_hi_n
-        rho_ave_n = (alpha_c + beta_c) * scaled_mu_fsd_hi_n
-        total_fragments_n = total_obs_gene_expr_per_cell_n / (rho_ave_n * p_obs_lo_n + p_obs_hi_n)
-        mu_e_lo_n = rho_n * total_fragments_n
+        # total_fragments_n = total_obs_gene_expr_per_cell_n / (rho_ave_n * p_obs_lo_n + p_obs_hi_n)
+        mu_e_lo_n = rho_n * mu_e_hi_cell_averaged_n
 
         # prior fraction of observable chimeric molecules (used for regularization)
-        e_lo_obs_prior_fraction_n = rho_ave_n * p_obs_lo_n / (rho_ave_n * p_obs_lo_n + p_obs_hi_n)
+        rho_ave_n = (alpha_c + beta_c) * scaled_mu_fsd_hi_n
+        # e_lo_obs_prior_fraction_n = rho_ave_n * p_obs_lo_n / (rho_ave_n * p_obs_lo_n + p_obs_hi_n)
+        e_lo_obs_prior_fraction_n = rho_ave_n * mu_e_hi_cell_averaged_n * p_obs_lo_n / total_obs_gene_expr_per_cell_n
 
         return {
             'mu_e_lo_n': mu_e_lo_n,
@@ -276,6 +282,8 @@ class GeneLevelChimeraRateModel(ChimeraRateModel):
             output_dict: Dict[str, torch.Tensor],
             data_dict: Dict[str, torch.Tensor],
             parents_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+
+        raise NotImplementedError
 
         assert 'log_alpha_c_n' in output_dict
         assert 'log_beta_c_n' in output_dict

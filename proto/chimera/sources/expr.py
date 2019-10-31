@@ -370,6 +370,7 @@ class VSGPGeneExpressionModelTrainer:
 
 
 class FeatureBasedGeneExpressionModel(GeneExpressionModel):
+
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  init_features_ard_scale: float = 1.0,
@@ -389,6 +390,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.enable_phi_prior = enable_phi_prior
         self.hidden_dims = hidden_dims
         self.activation = activation
+        self._eps = 1e-7
 
         # input and output dims
         self.n_input_features = sc_fingerprint_dtm.features_per_cell.shape[1]
@@ -499,11 +501,13 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         assert 'gene_index_tensor' in data
         assert 'cell_features_tensor' in data
         assert 'empirical_droplet_efficiency_tensor' in data
+        assert 'cell_sampling_site_scale_factor_tensor' in data
 
         gamma_nf = output_dict['gamma_nf']
         log_alpha_n = output_dict['log_alpha_n']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_features_nf = data['cell_features_tensor']
+        cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
 
         processed_features_nf = cell_features_nf
         for layer in self.hidden_layers:
@@ -514,10 +518,35 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                 + torch.einsum('nf,nf->n', gamma_nf, processed_features_nf))
         log_phi_e_hi_n = - log_alpha_n
 
+        # calculating cell-averaged mu_e_hi_n (for cells in the minibatch specified by `data`)
+        mu_e_hi_sum_cell_weighted_sum_g = torch.zeros(
+            self.sc_fingerprint_dtm.n_genes, device=self.device, dtype=self.dtype)
+        cell_weight_sum_g = torch.zeros(
+            self.sc_fingerprint_dtm.n_genes, device=self.device, dtype=self.dtype)
+
+        mu_e_hi_n = log_mu_e_hi_n.exp()
+
+        mu_e_hi_sum_cell_weighted_sum_g.index_add_(
+            dim=0,
+            index=gene_index_tensor_n,
+            source=mu_e_hi_n * cell_sampling_site_scale_factor_tensor_n)
+
+        cell_weight_sum_g.index_add_(
+            dim=0,
+            index=gene_index_tensor_n,
+            source=cell_sampling_site_scale_factor_tensor_n)
+
+        # _eps is added to avoid NaNs (on discarded indices)
+        mu_e_hi_cell_averaged_g = mu_e_hi_sum_cell_weighted_sum_g / (self._eps + cell_weight_sum_g)
+        mu_e_hi_cell_averaged_n = torch.gather(
+            mu_e_hi_cell_averaged_g,
+            dim=0,
+            index=gene_index_tensor_n)
+
         return {
             'log_mu_e_hi_n': log_mu_e_hi_n,
-            'log_phi_e_hi_n': log_phi_e_hi_n
-        }
+            'log_phi_e_hi_n': log_phi_e_hi_n,
+            'mu_e_hi_cell_averaged_n': mu_e_hi_cell_averaged_n}
 
 
 class FeatureBasedGeneExpressionModelTrainer:
