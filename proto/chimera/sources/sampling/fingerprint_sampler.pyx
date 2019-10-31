@@ -364,14 +364,14 @@ cdef class SingleCellFingerprintStratifiedSampler:
                             inc(i_silent_cell_it)
                             cell_ptr += 1
 
+                    # gene sampling site effective ("fractionalized") scale factor
+                    c_total_cells_for_gene = c_n_expressing_cells + c_n_silent_cells
+
                     # add to unique genes
                     unique_gene_indices_memview[unique_gene_ptr] = i_gene
                     unique_gene_start_index_in_minibatch_memview[unique_gene_ptr] = gene_ptr
                     unique_gene_end_index_in_minibatch_memview[unique_gene_ptr] = gene_ptr + c_total_cells_for_gene
                     unique_gene_ptr += 1
-
-                    # gene sampling site effective ("fractionalized") scale factor
-                    c_total_cells_for_gene = c_n_expressing_cells + c_n_silent_cells
 
                     if c_total_cells_for_gene > 0:
 
