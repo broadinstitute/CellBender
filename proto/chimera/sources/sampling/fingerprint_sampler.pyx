@@ -265,30 +265,31 @@ cdef class SingleCellFingerprintStratifiedSampler:
     @cython.wraparound(False)
     @cython.nonecheck(False)
     @cython.cdivision(True)
-    cpdef int32_t draw(self,
-                       int32_t genes_per_gene_group,
-                       int32_t expressing_cells_per_gene,
-                       int32_t silent_cells_per_gene,
-                       int32_t[::1] gene_index_memview,
-                       int32_t[::1] cell_index_memview,
-                       int32_t[::1] unique_gene_indices_memview,
-                       int32_t[::1] unique_gene_start_index_in_minibatch_memview,
-                       int32_t[::1] unique_gene_end_index_in_minibatch_memview,
-                       FLOAT_DTYPE[::1] gene_sampling_site_scale_factor_memview,
-                       FLOAT_DTYPE[::1] cell_sampling_site_scale_factor_memview):
+    def draw(
+            self,
+            int32_t genes_per_gene_group,
+            int32_t expressing_cells_per_gene,
+            int32_t silent_cells_per_gene,
+            int32_t[::1] gene_index_memview,
+            int32_t[::1] cell_index_memview,
+            int32_t[::1] unique_gene_indices_memview,
+            int32_t[::1] unique_gene_start_index_in_minibatch_memview,
+            int32_t[::1] unique_gene_end_index_in_minibatch_memview,
+            FLOAT_DTYPE[::1] gene_sampling_site_scale_factor_memview,
+            FLOAT_DTYPE[::1] cell_sampling_site_scale_factor_memview):
 
         cdef int32_t i_gene_group, i_gene, c_n_genes, c_gene_group_sz
         cdef FLOAT_DTYPE c_gene_scale_factor
 
         cdef int32_t c_expressing_cells_sz, c_n_expressing_cells
         cdef FLOAT_DTYPE c_expressing_cell_scale_factor
-                
+
         cdef int32_t c_silent_cells_sz, c_n_silent_cells
         cdef FLOAT_DTYPE c_silent_cell_scale_factor
 
         cdef int32_t c_total_cells_for_gene
         cdef FLOAT_DTYPE c_fractionalized_gene_scale_factor
-        
+
         cdef vector[int32_t] c_gene_indices
         cdef vector[int32_t].iterator i_gene_it
 
@@ -297,19 +298,19 @@ cdef class SingleCellFingerprintStratifiedSampler:
 
         cdef vector[int32_t] c_silent_cell_indices
         cdef vector[int32_t].iterator i_silent_cell_it
-        
+
         cdef Py_ssize_t cell_ptr = 0
         cdef Py_ssize_t gene_ptr = 0
         cdef Py_ssize_t unique_gene_ptr = 0
         cdef Py_ssize_t i
-        
+
         # select genes
         for i_gene_group in range(self.n_gene_groups):
-            
+
             # number of genes to draw from the gene group
             c_gene_group_sz = self.gene_groups_csr.get_non_zero_cols(i_gene_group)
             c_n_genes = min(genes_per_gene_group, c_gene_group_sz)
-            
+
             if c_n_genes > 0:
 
                 c_gene_indices = self.csr_row_sampler.draw(
@@ -317,7 +318,7 @@ cdef class SingleCellFingerprintStratifiedSampler:
 
                 # weight of randomly drawn genes
                 c_gene_scale_factor = (<FLOAT_DTYPE> c_gene_group_sz) / c_n_genes
-                
+
                 # select silent and expressing cells from each gene
                 i_gene_it = c_gene_indices.begin()
                 while i_gene_it != c_gene_indices.end():
