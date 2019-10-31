@@ -758,23 +758,32 @@ class SingleCellFingerprintDTM:
         assert expressing_cells_per_gene > 0
         assert silent_cells_per_gene > 0
 
-        max_buffer_size = genes_per_gene_group * self.n_gene_groups * (
-                expressing_cells_per_gene + silent_cells_per_gene)
+        max_n_unique_genes = genes_per_gene_group * self.n_gene_groups
+        max_buffer_size = max_n_unique_genes * (expressing_cells_per_gene + silent_cells_per_gene)
         fingerprint_array = np.zeros((max_buffer_size, self.max_family_size), dtype=self.numpy_dtype, order='c')
         gene_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
         cell_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
+        unique_gene_indices_array = np.zeros((max_n_unique_genes,), dtype=np.int32, order='c')
+        unique_gene_start_index_in_minibatch_array = np.zeros((max_n_unique_genes,), dtype=np.int32, order='c')
+        unique_gene_end_index_in_minibatch_array = np.zeros((max_n_unique_genes,), dtype=np.int32, order='c')
         gene_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
         cell_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
 
         assert fingerprint_array.flags['C_CONTIGUOUS']
         assert gene_index_array.flags['C_CONTIGUOUS']
         assert cell_index_array.flags['C_CONTIGUOUS']
+        assert unique_gene_indices_array.flags['C_CONTIGUOUS']
+        assert unique_gene_start_index_in_minibatch_array.flags['C_CONTIGUOUS']
+        assert unique_gene_end_index_in_minibatch_array.flags['C_CONTIGUOUS']
         assert gene_sampling_site_scale_factor_array.flags['C_CONTIGUOUS']
         assert cell_sampling_site_scale_factor_array.flags['C_CONTIGUOUS']
 
         return {'fingerprint_array': fingerprint_array,
                 'gene_index_array': gene_index_array,
                 'cell_index_array': cell_index_array,
+                'unique_gene_indices_array': unique_gene_indices_array,
+                'unique_gene_start_index_in_minibatch_array': unique_gene_start_index_in_minibatch_array,
+                'unique_gene_end_index_in_minibatch_array': unique_gene_end_index_in_minibatch_array,
                 'gene_sampling_site_scale_factor_array': gene_sampling_site_scale_factor_array,
                 'cell_sampling_site_scale_factor_array': cell_sampling_site_scale_factor_array}
 
@@ -848,16 +857,25 @@ class SingleCellFingerprintDTM:
             self,
             cell_index_array: np.ndarray,
             gene_index_array: np.ndarray,
+            unique_gene_indices_array: np.ndarray,
+            unique_gene_start_index_in_minibatch_array: np.ndarray,
+            unique_gene_end_index_in_minibatch_array: np.ndarray,
             cell_sampling_site_scale_factor_array: np.ndarray,
             gene_sampling_site_scale_factor_array: np.ndarray,
             fingerprint_array: Optional[np.ndarray] = None) \
             -> Dict[str, Optional[torch.Tensor]]:
         mb_size = len(cell_index_array)
+        n_unique_genes = len(unique_gene_indices_array)
         assert cell_index_array.ndim == 1
         assert gene_index_array.ndim == 1
+        assert unique_gene_indices_array.ndim == 1
+        assert unique_gene_start_index_in_minibatch_array.ndim == 1
+        assert unique_gene_end_index_in_minibatch_array.ndim == 1
         assert cell_sampling_site_scale_factor_array.ndim == 1
         assert gene_sampling_site_scale_factor_array.ndim == 1
         assert len(gene_index_array) == mb_size
+        assert len(unique_gene_start_index_in_minibatch_array) == n_unique_genes
+        assert len(unique_gene_end_index_in_minibatch_array) == n_unique_genes
         assert len(cell_sampling_site_scale_factor_array) == mb_size
         assert len(gene_sampling_site_scale_factor_array) == mb_size
 
@@ -893,6 +911,18 @@ class SingleCellFingerprintDTM:
 
             'gene_index_tensor': torch.tensor(
                 gene_index_array,
+                device=self.device).long(),
+
+            'unique_gene_indices_tensor': torch.tensor(
+                unique_gene_indices_array,
+                device=self.device).long(),
+
+            'unique_gene_start_index_in_minibatch_tensor': torch.tensor(
+                unique_gene_start_index_in_minibatch_array,
+                device=self.device).long(),
+
+            'unique_gene_end_index_in_minibatch_tensor': torch.tensor(
+                unique_gene_end_index_in_minibatch_array,
                 device=self.device).long(),
 
             'total_obs_reads_per_cell_tensor': torch.tensor(
@@ -1058,18 +1088,24 @@ class SingleCellFingerprintDTM:
 
         sampler = self.stratified_sampler(sampling_strategy)
 
-        n_samples = sampler.draw(
+        n_samples, n_unique_genes = sampler.draw(
             genes_per_gene_group=genes_per_gene_group,
             expressing_cells_per_gene=expressing_cells_per_gene,
             silent_cells_per_gene=silent_cells_per_gene,
             gene_index_memview=np_buff_dict['gene_index_array'],
             cell_index_memview=np_buff_dict['cell_index_array'],
+            unique_gene_indices_memview=np_buff_dict['unique_gene_indices_array'],
+            unique_gene_start_index_in_minibatch_memview=np_buff_dict['unique_gene_start_index_in_minibatch_array'],
+            unique_gene_end_index_in_minibatch_memview=np_buff_dict['unique_gene_end_index_in_minibatch_array'],
             gene_sampling_site_scale_factor_memview=np_buff_dict['gene_sampling_site_scale_factor_array'],
             cell_sampling_site_scale_factor_memview=np_buff_dict['cell_sampling_site_scale_factor_array'])
 
         return self.generate_fingerprint_torch_minibatch_data(
             cell_index_array=np_buff_dict['cell_index_array'][:n_samples],
             gene_index_array=np_buff_dict['gene_index_array'][:n_samples],
+            unique_gene_indices_array=np_buff_dict['unique_gene_indices_array'][:n_unique_genes],
+            unique_gene_start_index_in_minibatch_array=np_buff_dict['unique_gene_start_index_in_minibatch_array'][:n_unique_genes],
+            unique_gene_end_index_in_minibatch_array=np_buff_dict['unique_gene_end_index_in_minibatch_array'][:n_unique_genes],
             cell_sampling_site_scale_factor_array=np_buff_dict['cell_sampling_site_scale_factor_array'][:n_samples],
             gene_sampling_site_scale_factor_array=np_buff_dict['gene_sampling_site_scale_factor_array'][:n_samples],
             fingerprint_array=np_buff_dict['fingerprint_array'])
@@ -1094,6 +1130,9 @@ class SingleCellFingerprintDTM:
         assert n_particles_cell >= 1
         cell_index_array = np.repeat(np.asarray(cell_index_list), n_particles_cell).astype(np.int32)
         gene_index_array = gene_index * np.ones_like(cell_index_array).astype(np.int32)
+        unique_gene_indices_array = np.asarray([gene_index]).astype(np.int32)
+        unique_gene_start_index_in_minibatch_array = np.asarray([0]).astype(np.int32)
+        unique_gene_end_index_in_minibatch_array = np.asarray([len(cell_index_array)]).astype(np.int32)
         cell_sampling_site_scale_factor_array = np.ones_like(
             cell_index_array, dtype=self.numpy_dtype)
         gene_sampling_site_scale_factor_array = np.ones_like(
@@ -1105,6 +1144,9 @@ class SingleCellFingerprintDTM:
         return self.generate_fingerprint_torch_minibatch_data(
             cell_index_array=cell_index_array,
             gene_index_array=gene_index_array,
+            unique_gene_indices_array=unique_gene_indices_array,
+            unique_gene_start_index_in_minibatch_array=unique_gene_start_index_in_minibatch_array,
+            unique_gene_end_index_in_minibatch_array=unique_gene_end_index_in_minibatch_array,
             cell_sampling_site_scale_factor_array=cell_sampling_site_scale_factor_array,
             gene_sampling_site_scale_factor_array=gene_sampling_site_scale_factor_array,
             fingerprint_array=fingerprint_array)
@@ -1161,12 +1203,15 @@ class SingleCellFingerprintDTM:
 
         sampler = self.stratified_sampler(sampling_strategy)
 
-        n_samples = sampler.draw(
+        n_samples, n_unique_genes = sampler.draw(
             genes_per_gene_group=genes_per_gene_group,
             expressing_cells_per_gene=expressing_cells_per_gene,
             silent_cells_per_gene=silent_cells_per_gene,
             gene_index_memview=np_buff_dict['gene_index_array'],
             cell_index_memview=np_buff_dict['cell_index_array'],
+            unique_gene_indices_memview=np_buff_dict['unique_gene_indices_array'],
+            unique_gene_start_index_in_minibatch_memview=np_buff_dict['unique_gene_start_index_in_minibatch_array'],
+            unique_gene_end_index_in_minibatch_memview=np_buff_dict['unique_gene_end_index_in_minibatch_array'],
             gene_sampling_site_scale_factor_memview=np_buff_dict['gene_sampling_site_scale_factor_array'],
             cell_sampling_site_scale_factor_memview=np_buff_dict['cell_sampling_site_scale_factor_array'])
 
