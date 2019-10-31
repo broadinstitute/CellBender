@@ -797,23 +797,32 @@ class SingleCellFingerprintDTM:
         assert expressing_cells_per_gene > 0
         assert silent_cells_per_gene > 0
 
-        max_buffer_size = genes_per_gene_group * self.n_gene_groups * (
-                expressing_cells_per_gene + silent_cells_per_gene)
+        max_n_unique_genes = genes_per_gene_group * self.n_gene_groups
+        max_buffer_size = max_n_unique_genes * (expressing_cells_per_gene + silent_cells_per_gene)
         counts_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
         gene_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
         cell_index_array = np.zeros((max_buffer_size,), dtype=np.int32, order='c')
+        unique_gene_indices_array = np.zeros((max_n_unique_genes,), dtype=np.int32, order='c')
+        unique_gene_start_index_in_minibatch_array = np.zeros((max_n_unique_genes,), dtype=np.int32, order='c')
+        unique_gene_end_index_in_minibatch_array = np.zeros((max_n_unique_genes,), dtype=np.int32, order='c')
         gene_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
         cell_sampling_site_scale_factor_array = np.zeros((max_buffer_size,), dtype=self.numpy_dtype, order='c')
 
         assert counts_array.flags['C_CONTIGUOUS']
         assert gene_index_array.flags['C_CONTIGUOUS']
         assert cell_index_array.flags['C_CONTIGUOUS']
+        assert unique_gene_indices_array.flags['C_CONTIGUOUS']
+        assert unique_gene_start_index_in_minibatch_array.flags['C_CONTIGUOUS']
+        assert unique_gene_end_index_in_minibatch_array.flags['C_CONTIGUOUS']
         assert gene_sampling_site_scale_factor_array.flags['C_CONTIGUOUS']
         assert cell_sampling_site_scale_factor_array.flags['C_CONTIGUOUS']
 
         return {'counts_array': counts_array,
                 'gene_index_array': gene_index_array,
                 'cell_index_array': cell_index_array,
+                'unique_gene_indices_array': unique_gene_indices_array,
+                'unique_gene_start_index_in_minibatch_array': unique_gene_start_index_in_minibatch_array,
+                'unique_gene_end_index_in_minibatch_array': unique_gene_end_index_in_minibatch_array,
                 'gene_sampling_site_scale_factor_array': gene_sampling_site_scale_factor_array,
                 'cell_sampling_site_scale_factor_array': cell_sampling_site_scale_factor_array}
 
