@@ -143,7 +143,7 @@ def run_remove_background(args):
                                        args.low_count_threshold)
     except OSError:
         logging.error(f"OSError: Unable to open file {args.input_file}.")
-        return
+        sys.exit(1)
 
     # Instantiate latent variable model and run full inference procedure.
     inferred_model = run_inference(dataset_obj, args)
