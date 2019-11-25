@@ -115,7 +115,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         fingerprint_tensor_nr = data['fingerprint_tensor']
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
         cell_sampling_site_scale_factor_tensor_n = data['cell_sampling_site_scale_factor_tensor']
-        empirical_fsd_mu_hi_tensor_n = data['empirical_fsd_mu_hi_tensor']
+        empirical_mu_fsd_tensor_n = data['empirical_fsd_mu_hi_tensor']  # TODO fix tensor name (drop hi)
         arithmetic_mean_obs_expr_per_gene_tensor_n = data['arithmetic_mean_obs_expr_per_gene_tensor']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_index_tensor_n = data['cell_index_tensor']
@@ -184,6 +184,13 @@ class DropletTimeMachineModel(torch.nn.Module):
         mu_fsd_lo_comps_to_mu_empirical_ratio_nj = mu_fsd_lo_comps_nj / self.mean_empirical_fsd_mu_hi
         mu_fsd_hi_comps_to_mu_empirical_ratio_nj = mu_fsd_hi_comps_nj / self.mean_empirical_fsd_mu_hi
 
+        mu_fsd_lo_zero_truncated_n = mu_fsd_lo_n / p_obs_lo_n
+        mu_fsd_hi_zero_truncated_n = mu_fsd_hi_n / p_obs_hi_n
+        mu_fsd_lo_zero_truncated_to_mu_fsd_empirical_ratio_n =\
+            mu_fsd_lo_zero_truncated_n / empirical_mu_fsd_tensor_n
+        mu_fsd_hi_zero_truncated_to_mu_fsd_empirical_ratio_n =\
+            mu_fsd_hi_zero_truncated_n / empirical_mu_fsd_tensor_n
+        
         # observation probability for each component of the distribution
         alpha_fsd_lo_comps_nj = (self.eps + phi_fsd_lo_comps_nj).reciprocal()
         log_p_unobs_lo_comps_nj = alpha_fsd_lo_comps_nj * (
