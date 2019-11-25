@@ -10,7 +10,8 @@ from torch.distributions import constraints
 import pyro
 import pyro.distributions as dist
 from pyro.contrib import autoname
-from pyro.contrib.gp.parameterized import Parameterized, Parameter
+from pyro.nn.module import PyroParam, pyro_method
+from pyro.contrib.gp.parameterized import Parameterized
 from pyro import poutine
 
 from fingerprint import SingleCellFingerprintDTM
@@ -72,14 +73,15 @@ class UniformChimeraRateModel(ChimeraRateModel):
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # trainable parameters
-        self.alpha_c_posterior_loc = Parameter(
-            torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype))
-        self.set_constraint("alpha_c_posterior_loc", constraints.positive)
+        self.alpha_c_posterior_loc = PyroParam(
+            torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype),
+            constraints.positive)
 
-        self.beta_c_posterior_loc = Parameter(
-            torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype))
-        self.set_constraint("beta_c_posterior_loc", constraints.positive)
+        self.beta_c_posterior_loc = PyroParam(
+            torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
+            constraints.positive)
 
+    @pyro_method
     @autoname.scope(prefix="uniform_chimera")
     def model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode('model')
@@ -101,6 +103,7 @@ class UniformChimeraRateModel(ChimeraRateModel):
             'beta_c': beta_c
         }
 
+    @pyro_method
     @autoname.scope(prefix="uniform_chimera")
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode('guide')
@@ -176,25 +179,25 @@ class GeneLevelChimeraRateModel(ChimeraRateModel):
 
         if trainable_prior:
 
-            self.log_alpha_c_prior_loc = Parameter(
+            self.log_alpha_c_prior_loc = PyroParam(
                 torch.tensor(
                     np.log(init_params_dict['chimera.alpha_c_prior_loc']),
                     device=device, dtype=dtype))
-            self.log_alpha_c_prior_scale = Parameter(
+            self.log_alpha_c_prior_scale = PyroParam(
                 torch.tensor(
                     init_params_dict['chimera.alpha_c_prior_scale'],
-                    device=device, dtype=dtype))
-            self.set_constraint("log_alpha_c_prior_scale", constraints.positive)
+                    device=device, dtype=dtype),
+                constraints.positive)
 
-            self.log_beta_c_prior_loc = Parameter(
+            self.log_beta_c_prior_loc = PyroParam(
                 torch.tensor(
                     np.log(init_params_dict['chimera.beta_c_prior_loc']),
                     device=device, dtype=dtype))
-            self.log_beta_c_prior_scale = Parameter(
+            self.log_beta_c_prior_scale = PyroParam(
                 torch.tensor(
                     init_params_dict['chimera.beta_c_prior_scale'],
-                    device=device, dtype=dtype))
-            self.set_constraint("log_beta_c_prior_scale", constraints.positive)
+                    device=device, dtype=dtype),
+                constraints.positive)
 
         else:
 
@@ -216,13 +219,14 @@ class GeneLevelChimeraRateModel(ChimeraRateModel):
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # trainable parameters
-        self.log_alpha_c_posterior_loc_g = Parameter(
+        self.log_alpha_c_posterior_loc_g = PyroParam(
             np.log(init_params_dict['chimera.alpha_c_prior_loc']) * torch.ones(
                 sc_fingerprint_dtm.n_genes, device=device, dtype=dtype))
-        self.log_beta_c_posterior_loc_g = Parameter(
+        self.log_beta_c_posterior_loc_g = PyroParam(
             np.log(init_params_dict['chimera.beta_c_prior_loc']) * torch.ones(
                 sc_fingerprint_dtm.n_genes, device=device, dtype=dtype))
 
+    @pyro_method
     @autoname.scope(prefix="gene_level_chimera")
     def model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode('model')
@@ -252,6 +256,7 @@ class GeneLevelChimeraRateModel(ChimeraRateModel):
             'log_beta_c_n': log_beta_c_n
         }
 
+    @pyro_method
     @autoname.scope(prefix="gene_level_chimera")
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode('guide')
@@ -276,6 +281,7 @@ class GeneLevelChimeraRateModel(ChimeraRateModel):
             'log_beta_c_n': log_beta_c_n
         }
 
+    # TODO: needs to be updated to look like the implementation in UniformChimeraRateModel
     @abstractmethod
     def decode_output_to_chimera_rate(
             self,

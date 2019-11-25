@@ -10,6 +10,8 @@ from typing import List
 import pyro
 from pyro.distributions.torch_distribution import TorchDistribution, TorchDistributionMixin
 from pyro.distributions.util import broadcast_shape
+from pyro.contrib.gp.kernels import Kernel
+from pyro.nn.module import PyroParam
 
 import torch
 from torch.distributions import Distribution, constraints
@@ -325,6 +327,34 @@ class MixtureDistribution(TorchDistribution):
         return torch.logsumexp(torch.cat(tuple(
             log_prob.unsqueeze(-1) + log_weight.unsqueeze(-1)
             for log_prob, log_weight in zip(log_probs, log_weights)), -1), -1)
+
+
+class WhiteNoiseWithMinVariance(Kernel):
+    r"""
+    Implementation of WhiteNoise kernel:
+
+        :math:`k(x, z) = \sigma^2 \delta(x, z),`
+
+    where :math:`\delta` is a Dirac delta function.
+    """
+
+    def __init__(self, input_dim, variance=None, active_dims=None, min_noise=None):
+        super(WhiteNoiseWithMinVariance, self).__init__(input_dim, active_dims)
+
+        variance = torch.tensor(1.) if variance is None else variance
+        if min_noise:
+            self.variance = PyroParam(variance, constraints.greater_than(min_noise))
+        else:
+            self.variance = PyroParam(variance, constraints.positive)
+
+    def forward(self, X, Z=None, diag=False):
+        if diag:
+            return self.variance.expand(X.size(0))
+
+        if Z is None:
+            return self.variance.expand(X.size(0)).diag()
+        else:
+            return X.data.new_zeros(X.size(0), Z.size(0))
 
 
 def get_binomial_samples_sparse_counts(

@@ -12,11 +12,12 @@ from pyro import poutine
 import pyro.distributions as dist
 from pyro.contrib import autoname
 from pyro.contrib.gp.models import VariationalSparseGP
-from pyro.contrib.gp.parameterized import Parameterized, Parameter
+from pyro.contrib.gp.parameterized import Parameterized
+from pyro.nn.module import PyroParam, pyro_method
 from pyro.infer import SVI, Trace_ELBO
 import pyro.contrib.gp.kernels as kernels
 
-from pyro_extras import NegativeBinomial
+from pyro_extras import NegativeBinomial, WhiteNoiseWithMinVariance
 from fingerprint import SingleCellFingerprintDTM
 
 
@@ -95,19 +96,19 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             input_dim=VSGPGeneExpressionModel.INPUT_DIM,
             variance=torch.tensor(init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=torch.tensor(init_rbf_kernel_lengthscale, device=device, dtype=dtype))
-        kernel_whitenoise = kernels.WhiteNoise(
+        kernel_whitenoise = WhiteNoiseWithMinVariance(
             input_dim=VSGPGeneExpressionModel.INPUT_DIM,
-            variance=torch.tensor(init_whitenoise_kernel_variance, device=device, dtype=dtype))
-        kernel_whitenoise.set_constraint("variance", constraints.greater_than(min_noise))
+            variance=torch.tensor(init_whitenoise_kernel_variance, device=device, dtype=dtype),
+            min_noise=min_noise)
         kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
         # mean subtraction
         assert init_mean_intercept.shape == (self.LATENT_DIM,)
         assert init_mean_slope.shape == (self.LATENT_DIM,)
 
-        self.f_mean_intercept_r = Parameter(
+        self.f_mean_intercept_r = PyroParam(
             torch.tensor(init_mean_intercept, device=device, dtype=dtype))
-        self.f_mean_slope_r = Parameter(
+        self.f_mean_slope_r = PyroParam(
             torch.tensor(init_mean_slope, device=device, dtype=dtype))
 
         def mean_function(x_n1: torch.Tensor):
@@ -126,12 +127,12 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             jitter=cholesky_jitter)
 
         # posterior parameters
-        self.beta_posterior_loc_gr = Parameter(
+        self.beta_posterior_loc_gr = PyroParam(
             mean_function(self.log_mean_obs_expr_g1).permute(-1, -2).detach().clone())
-        self.beta_posterior_scale_gr = Parameter(
+        self.beta_posterior_scale_gr = PyroParam(
             init_posterior_scale * torch.ones(
-                (self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionModel.LATENT_DIM), device=device, dtype=dtype))
-        self.set_constraint("beta_posterior_scale_gr", constraints.positive)
+                (self.sc_fingerprint_dtm.n_genes, VSGPGeneExpressionModel.LATENT_DIM), device=device, dtype=dtype),
+            constraints.positive)
 
         # send parameters to device
         self.to(device)
@@ -185,9 +186,11 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             'beta_nr': beta_nr
         }
 
+    @pyro_method
     def model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return autoname.scope(fn=self._model, prefix="expr_" + self.gene_group_name)(data)
 
+    @pyro_method
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return autoname.scope(fn=self._guide, prefix="expr_" + self.gene_group_name)(data)
 
@@ -269,6 +272,7 @@ class VSGPGeneExpressionModelTrainer:
         self.loss_hist = []
         self.trained = False
 
+    @pyro_method
     def model(self, data: Dict[str, torch.Tensor]):
         pyro.module(
             "expr_" + self.vsgp_gene_expression_model.gene_group_name,
@@ -301,6 +305,7 @@ class VSGPGeneExpressionModelTrainer:
                     phi=log_phi_e_hi_n.exp()),
                 obs=counts_tensor_n)
 
+    @pyro_method
     def guide(self, data):
         pyro.module(
             "expr_" + self.vsgp_gene_expression_model.gene_group_name,
@@ -405,26 +410,27 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.n_intermediate_features = last_dim
 
         # log mu weights ARD precisions
-        self.gamma_ard_scale_f = Parameter(
-            self.init_features_ard_scale * torch.ones((self.n_intermediate_features,), device=device, dtype=dtype))
-        self.set_constraint("gamma_ard_scale_f", constraints.positive)
+        self.gamma_ard_scale_f = PyroParam(
+            self.init_features_ard_scale * torch.ones((self.n_intermediate_features,), device=device, dtype=dtype),
+            constraints.positive)
 
         # log alpha (posterior)
-        self.log_alpha_posterior_loc_g = Parameter(
+        self.log_alpha_posterior_loc_g = PyroParam(
             - np.log(self.phi_scale) * torch.ones((self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype))
 
         # log mu bias (posterior)
-        self.beta_posterior_loc_g = Parameter(
+        self.beta_posterior_loc_g = PyroParam(
             torch.tensor(sc_fingerprint_dtm.arithmetic_mean_obs_expr_per_gene, device=device, dtype=dtype).log())
 
         # log mu weights (posterior)
-        self.gamma_posterior_loc_gf = Parameter(
+        self.gamma_posterior_loc_gf = PyroParam(
             torch.zeros(
                 (self.sc_fingerprint_dtm.n_genes, self.n_intermediate_features), device=device, dtype=dtype))
 
         # send parameters to device
         self.to(device)
 
+    @pyro_method
     @autoname.scope(prefix="feature_based_expr")
     def model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode("model")
@@ -461,6 +467,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
             'log_alpha_n': log_alpha_n
         }
 
+    @pyro_method
     @autoname.scope(prefix="feature_based_expr")
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode("guide")
@@ -572,6 +579,7 @@ class FeatureBasedGeneExpressionModelTrainer:
         self.loss_hist = []
         self.trained = False
 
+    @pyro_method
     def model(self, data: Dict[str, torch.Tensor]):
         pyro.module(
             "feature_based_expr",
@@ -605,6 +613,7 @@ class FeatureBasedGeneExpressionModelTrainer:
                     phi=log_phi_e_hi_n.exp()),
                 obs=counts_tensor_n)
 
+    @pyro_method
     def guide(self, data):
         pyro.module(
             "feature_based_expr",
