@@ -272,7 +272,6 @@ class VSGPGeneExpressionModelTrainer:
         self.loss_hist = []
         self.trained = False
 
-    @pyro_method
     def model(self, data: Dict[str, torch.Tensor]):
         pyro.module(
             "expr_" + self.vsgp_gene_expression_model.gene_group_name,
@@ -305,7 +304,6 @@ class VSGPGeneExpressionModelTrainer:
                     phi=log_phi_e_hi_n.exp()),
                 obs=counts_tensor_n)
 
-    @pyro_method
     def guide(self, data):
         pyro.module(
             "expr_" + self.vsgp_gene_expression_model.gene_group_name,
@@ -579,7 +577,6 @@ class FeatureBasedGeneExpressionModelTrainer:
         self.loss_hist = []
         self.trained = False
 
-    @pyro_method
     def model(self, data: Dict[str, torch.Tensor]):
         pyro.module(
             "feature_based_expr",
@@ -613,7 +610,6 @@ class FeatureBasedGeneExpressionModelTrainer:
                     phi=log_phi_e_hi_n.exp()),
                 obs=counts_tensor_n)
 
-    @pyro_method
     def guide(self, data):
         pyro.module(
             "feature_based_expr",
