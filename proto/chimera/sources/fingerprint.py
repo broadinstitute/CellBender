@@ -636,7 +636,9 @@ class SingleCellFingerprintDTM:
         # normed_mt_fst_count_matrix = median_thresholded_fst_count_matrix / self.empirical_droplet_efficiency[:, None]
 
         # normalize by empirical droplet efficiency (total UMIs per cell)
-        normed_mt_fst_count_matrix = fst_count_matrix / self.empirical_droplet_efficiency[:, None]
+        fst_total_counts = self.eps + np.sum(fst_count_matrix, -1)
+        fst_droplet_efficiency = fst_total_counts / np.mean(fst_total_counts)
+        normed_mt_fst_count_matrix = fst_count_matrix / fst_droplet_efficiency[:, None]
 
         # log1p transformation after droplet efficiency normalization
         log1p_normed_mt_fst_count_matrix = np.log1p(normed_mt_fst_count_matrix)
