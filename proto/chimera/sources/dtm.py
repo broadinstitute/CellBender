@@ -220,10 +220,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             parents_dict={
                 'mu_fsd_hi_n': mu_fsd_hi_n,
                 'eta_n': eta_n,
-                'mu_e_hi_cell_averaged_n': mu_e_hi_cell_averaged_n.clone().detach(),  ## NOTE
+                'mu_e_hi_cell_averaged_n': mu_e_hi_cell_averaged_n,
                 'total_obs_gene_expr_per_cell_n': arithmetic_mean_obs_expr_per_gene_tensor_n,
-                'p_obs_lo_n': p_obs_lo_n,
-                # 'p_obs_hi_n': p_obs_hi_n
+                'p_obs_lo_n': p_obs_lo_n
             })
 
         mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']
@@ -263,10 +262,13 @@ class DropletTimeMachineModel(torch.nn.Module):
                     gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n)
 
             # sample (soft) constraints
+            total_obs_expr_per_gene_tensor_n = \
+                self.sc_fingerprint_dtm.n_cells * arithmetic_mean_obs_expr_per_gene_tensor_n
             self._sample_gene_plate_soft_constraints(
                 model_constraint_params_dict=self.model_constraint_params_dict,
                 model_vars_dict=locals(),
                 gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
+                total_obs_expr_per_gene_tensor_n=total_obs_expr_per_gene_tensor_n,
                 batch_shape=batch_shape)
 
     def guide(self,
@@ -323,30 +325,6 @@ class DropletTimeMachineModel(torch.nn.Module):
                             batch_shape=batch_shape,
                             event_shape=torch.Size([])),
                         obs=torch.zeros_like(fingerprint_log_likelihood_n))
-
-    @staticmethod
-    def _get_mu_e_lo_n(
-            alpha_c: torch.Tensor,
-            beta_c: torch.Tensor,
-            eta_n: torch.Tensor,
-            mu_fsd_hi_n: torch.Tensor,
-            mean_empirical_fsd_mu_hi: float,
-            p_obs_lo_n: torch.Tensor,
-            p_obs_hi_n: torch.Tensor,
-            total_obs_gene_expr_per_cell_n: torch.Tensor) -> torch.Tensor:
-        """Calculates the Poisson rate of chimeric molecule formation
-
-        :param alpha_c: chimera formation coefficient (cell-size prefactor)
-        :param beta_c: chimera formation coefficient (constant piece)
-        :param mu_fsd_hi_n: mean family size per real molecule
-        :return: Poisson rate of chimeric molecule formation
-        """
-        scaled_mu_fsd_hi_n = mu_fsd_hi_n / mean_empirical_fsd_mu_hi
-        rho_n = (alpha_c + beta_c * eta_n) * scaled_mu_fsd_hi_n
-        rho_ave = (alpha_c + beta_c) * scaled_mu_fsd_hi_n
-        total_fragments_n = total_obs_gene_expr_per_cell_n / (rho_ave * p_obs_lo_n + p_obs_hi_n)
-        mu_e_lo_n = rho_n * total_fragments_n
-        return mu_e_lo_n
 
     @staticmethod
     def _get_fingerprint_log_likelihood_monte_carlo(fingerprint_tensor_nr: torch.Tensor,
@@ -410,6 +388,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             model_constraint_params_dict: Dict[str, Dict[str, float]],
             model_vars_dict: Dict[str, torch.Tensor],
             gene_sampling_site_scale_factor_tensor_n: torch.Tensor,
+            total_obs_expr_per_gene_tensor_n: torch.Tensor,
             batch_shape: torch.Size):
         """Imposes constraints on gene-dependent quantities by adding penalties to the model free energy.
 
@@ -433,6 +412,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                     constraint_log_prob = - strength * activity.pow(exponent)
                     for _ in range(len(var.shape) - 1):
                         constraint_log_prob = constraint_log_prob.sum(-1)
+                    constraint_log_prob *= total_obs_expr_per_gene_tensor_n
                     pyro.sample(
                         var_name + "_lower_bound_constraint",
                         CustomLogProbTerm(constraint_log_prob,
@@ -458,6 +438,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                     constraint_log_prob = - strength * activity.pow(exponent)
                     for _ in range(len(var.shape) - 1):
                         constraint_log_prob = constraint_log_prob.sum(-1)
+                    constraint_log_prob *= total_obs_expr_per_gene_tensor_n
                     pyro.sample(
                         var_name + "_upper_bound_constraint",
                         CustomLogProbTerm(constraint_log_prob,
@@ -482,6 +463,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                     constraint_log_prob = - strength * activity.pow(exponent)
                     for _ in range(len(var.shape) - 1):
                         constraint_log_prob = constraint_log_prob.sum(-1)
+                    constraint_log_prob *= total_obs_expr_per_gene_tensor_n
                     pyro.sample(
                         var_name + "_pin_value_constraint",
                         CustomLogProbTerm(constraint_log_prob,
