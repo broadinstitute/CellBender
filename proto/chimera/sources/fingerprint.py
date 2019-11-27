@@ -661,6 +661,14 @@ class SingleCellFingerprintDTM:
         # return pca_features.astype(self.numpy_dtype)
 
     @cachedproperty
+    def hvg_binary_mask(self) -> np.ndarray:
+        assert self.highly_variable_gene_indices is not None, \
+            "Highly variable genes for PCA features are not provided yet -- cannot continue."
+        hvg_binary_mask = np.zeros((self.n_genes,), dtype=np.bool)
+        hvg_binary_mask[self.highly_variable_gene_indices] = True
+        return hvg_binary_mask
+
+    @cachedproperty
     def gene_groups_dict(self) -> Dict[int, List[int]]:
         self._log_caching("gene_groups_dict")
         # the "weight" of each gene is a monotonic (approximately logarithmic) function of its

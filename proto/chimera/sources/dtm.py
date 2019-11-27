@@ -63,6 +63,10 @@ class DropletTimeMachineModel(torch.nn.Module):
         # logging
         self._logger = logging.getLogger()
 
+        # a binary mask for highly variable genes
+        self.hvg_binary_mask_tensor_g = torch.tensor(
+            sc_fingerprint_dtm.hvg_binary_mask, device=device, dtype=torch.bool)
+
         # constraint pressure
         if self.monitor_constraint_pressure:
             self.constraint_pressure_dict = dict()
@@ -214,6 +218,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         chimera_rate_model_output_dict = self.chimera_rate_model.model(data)
 
         # extract chimera rate parameters
+        hvg_binary_mask_tensor_n = self.hvg_binary_mask_tensor_g[gene_index_tensor_n]
         chimera_rate_params_dict = self.chimera_rate_model.decode_output_to_chimera_rate(
             output_dict=chimera_rate_model_output_dict,
             data_dict=data,
@@ -222,11 +227,16 @@ class DropletTimeMachineModel(torch.nn.Module):
                 'eta_n': eta_n,
                 'mu_e_hi_cell_averaged_n': mu_e_hi_cell_averaged_n,
                 'total_obs_gene_expr_per_cell_n': arithmetic_mean_obs_expr_per_gene_tensor_n,
-                'p_obs_lo_n': p_obs_lo_n
+                'p_obs_lo_n': p_obs_lo_n,
+                'hvg_binary_mask_tensor_n': hvg_binary_mask_tensor_n
             })
 
         mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']
-        e_lo_obs_prior_fraction_n = chimera_rate_params_dict['e_lo_obs_prior_fraction_n']
+
+        # total_obs_gene_expr_per_cell_n = parents_dict['total_obs_gene_expr_per_cell_n']
+        # p_obs_lo_n = parents_dict['p_obs_lo_n']
+        # rho_ave_n = (alpha_c + beta_c) * scaled_mu_fsd_hi_n
+        # e_lo_obs_prior_fraction_n = rho_ave_n * mu_e_hi_cell_averaged_n * p_obs_lo_n / total_obs_gene_expr_per_cell_n
 
         if posterior_sampling_mode:
 
