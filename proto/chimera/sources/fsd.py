@@ -719,11 +719,10 @@ class FSDModelGPLVMRestricted(FSDModel):
             variance=torch.tensor(self.fsd_gplvm_init_rbf_kernel_variance, device=device, dtype=dtype),
             lengthscale=(self.fsd_gplvm_init_rbf_kernel_lengthscale
                          * torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype)))
-        kernel_whitenoise = kernels.WhiteNoise(
+        kernel_whitenoise = WhiteNoiseWithMinVariance(
             input_dim=self.fsd_gplvm_latent_dim,
-            variance=torch.tensor(self.fsd_gplvm_init_whitenoise_kernel_variance, device=device, dtype=dtype))
-        kernel_whitenoise.set_constraint(
-            "variance", constraints.greater_than(self.fsd_gplvm_min_noise))
+            variance=torch.tensor(self.fsd_gplvm_init_whitenoise_kernel_variance, device=device, dtype=dtype),
+            min_noise=self.fsd_gplvm_min_noise)
         kernel_full = kernels.Sum(kernel_rbf, kernel_whitenoise)
 
         # mean fsd xi
@@ -750,16 +749,22 @@ class FSDModelGPLVMRestricted(FSDModel):
             whiten=False,
             jitter=self.fsd_gplvm_cholesky_jitter)
 
-        # trainable parameters
+        # trainable model parameters
         self.log_mu_lo_intercept = PyroParam(
-            torch.tensor(np.log(self.fsd_init_mu_lo_to_mu_hi_ratio), device=self.device, dtype=self.dtype))
+            torch.tensor(
+                np.log(self.fsd_init_mu_lo_to_mu_hi_ratio),
+                device=self.device, dtype=self.dtype))
         self.log_mu_lo_slope = PyroParam(
-            torch.tensor(1.0, device=self.device, dtype=self.dtype))
+            torch.tensor(
+                1.0,
+                device=self.device, dtype=self.dtype))
 
+        # posterior parameters
         self.fsd_latent_posterior_loc_gl = PyroParam(
             torch.zeros(
                 (sc_fingerprint_dtm.n_genes, self.fsd_gplvm_latent_dim),
                 device=device, dtype=dtype))
+
         self.fsd_latent_posterior_scale_gl = PyroParam(
             torch.ones(
                 (sc_fingerprint_dtm.n_genes, self.fsd_gplvm_latent_dim),
@@ -768,6 +773,7 @@ class FSDModelGPLVMRestricted(FSDModel):
 
         self.fsd_xi_posterior_loc_gq = PyroParam(
             self.init_fsd_xi_loc_posterior.clone().detach())
+
         self.fsd_xi_posterior_scale_gq = PyroParam(
             self.fsd_init_xi_posterior_scale * torch.ones(
                 (sc_fingerprint_dtm.n_genes, self.fsd_xi_dim),
