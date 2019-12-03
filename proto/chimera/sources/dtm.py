@@ -143,8 +143,18 @@ class DropletTimeMachineModel(torch.nn.Module):
             0, max_family_size + 1, device=self.device, dtype=self.dtype)
         zero = torch.tensor(0, device=self.device, dtype=self.dtype)
 
-        # sample fsd params
-        fsd_params_dict = self.fsd_model.model(data)
+        # hvg binary mask
+        hvg_binary_mask_tensor_n = self.hvg_binary_mask_tensor_g[gene_index_tensor_n]
+
+        # sample unconstrained fsd params
+        fsd_model_output_dict = self.fsd_model.model(data)
+
+        # decode to constrained fsd params
+        fsd_params_dict = self.fsd_model.decode(
+            output_dict=fsd_model_output_dict,
+            parents_dict={
+                'hvg_binary_mask_tensor_n': hvg_binary_mask_tensor_n
+            })
 
         # get chimeric and real family size distributions
         fsd_lo_dist, fsd_hi_dist = self.fsd_model.get_fsd_components(fsd_params_dict)
@@ -218,7 +228,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         chimera_rate_model_output_dict = self.chimera_rate_model.model(data)
 
         # extract chimera rate parameters
-        hvg_binary_mask_tensor_n = self.hvg_binary_mask_tensor_g[gene_index_tensor_n]
         chimera_rate_params_dict = self.chimera_rate_model.decode_output_to_chimera_rate(
             output_dict=chimera_rate_model_output_dict,
             data_dict=data,
