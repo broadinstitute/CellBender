@@ -158,7 +158,7 @@ class UniformChimeraRateModel(ChimeraRateModel):
         mu_e_hi_cell_averaged_n = parents_dict['mu_e_hi_cell_averaged_n']
 
         # calculate chimera rate
-        rho_n = (alpha_c_n + beta_c_n * eta_n) * mu_fsd_hi_n
+        rho_n = (alpha_c_n + beta_c_n * eta_n) * mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
         mu_e_lo_n = rho_n * mu_e_hi_cell_averaged_n
 
         return {

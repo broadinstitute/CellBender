@@ -598,6 +598,7 @@ class FSDModelGPLVMRestricted(FSDModel):
             log_mu_lo_slope_n = (
                 self.log_mu_lo_slope * hvg_binary_mask_tensor_n
                 + log_mu_lo_slope_detached * non_hvg_binary_mask_tensor_n)
+
         else:
 
             log_mu_lo_intercept_n = self.log_mu_lo_intercept
