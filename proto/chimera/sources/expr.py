@@ -379,6 +379,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                  init_features_ard_scale: float = 1.0,
                  phi_scale: float = 0.1,
                  enable_phi_prior: bool = True,
+                 enable_phi_training: bool = True,
                  hidden_dims: List[int] = [],
                  activation: torch.nn.Module = torch.nn.Softplus(),
                  device: torch.device = torch.device('cuda'),
@@ -391,6 +392,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.init_features_ard_scale = init_features_ard_scale
         self.phi_scale = phi_scale
         self.enable_phi_prior = enable_phi_prior
+        self.enable_phi_training = enable_phi_training
         self.hidden_dims = hidden_dims
         self.activation = activation
         self._eps = 1e-7
@@ -413,8 +415,12 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
             constraints.positive)
 
         # log alpha (posterior)
-        self.log_alpha_posterior_loc_g = PyroParam(
-            - np.log(self.phi_scale) * torch.ones((self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype))
+        if enable_phi_training:
+            self.log_alpha_posterior_loc_g = PyroParam(
+                - np.log(self.phi_scale) * torch.ones((self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype))
+        else:
+            self.log_alpha_posterior_loc_g = - np.log(self.phi_scale) * torch.ones(
+                (self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype)
 
         # log mu bias (posterior)
         self.beta_posterior_loc_g = PyroParam(
