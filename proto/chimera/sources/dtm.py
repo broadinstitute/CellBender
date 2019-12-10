@@ -58,6 +58,11 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
 
+        self.enable_chimera_rate_auto_regularization: bool = \
+            init_params_dict['chimera.enable_rate_auto_regularization']
+        self.chimera_rate_auto_regularization_strength: float = \
+            init_params_dict['chimera.rate_auto_regularization_strength']
+
         # empirical normalization factors
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
@@ -289,16 +294,18 @@ class DropletTimeMachineModel(torch.nn.Module):
                 batch_shape=batch_shape)
 
             # observed chimeric fraction regularization
-            self._sample_chimera_fraction_autoreg(
-                mu_e_lo_n=mu_e_lo_n,
-                mu_e_hi_n=mu_e_hi_n,
-                p_obs_lo_n=p_obs_lo_n,
-                p_obs_hi_n=p_obs_hi_n,
-                inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
-                non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n,
-                gene_index_tensor_n=gene_index_tensor_n,
-                gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
-                cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n)
+            if self.enable_chimera_rate_auto_regularization:
+                self._sample_chimera_fraction_autoreg(
+                    mu_e_lo_n=mu_e_lo_n,
+                    mu_e_hi_n=mu_e_hi_n,
+                    p_obs_lo_n=p_obs_lo_n,
+                    p_obs_hi_n=p_obs_hi_n,
+                    inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+                    non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n,
+                    gene_index_tensor_n=gene_index_tensor_n,
+                    gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
+                    cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+                    auto_regularization_strength=self.chimera_rate_auto_regularization_strength)
 
     def _sample_chimera_fraction_autoreg(self,
                                          mu_e_lo_n: torch.Tensor,
@@ -309,7 +316,8 @@ class DropletTimeMachineModel(torch.nn.Module):
                                          non_inducing_binary_mask_tensor_n: torch.Tensor,
                                          gene_index_tensor_n: torch.Tensor,
                                          gene_sampling_site_scale_factor_tensor_n: torch.Tensor,
-                                         cell_sampling_site_scale_factor_tensor_n: torch.Tensor):
+                                         cell_sampling_site_scale_factor_tensor_n: torch.Tensor,
+                                         auto_regularization_strength: float):
         """Regularize chimeric fraction of non-inducing genes with that of inducing genes"""
         e_lo_obs_cell_averaged_n = get_cell_averaged_from_collapsed_samples(
             input_tensor_n=mu_e_lo_n * p_obs_lo_n,
@@ -350,7 +358,7 @@ class DropletTimeMachineModel(torch.nn.Module):
             inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
             non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
 
-        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+        with poutine.scale(scale=auto_regularization_strength * gene_sampling_site_scale_factor_tensor_n):
             pyro.sample(
                 "prior_chimera_fraction_autoreg",
                 dist.Beta(prior_chimera_fraction_alpha_n, prior_chimera_fraction_beta_n),
