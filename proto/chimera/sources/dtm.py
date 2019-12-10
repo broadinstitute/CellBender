@@ -229,12 +229,6 @@ class DropletTimeMachineModel(torch.nn.Module):
         # sample chimera parameters
         chimera_rate_model_output_dict = self.chimera_rate_model.model(data)
 
-        assert 'mu_e_hi_n' in parents_dict
-        assert 'gene_index_tensor_n' in parents_dict
-        assert 'cell_sampling_site_scale_factor_tensor_n' in parents_dict
-        assert 'mu_fsd_hi_n' in parents_dict
-        assert 'eta_n' in parents_dict
-
         # extract chimera rate parameters
         chimera_rate_params_dict = self.chimera_rate_model.decode_output_to_chimera_rate(
             output_dict=chimera_rate_model_output_dict,
