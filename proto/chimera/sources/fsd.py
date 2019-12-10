@@ -18,6 +18,7 @@ from pyro.contrib.gp.parameterized import Parameterized
 
 from pyro_extras import NegativeBinomial, MixtureDistribution, WhiteNoiseWithMinVariance
 from fingerprint import SingleCellFingerprintDTM
+from utils import get_detached_on_non_inducing_genes
 
 from abc import abstractmethod
 
@@ -591,15 +592,14 @@ class FSDModelGPLVMRestricted(FSDModel):
             inducing_binary_mask_tensor_n = parents_dict['inducing_binary_mask_tensor_n']
             non_inducing_binary_mask_tensor_n = parents_dict['non_inducing_binary_mask_tensor_n']
 
-            log_mu_lo_intercept_detached = self.log_mu_lo_intercept.clone().detach()
-            log_mu_lo_intercept_n = (
-                self.log_mu_lo_intercept * inducing_binary_mask_tensor_n
-                + log_mu_lo_intercept_detached * non_inducing_binary_mask_tensor_n)
-
-            log_mu_lo_slope_detached = self.log_mu_lo_slope.clone().detach()
-            log_mu_lo_slope_n = (
-                self.log_mu_lo_slope * inducing_binary_mask_tensor_n
-                + log_mu_lo_slope_detached * non_inducing_binary_mask_tensor_n)
+            log_mu_lo_intercept_n = get_detached_on_non_inducing_genes(
+                input_scalar=self.log_mu_lo_intercept,
+                inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+                non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
+            log_mu_lo_slope_n = get_detached_on_non_inducing_genes(
+                input_scalar=self.log_mu_lo_slope,
+                inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+                non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
 
         else:
 

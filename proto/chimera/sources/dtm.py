@@ -18,6 +18,7 @@ from expr import GeneExpressionModel
 from chimera import ChimeraRateModel
 from importance_sampling import PosteriorImportanceSamplerInputs, PosteriorImportanceSampler
 from stats import int_ndarray_mode
+from utils import get_cell_averaged_from_collapsed_samples, get_detached_on_non_inducing_genes
 
 import logging
 
@@ -242,14 +243,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 'inducing_binary_mask_tensor_n': inducing_binary_mask_tensor_n,
                 'non_inducing_binary_mask_tensor_n': non_inducing_binary_mask_tensor_n
             })
-
         mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']
-        mu_e_lo_cell_averaged_n = chimera_rate_params_dict['mu_e_lo_cell_averaged_n']
-
-        # total_obs_gene_expr_per_cell_n = parents_dict['total_obs_gene_expr_per_cell_n']
-        # p_obs_lo_n = parents_dict['p_obs_lo_n']
-        # rho_ave_n = (alpha_c + beta_c) * scaled_mu_fsd_hi_n
-        # e_lo_obs_prior_fraction_n = rho_ave_n * mu_e_hi_cell_averaged_n * p_obs_lo_n / total_obs_gene_expr_per_cell_n
 
         if posterior_sampling_mode:
 
@@ -293,6 +287,74 @@ class DropletTimeMachineModel(torch.nn.Module):
                 gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
                 total_obs_expr_per_gene_tensor_n=total_obs_expr_per_gene_tensor_n,
                 batch_shape=batch_shape)
+
+            # observed chimeric fraction regularization
+            self._sample_chimera_fraction_autoreg(
+                mu_e_lo_n=mu_e_lo_n,
+                mu_e_hi_n=mu_e_hi_n,
+                p_obs_lo_n=p_obs_lo_n,
+                p_obs_hi_n=p_obs_hi_n,
+                inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+                non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n,
+                gene_index_tensor_n=gene_index_tensor_n,
+                gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
+                cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n)
+
+    def _sample_chimera_fraction_autoreg(self,
+                                         mu_e_lo_n: torch.Tensor,
+                                         mu_e_hi_n: torch.Tensor,
+                                         p_obs_lo_n: torch.Tensor,
+                                         p_obs_hi_n: torch.Tensor,
+                                         inducing_binary_mask_tensor_n: torch.Tensor,
+                                         non_inducing_binary_mask_tensor_n: torch.Tensor,
+                                         gene_index_tensor_n: torch.Tensor,
+                                         gene_sampling_site_scale_factor_tensor_n: torch.Tensor,
+                                         cell_sampling_site_scale_factor_tensor_n: torch.Tensor):
+        """Regularize chimeric fraction of non-inducing genes with that of inducing genes"""
+        e_lo_obs_cell_averaged_n = get_cell_averaged_from_collapsed_samples(
+            input_tensor_n=mu_e_lo_n * p_obs_lo_n,
+            gene_index_tensor_n=gene_index_tensor_n,
+            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+            n_genes=self.sc_fingerprint_dtm.n_genes,
+            dtype=self.dtype,
+            device=self.device)
+
+        e_hi_obs_cell_averaged_n = get_cell_averaged_from_collapsed_samples(
+            input_tensor_n=mu_e_hi_n * p_obs_hi_n,
+            gene_index_tensor_n=gene_index_tensor_n,
+            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+            n_genes=self.sc_fingerprint_dtm.n_genes,
+            dtype=self.dtype,
+            device=self.device)
+
+        prior_chimera_fraction_n = e_lo_obs_cell_averaged_n / (
+                e_lo_obs_cell_averaged_n + e_hi_obs_cell_averaged_n)
+
+        prior_chimera_fraction_alpha = pyro.param(
+            "prior_chimera_fraction_alpha",
+            torch.tensor(1 + self.eps, device=self.device, dtype=self.dtype),
+            constraint=constraints.greater_than_eq(1.))
+
+        prior_chimera_fraction_beta = pyro.param(
+            "prior_chimera_fraction_beta",
+            torch.tensor(1 + self.eps, device=self.device, dtype=self.dtype),
+            constraint=constraints.greater_than_eq(1.))
+
+        prior_chimera_fraction_alpha_n = get_detached_on_non_inducing_genes(
+            input_scalar=prior_chimera_fraction_alpha,
+            inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+            non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
+
+        prior_chimera_fraction_beta_n = get_detached_on_non_inducing_genes(
+            input_scalar=prior_chimera_fraction_beta,
+            inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+            non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
+
+        with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
+            pyro.sample(
+                "prior_chimera_fraction_autoreg",
+                dist.Beta(prior_chimera_fraction_alpha_n, prior_chimera_fraction_beta_n),
+                obs=prior_chimera_fraction_n)
 
     def guide(self,
               data: Dict[str, torch.Tensor],

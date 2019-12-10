@@ -13,6 +13,7 @@ from pyro.contrib.gp.parameterized import Parameterized
 
 from fingerprint import SingleCellFingerprintDTM
 from stats import gamma_loc_scale_to_concentration_rate
+from utils import get_cell_averaged_from_collapsed_samples, get_detached_on_non_inducing_genes
 
 
 class ChimeraRateModel(Parameterized):
@@ -116,39 +117,6 @@ class UniformChimeraRateModel(ChimeraRateModel):
             'beta_c': beta_c
         }
 
-    def get_cell_averaged_from_collapsed_samples(
-            self,
-            input_tensor_n: torch.Tensor,
-            gene_index_tensor_n: torch.Tensor,
-            cell_sampling_site_scale_factor_tensor_n: torch.Tensor) -> torch.Tensor:
-
-        # calculating cell-averaging of `input_tensor_n` for cells in the minibatch
-        input_tensor_cell_weighted_sum_g = torch.zeros(
-            self.sc_fingerprint_dtm.n_genes, device=self.device, dtype=self.dtype)
-        cell_weight_sum_g = torch.zeros(
-            self.sc_fingerprint_dtm.n_genes, device=self.device, dtype=self.dtype)
-
-        input_tensor_cell_weighted_sum_g.index_add_(
-            dim=0,
-            index=gene_index_tensor_n,
-            source=input_tensor_n * cell_sampling_site_scale_factor_tensor_n)
-
-        cell_weight_sum_g.index_add_(
-            dim=0,
-            index=gene_index_tensor_n,
-            source=cell_sampling_site_scale_factor_tensor_n)
-
-        # _eps is added to avoid NaNs (on discarded indices)
-        input_tensor_cell_averaged_g = input_tensor_cell_weighted_sum_g / (self._eps + cell_weight_sum_g)
-
-        # gather over genes
-        input_tensor_cell_averaged_g = torch.gather(
-            input_tensor_cell_averaged_g,
-            dim=0,
-            index=gene_index_tensor_n)
-
-        return input_tensor_cell_averaged_g
-
     @abstractmethod
     def decode_output_to_chimera_rate(
             self,
@@ -176,15 +144,15 @@ class UniformChimeraRateModel(ChimeraRateModel):
             inducing_binary_mask_tensor_n = parents_dict['inducing_binary_mask_tensor_n']
             non_inducing_binary_mask_tensor_n = parents_dict['non_inducing_binary_mask_tensor_n']
 
-            alpha_c_detached = alpha_c.clone().detach()
-            beta_c_detached = beta_c.clone().detach()
+            alpha_c_n = get_detached_on_non_inducing_genes(
+                input_scalar=alpha_c,
+                inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+                non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
 
-            alpha_c_n = (
-                alpha_c * inducing_binary_mask_tensor_n
-                + alpha_c_detached * non_inducing_binary_mask_tensor_n)
-            beta_c_n = (
-                beta_c * inducing_binary_mask_tensor_n
-                + beta_c_detached * non_inducing_binary_mask_tensor_n)
+            beta_c_n = get_detached_on_non_inducing_genes(
+                input_scalar=beta_c,
+                inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+                non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
 
         else:
 
@@ -201,23 +169,19 @@ class UniformChimeraRateModel(ChimeraRateModel):
         total_fragments_scaled_n = mu_e_hi_n * mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
 
         # calculate the required cell-averaged quantities
-        total_fragments_scaled_cell_averaged_n = self.get_cell_averaged_from_collapsed_samples(
+        total_fragments_scaled_cell_averaged_n = get_cell_averaged_from_collapsed_samples(
             input_tensor_n=total_fragments_scaled_n,
             gene_index_tensor_n=gene_index_tensor_n,
-            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n)
+            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+            n_genes=self.sc_fingerprint_dtm.n_genes,
+            dtype=self.dtype,
+            device=self.device)
 
         # calculate per-cell chimera rate
         mu_e_lo_n = (alpha_c_n + beta_c_n * eta_n) * total_fragments_scaled_cell_averaged_n
 
-        # calculate cell-averaged chimera rate
-        mu_e_lo_cell_averaged_n = self.get_cell_averaged_from_collapsed_samples(
-            input_tensor_n=mu_e_lo_n,
-            gene_index_tensor_n=gene_index_tensor_n,
-            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n)
-
         return {
-            'mu_e_lo_n': mu_e_lo_n,
-            'mu_e_lo_cell_averaged_n': mu_e_lo_cell_averaged_n
+            'mu_e_lo_n': mu_e_lo_n
         }
 
 
