@@ -332,13 +332,13 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         prior_chimera_fraction_alpha = pyro.param(
             "prior_chimera_fraction_alpha",
-            torch.tensor(1 + self.eps, device=self.device, dtype=self.dtype),
-            constraint=constraints.greater_than_eq(1.))
+            torch.tensor(1., device=self.device, dtype=self.dtype),
+            constraint=constraints.positive)
 
         prior_chimera_fraction_beta = pyro.param(
             "prior_chimera_fraction_beta",
-            torch.tensor(1 + self.eps, device=self.device, dtype=self.dtype),
-            constraint=constraints.greater_than_eq(1.))
+            torch.tensor(1., device=self.device, dtype=self.dtype),
+            constraint=constraints.positive)
 
         prior_chimera_fraction_alpha_n = get_detached_on_non_inducing_genes(
             input_scalar=prior_chimera_fraction_alpha,
