@@ -469,7 +469,7 @@ class FSDModelGPLVMRestricted(FSDModel):
         self.fsd_gplvm_min_noise = init_params_dict['fsd.gplvm.min_noise']
         self.fsd_init_xi_posterior_scale = init_params_dict['fsd.init_fsd_xi_posterior_scale']
 
-        self.detach_non_hvg_genes = init_params_dict['fsd.chimera.detach_non_hvg_genes']
+        self.detach_non_inducing_genes = init_params_dict['fsd.chimera.detach_non_inducing_genes']
 
         self.device = device
         self.dtype = dtype
@@ -583,21 +583,23 @@ class FSDModelGPLVMRestricted(FSDModel):
         else:
             w_hi = torch.ones_like(mu_hi)
 
-        if self.detach_non_hvg_genes and (parents_dict is not None):
+        if self.detach_non_inducing_genes and (parents_dict is not None):
 
-            assert 'hvg_binary_mask_tensor_n' in parents_dict
-            hvg_binary_mask_tensor_n = parents_dict['hvg_binary_mask_tensor_n'].float()
-            non_hvg_binary_mask_tensor_n = (~parents_dict['hvg_binary_mask_tensor_n']).float()
+            assert 'inducing_binary_mask_tensor_n' in parents_dict
+            assert 'non_inducing_binary_mask_tensor_n' in parents_dict
+
+            inducing_binary_mask_tensor_n = parents_dict['inducing_binary_mask_tensor_n']
+            non_inducing_binary_mask_tensor_n = parents_dict['non_inducing_binary_mask_tensor_n']
 
             log_mu_lo_intercept_detached = self.log_mu_lo_intercept.clone().detach()
             log_mu_lo_intercept_n = (
-                self.log_mu_lo_intercept * hvg_binary_mask_tensor_n
-                + log_mu_lo_intercept_detached * non_hvg_binary_mask_tensor_n)
+                self.log_mu_lo_intercept * inducing_binary_mask_tensor_n
+                + log_mu_lo_intercept_detached * non_inducing_binary_mask_tensor_n)
 
             log_mu_lo_slope_detached = self.log_mu_lo_slope.clone().detach()
             log_mu_lo_slope_n = (
-                self.log_mu_lo_slope * hvg_binary_mask_tensor_n
-                + log_mu_lo_slope_detached * non_hvg_binary_mask_tensor_n)
+                self.log_mu_lo_slope * inducing_binary_mask_tensor_n
+                + log_mu_lo_slope_detached * non_inducing_binary_mask_tensor_n)
 
         else:
 

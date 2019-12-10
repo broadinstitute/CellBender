@@ -47,6 +47,7 @@ class UniformChimeraRateModel(ChimeraRateModel):
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.device = device
         self.dtype = dtype
+        self._eps = 1e-7
 
         self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
             loc=init_params_dict['chimera.alpha_c_prior_loc'],
@@ -56,7 +57,7 @@ class UniformChimeraRateModel(ChimeraRateModel):
             loc=init_params_dict['chimera.beta_c_prior_loc'],
             scale=init_params_dict['chimera.beta_c_prior_scale'])
 
-        self.detach_non_hvg_genes = init_params_dict['chimera.detach_non_hvg_genes']
+        self.detach_non_inducing_genes = init_params_dict['chimera.detach_non_inducing_genes']
 
         # chimera hyperparameters
         self.alpha_c_concentration_scalar = torch.tensor(
@@ -115,6 +116,39 @@ class UniformChimeraRateModel(ChimeraRateModel):
             'beta_c': beta_c
         }
 
+    def get_cell_averaged_from_collapsed_samples(
+            self,
+            input_tensor_n: torch.Tensor,
+            gene_index_tensor_n: torch.Tensor,
+            cell_sampling_site_scale_factor_tensor_n: torch.Tensor) -> torch.Tensor:
+
+        # calculating cell-averaging of `input_tensor_n` for cells in the minibatch
+        input_tensor_cell_weighted_sum_g = torch.zeros(
+            self.sc_fingerprint_dtm.n_genes, device=self.device, dtype=self.dtype)
+        cell_weight_sum_g = torch.zeros(
+            self.sc_fingerprint_dtm.n_genes, device=self.device, dtype=self.dtype)
+
+        input_tensor_cell_weighted_sum_g.index_add_(
+            dim=0,
+            index=gene_index_tensor_n,
+            source=input_tensor_n * cell_sampling_site_scale_factor_tensor_n)
+
+        cell_weight_sum_g.index_add_(
+            dim=0,
+            index=gene_index_tensor_n,
+            source=cell_sampling_site_scale_factor_tensor_n)
+
+        # _eps is added to avoid NaNs (on discarded indices)
+        input_tensor_cell_averaged_g = input_tensor_cell_weighted_sum_g / (self._eps + cell_weight_sum_g)
+
+        # gather over genes
+        input_tensor_cell_averaged_g = torch.gather(
+            input_tensor_cell_averaged_g,
+            dim=0,
+            index=gene_index_tensor_n)
+
+        return input_tensor_cell_averaged_g
+
     @abstractmethod
     def decode_output_to_chimera_rate(
             self,
@@ -125,45 +159,67 @@ class UniformChimeraRateModel(ChimeraRateModel):
         assert 'alpha_c' in output_dict
         assert 'beta_c' in output_dict
 
+        assert 'mu_e_hi_n' in parents_dict
+        assert 'gene_index_tensor_n' in parents_dict
+        assert 'cell_sampling_site_scale_factor_tensor_n' in parents_dict
         assert 'mu_fsd_hi_n' in parents_dict
         assert 'eta_n' in parents_dict
-        assert 'mu_e_hi_cell_averaged_n' in parents_dict
 
         alpha_c = output_dict['alpha_c']
         beta_c = output_dict['beta_c']
 
-        if self.detach_non_hvg_genes:
+        if self.detach_non_inducing_genes:
 
-            assert 'hvg_binary_mask_tensor_n' in parents_dict
-            hvg_binary_mask_tensor_n = parents_dict['hvg_binary_mask_tensor_n'].float()
-            non_hvg_binary_mask_tensor_n = (~parents_dict['hvg_binary_mask_tensor_n']).float()
+            assert 'inducing_binary_mask_tensor_n' in parents_dict
+            assert 'non_inducing_binary_mask_tensor_n' in parents_dict
+
+            inducing_binary_mask_tensor_n = parents_dict['inducing_binary_mask_tensor_n']
+            non_inducing_binary_mask_tensor_n = parents_dict['non_inducing_binary_mask_tensor_n']
 
             alpha_c_detached = alpha_c.clone().detach()
             beta_c_detached = beta_c.clone().detach()
 
             alpha_c_n = (
-                alpha_c * hvg_binary_mask_tensor_n.float()
-                + alpha_c_detached * non_hvg_binary_mask_tensor_n)
+                alpha_c * inducing_binary_mask_tensor_n
+                + alpha_c_detached * non_inducing_binary_mask_tensor_n)
             beta_c_n = (
-                beta_c * hvg_binary_mask_tensor_n.float()
-                + beta_c_detached * non_hvg_binary_mask_tensor_n)
+                beta_c * inducing_binary_mask_tensor_n
+                + beta_c_detached * non_inducing_binary_mask_tensor_n)
 
         else:
 
             alpha_c_n = alpha_c
             beta_c_n = beta_c
 
+        mu_e_hi_n = parents_dict['mu_e_hi_n']
+        gene_index_tensor_n = parents_dict['gene_index_tensor_n']
+        cell_sampling_site_scale_factor_tensor_n = parents_dict['cell_sampling_site_scale_factor_tensor_n']
         mu_fsd_hi_n = parents_dict['mu_fsd_hi_n']
         eta_n = parents_dict['eta_n']
-        mu_e_hi_cell_averaged_n = parents_dict['mu_e_hi_cell_averaged_n']
 
-        # calculate chimera rate
-        rho_n = (alpha_c_n + beta_c_n * eta_n) * mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
-        mu_e_lo_n = rho_n * mu_e_hi_cell_averaged_n
+        # auxiliary
+        total_fragments_scaled_n = mu_e_hi_n * mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
+
+        # calculate the required cell-averaged quantities
+        total_fragments_scaled_cell_averaged_n = self.get_cell_averaged_from_collapsed_samples(
+            input_tensor_n=total_fragments_scaled_n,
+            gene_index_tensor_n=gene_index_tensor_n,
+            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n)
+
+        # calculate per-cell chimera rate
+        mu_e_lo_n = (alpha_c_n + beta_c_n * eta_n) * total_fragments_scaled_cell_averaged_n
+
+        # calculate cell-averaged chimera rate
+        mu_e_lo_cell_averaged_n = self.get_cell_averaged_from_collapsed_samples(
+            input_tensor_n=mu_e_lo_n,
+            gene_index_tensor_n=gene_index_tensor_n,
+            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n)
 
         return {
-            'mu_e_lo_n': mu_e_lo_n
+            'mu_e_lo_n': mu_e_lo_n,
+            'mu_e_lo_cell_averaged_n': mu_e_lo_cell_averaged_n
         }
+
 
 # class GeneLevelChimeraRateModel(ChimeraRateModel):
 #     def __init__(self,

@@ -63,8 +63,9 @@ class DropletTimeMachineModel(torch.nn.Module):
         # logging
         self._logger = logging.getLogger()
 
+        # todo refactor and allow arbitrary list of genes
         # a binary mask for highly variable genes
-        self.hvg_binary_mask_tensor_g = torch.tensor(
+        self.inducing_binary_mask_tensor_g = torch.tensor(
             sc_fingerprint_dtm.hvg_binary_mask, device=device, dtype=torch.bool)
 
         # constraint pressure
@@ -143,8 +144,9 @@ class DropletTimeMachineModel(torch.nn.Module):
             0, max_family_size + 1, device=self.device, dtype=self.dtype)
         zero = torch.tensor(0, device=self.device, dtype=self.dtype)
 
-        # hvg binary mask
-        hvg_binary_mask_tensor_n = self.hvg_binary_mask_tensor_g[gene_index_tensor_n]
+        # inducing binary mask
+        inducing_binary_mask_tensor_n = self.inducing_binary_mask_tensor_g[gene_index_tensor_n].float()
+        non_inducing_binary_mask_tensor_n = (~self.inducing_binary_mask_tensor_g[gene_index_tensor_n]).float()
 
         # sample unconstrained fsd params
         fsd_model_output_dict = self.fsd_model.model(data)
@@ -153,7 +155,8 @@ class DropletTimeMachineModel(torch.nn.Module):
         fsd_params_dict = self.fsd_model.decode(
             output_dict=fsd_model_output_dict,
             parents_dict={
-                'hvg_binary_mask_tensor_n': hvg_binary_mask_tensor_n
+                'inducing_binary_mask_tensor_n': inducing_binary_mask_tensor_n,
+                'non_inducing_binary_mask_tensor_n': non_inducing_binary_mask_tensor_n
             })
 
         # get chimeric and real family size distributions
@@ -169,7 +172,6 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         log_mu_e_hi_n = e_hi_nb_params_dict['log_mu_e_hi_n']
         log_phi_e_hi_n = e_hi_nb_params_dict['log_phi_e_hi_n']
-        mu_e_hi_cell_averaged_n = e_hi_nb_params_dict['mu_e_hi_cell_averaged_n']
 
         mu_e_hi_n = log_mu_e_hi_n.exp()
         phi_e_hi_n = log_phi_e_hi_n.exp()
@@ -227,20 +229,28 @@ class DropletTimeMachineModel(torch.nn.Module):
         # sample chimera parameters
         chimera_rate_model_output_dict = self.chimera_rate_model.model(data)
 
+        assert 'mu_e_hi_n' in parents_dict
+        assert 'gene_index_tensor_n' in parents_dict
+        assert 'cell_sampling_site_scale_factor_tensor_n' in parents_dict
+        assert 'mu_fsd_hi_n' in parents_dict
+        assert 'eta_n' in parents_dict
+
         # extract chimera rate parameters
         chimera_rate_params_dict = self.chimera_rate_model.decode_output_to_chimera_rate(
             output_dict=chimera_rate_model_output_dict,
             data_dict=data,
             parents_dict={
+                'mu_e_hi_n': mu_e_hi_n,
+                'gene_index_tensor_n': gene_index_tensor_n,
+                'cell_sampling_site_scale_factor_tensor_n': cell_sampling_site_scale_factor_tensor_n,
                 'mu_fsd_hi_n': mu_fsd_hi_n,
                 'eta_n': eta_n,
-                'mu_e_hi_cell_averaged_n': mu_e_hi_cell_averaged_n,
-                'total_obs_gene_expr_per_cell_n': arithmetic_mean_obs_expr_per_gene_tensor_n,
-                'p_obs_lo_n': p_obs_lo_n,
-                'hvg_binary_mask_tensor_n': hvg_binary_mask_tensor_n
+                'inducing_binary_mask_tensor_n': inducing_binary_mask_tensor_n,
+                'non_inducing_binary_mask_tensor_n': non_inducing_binary_mask_tensor_n
             })
 
         mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']
+        mu_e_lo_cell_averaged_n = chimera_rate_params_dict['mu_e_lo_cell_averaged_n']
 
         # total_obs_gene_expr_per_cell_n = parents_dict['total_obs_gene_expr_per_cell_n']
         # p_obs_lo_n = parents_dict['p_obs_lo_n']
