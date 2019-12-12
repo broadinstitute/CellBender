@@ -58,10 +58,15 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
 
-        self.enable_chimera_rate_auto_regularization: bool = \
-            init_params_dict['chimera.enable_rate_auto_regularization']
-        self.chimera_rate_auto_regularization_strength: float = \
-            init_params_dict['chimera.rate_auto_regularization_strength']
+        # observed chimera rate auto-regularization
+        self.enable_chimera_rate_auto_regularization: bool = init_params_dict['chimera.autoreg.enable']
+        self.chimera_rate_auto_regularization_strength: float = init_params_dict['chimera.autoreg.strength']
+        self.prior_chimera_fraction_alpha_init = init_params_dict['chimera.autoreg.init_alpha']
+        self.prior_chimera_fraction_alpha_lower_bound = init_params_dict['chimera.autoreg.min_alpha']
+        self.prior_chimera_fraction_alpha_upper_bound = init_params_dict['chimera.autoreg.max_alpha']
+        self.prior_chimera_fraction_beta_init = init_params_dict['chimera.autoreg.init_beta']
+        self.prior_chimera_fraction_beta_lower_bound = init_params_dict['chimera.autoreg.min_beta']
+        self.prior_chimera_fraction_beta_upper_bound = init_params_dict['chimera.autoreg.max_beta']
 
         # empirical normalization factors
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
@@ -335,20 +340,24 @@ class DropletTimeMachineModel(torch.nn.Module):
             dtype=self.dtype,
             device=self.device)
 
+        # we detach e_hi so that only chimera-related quantities will get a gradient
         prior_chimera_fraction_n = e_lo_obs_cell_averaged_n / (
-                e_lo_obs_cell_averaged_n + e_hi_obs_cell_averaged_n)
+                e_lo_obs_cell_averaged_n
+                + e_hi_obs_cell_averaged_n.clone().detach())
 
-        # todo magic number
         prior_chimera_fraction_alpha = pyro.param(
             "prior_chimera_fraction_alpha",
-            torch.tensor(1.1, device=self.device, dtype=self.dtype),
-            constraint=constraints.greater_than_eq(1.))
+            torch.tensor(self.prior_chimera_fraction_alpha_init, device=self.device, dtype=self.dtype),
+            constraint=constraints.interval(
+                lower_bound=self.prior_chimera_fraction_alpha_lower_bound,
+                upper_bound=self.prior_chimera_fraction_alpha_upper_bound))
 
-        # todo magic number
         prior_chimera_fraction_beta = pyro.param(
             "prior_chimera_fraction_beta",
-            torch.tensor(1.1, device=self.device, dtype=self.dtype),
-            constraint=constraints.greater_than_eq(1.))
+            torch.tensor(self.prior_chimera_fraction_beta_init, device=self.device, dtype=self.dtype),
+            constraint=constraints.interval(
+                lower_bound=self.prior_chimera_fraction_beta_lower_bound,
+                upper_bound=self.prior_chimera_fraction_beta_upper_bound))
 
         prior_chimera_fraction_alpha_n = get_detached_on_non_inducing_genes(
             input_scalar=prior_chimera_fraction_alpha,

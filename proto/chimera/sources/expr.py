@@ -376,10 +376,11 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 init_features_ard_scale: float = 1.0,
-                 phi_scale: float = 0.1,
                  enable_phi_prior: bool = True,
                  enable_phi_training: bool = True,
+                 enable_ard: bool = True,
+                 init_features_ard_scale: float = 1.0,
+                 phi_scale: float = 0.1,
                  hidden_dims: List[int] = [],
                  activation: torch.nn.Module = torch.nn.Softplus(),
                  device: torch.device = torch.device('cuda'),
@@ -391,6 +392,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.dtype = dtype
         self.init_features_ard_scale = init_features_ard_scale
         self.phi_scale = phi_scale
+        self.enable_ard = enable_ard
         self.enable_phi_prior = enable_phi_prior
         self.enable_phi_training = enable_phi_training
         self.hidden_dims = hidden_dims
@@ -410,9 +412,11 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.n_intermediate_features = last_dim
 
         # log mu weights ARD precisions
-        self.gamma_ard_scale_f = PyroParam(
-            self.init_features_ard_scale * torch.ones((self.n_intermediate_features,), device=device, dtype=dtype),
-            constraints.positive)
+        if self.enable_ard:
+            self.gamma_ard_scale_f = PyroParam(
+                self.init_features_ard_scale * torch.ones(
+                    (self.n_intermediate_features,), device=device, dtype=dtype),
+                constraints.positive)
 
         # log alpha (posterior)
         if enable_phi_training:
@@ -449,15 +453,18 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
 
             # sample log mu weights
-            gamma_nf = pyro.sample(
-                "gamma_nf",
-                dist.Normal(
-                    loc=torch.zeros((mb_size, self.n_intermediate_features), device=self.device, dtype=self.dtype),
-                    scale=self.gamma_ard_scale_f.expand((mb_size, self.n_intermediate_features))
-                ).to_event(1))
+            if self.enable_ard:
+                gamma_nf = pyro.sample(
+                    "gamma_nf",
+                    dist.Normal(
+                        loc=torch.zeros((mb_size, self.n_intermediate_features), device=self.device, dtype=self.dtype),
+                        scale=self.gamma_ard_scale_f.expand((mb_size, self.n_intermediate_features))
+                    ).to_event(1))
+            else:
+                gamma_nf = self.gamma_posterior_loc_gf[gene_index_tensor_n, :]
 
+            # sample log alpha
             if self.enable_phi_prior:
-                # sample log alpha
                 log_alpha_n = pyro.sample(
                     "log_alpha_n",
                     dist.Gumbel(
@@ -485,9 +492,12 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
 
             # sample log mu weights
-            gamma_nf = pyro.sample(
-                "gamma_nf",
-                dist.Delta(v=self.gamma_posterior_loc_gf[gene_index_tensor_n, :]).to_event(1))
+            if self.enable_ard:
+                gamma_nf = pyro.sample(
+                    "gamma_nf",
+                    dist.Delta(v=self.gamma_posterior_loc_gf[gene_index_tensor_n, :]).to_event(1))
+            else:
+                gamma_nf = self.gamma_posterior_loc_gf[gene_index_tensor_n, :]
 
             if self.enable_phi_prior:
                 # sample log alpha
