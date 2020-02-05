@@ -653,7 +653,7 @@ def generate_maximum_a_posteriori_count_matrix(
 
         # Append these to their lists.
         barcodes.extend(nonzero_barcodes.astype(dtype=np.uint32))
-        genes.extend(nonzero_genes.astype(dtype=np.uint16))
+        genes.extend(nonzero_genes.astype(dtype=np.uint32))
         counts.extend(nonzero_counts.astype(dtype=np.uint32))
 
     # Convert the lists to numpy arrays.
