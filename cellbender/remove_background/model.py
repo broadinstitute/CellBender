@@ -653,13 +653,13 @@ def generate_maximum_a_posteriori_count_matrix(
 
         # Append these to their lists.
         barcodes.extend(nonzero_barcodes.astype(dtype=np.uint32))
-        genes.extend(nonzero_genes.astype(dtype=np.uint16))
+        genes.extend(nonzero_genes.astype(dtype=np.uint32))
         counts.extend(nonzero_counts.astype(dtype=np.uint32))
 
     # Convert the lists to numpy arrays.
     counts = np.array(counts, dtype=np.uint32)
     barcodes = np.array(barcodes, dtype=np.uint32)
-    genes = np.array(genes, dtype=np.uint16)
+    genes = np.array(genes, dtype=np.uint32)
 
     # Put the counts into a sparse csc_matrix.
     inferred_count_matrix = sp.csc_matrix((counts, (barcodes, genes)),
