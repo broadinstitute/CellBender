@@ -1,6 +1,5 @@
 from typing import Optional, Dict
 from operator import itemgetter
-import time
 
 import numpy as np
 
@@ -13,7 +12,6 @@ from expr import VSGPGeneExpressionModel, VSGPGeneExpressionModelTrainer
 
 from adjustText import adjust_text
 from matplotlib.axes import Axes
-from matplotlib.pylab import cm
 from matplotlib import pylab
 
 from fingerprint import SingleCellFingerprintDTM
@@ -77,6 +75,10 @@ class HighlyVariableGenesSelector:
             'hvg.expr.trainer.minibatch.silent_cells_per_gene']
         self.hvg_expr_trainer_minibatch_sampling_strategy: str = init_params_dict[
             'hvg.expr.trainer.minibatch.sampling_strategy']
+
+        assert 0 < self.hvg_n_selected_genes <= sc_fingerprint_dtm.n_genes, \
+            f"Number of highly variable genes to choose ({self.hvg_n_selected_genes}) must greater than 0 and " \
+            f"lesser or equal to the total number of genes ({sc_fingerprint_dtm.n_genes})"
 
         if self.hvg_gene_group_prefixes is None:
             self.gene_group_internal_indices_dict: Dict[str, np.ndarray] = {

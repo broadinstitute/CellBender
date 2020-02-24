@@ -391,6 +391,9 @@ class SingleCellFingerprintDTM:
         # certain cached properties)
         assert self.highly_variable_gene_indices is None, \
             "Highly variable genes are already specified!"
+        assert len(highly_variable_gene_indices) >= self.n_cell_pca_features, \
+            f"The number of highly variable genes ({len(highly_variable_gene_indices)}) must be " \
+            f"greater or equal to the number of cell PCA features ({self.n_cell_pca_features})"
         self.highly_variable_gene_indices = highly_variable_gene_indices
 
     @cachedproperty
@@ -694,6 +697,9 @@ class SingleCellFingerprintDTM:
             gene_groups_dict[i_group] = list(
                 map(operator.itemgetter(0),
                     sorted_genes_idx_weight[gene_group_start_index:gene_group_stop_index]))
+            assert len(gene_groups_dict[i_group]) > 0, \
+                "Some of the gene groups ended up as empty -- please reduce the number of gene groups"
+
         return gene_groups_dict
 
     # TODO truncation of empirical FSD make unreliable empirical FSD params estimation

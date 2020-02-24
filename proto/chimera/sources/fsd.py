@@ -92,16 +92,14 @@ class FSDModelGPLVM(FSDModel):
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 n_fsd_lo_comps: int,
-                 n_fsd_hi_comps: int,
                  init_params_dict: Dict[str, float],
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
         super(FSDModelGPLVM, self).__init__()
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
-        self.n_fsd_lo_comps = n_fsd_lo_comps
-        self.n_fsd_hi_comps = n_fsd_hi_comps
+        self.n_fsd_lo_comps = init_params_dict['fsd.n_fsd_lo_comps']
+        self.n_fsd_hi_comps = init_params_dict['fsd.n_fsd_hi_comps']
 
         self.fsd_init_min_mu_lo = init_params_dict['fsd.init_min_mu_lo']
         self.fsd_init_min_mu_hi = init_params_dict['fsd.init_min_mu_hi']
@@ -438,7 +436,6 @@ class FSDModelGPLVMRestricted(FSDModel):
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 n_fsd_hi_comps: int,
                  init_params_dict: Dict[str, float],
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
@@ -446,7 +443,7 @@ class FSDModelGPLVMRestricted(FSDModel):
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
         self.n_fsd_lo_comps = 1
-        self.n_fsd_hi_comps = n_fsd_hi_comps
+        self.n_fsd_hi_comps = init_params_dict['fsd.n_fsd_hi_comps']
 
         self.fsd_init_min_mu_lo = init_params_dict['fsd.init_min_mu_lo']
         self.fsd_init_min_mu_hi = init_params_dict['fsd.init_min_mu_hi']

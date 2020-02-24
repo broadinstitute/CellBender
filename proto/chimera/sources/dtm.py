@@ -25,7 +25,7 @@ import logging
 
 class DropletTimeMachineModel(torch.nn.Module):
     def __init__(self,
-                 init_params_dict: Dict[str, Union[int, float, bool]],
+                 init_params_dict: Dict[str, Union[int, float, bool, list]],
                  model_constraint_params_dict: Dict[str, Dict[str, Union[int, float]]],
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
                  gene_expression_model: GeneExpressionModel,
@@ -56,7 +56,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.w_lo_dirichlet_concentration: float = init_params_dict['fsd.w_lo_dirichlet_concentration']
         self.w_hi_dirichlet_concentration: float = init_params_dict['fsd.w_hi_dirichlet_concentration']
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
-        self.n_particles_fingerprint_log_like: int = init_params_dict['model.n_particles_fingerprint_log_like']
+        self.n_particles_fingerprint_log_like: int = init_params_dict['dtm.n_particles_fingerprint_log_like']
 
         # observed chimera rate auto-regularization
         self.enable_chimera_rate_auto_regularization: bool = init_params_dict['chimera.autoreg.enable']

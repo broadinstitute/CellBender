@@ -65,3 +65,5 @@ action items:
 
   - make a notebook for droplet-time-machine
 
+  - the effect of gene grouping transformation?
+  
