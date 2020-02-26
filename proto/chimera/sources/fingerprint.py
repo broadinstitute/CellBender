@@ -5,7 +5,7 @@ import torch
 import operator
 import pickle
 import logging
-from typing import List, Union, Dict, Callable, Optional, Tuple
+from typing import List, Union, Dict, Callable, Optional
 
 from boltons.cacheutils import cachedproperty, cachedmethod
 
@@ -28,6 +28,7 @@ class SingleCellFingerprintBase:
     def __init__(self,
                  gene_idx_list: List[int],
                  gene_names_list: List[str],
+                 gene_ids_list: List[str],
                  max_family_size: int,
                  barcode_list: Union[None, List[int]] = None,
                  csr_fingerprint_list: Union[None, List[sp.csr_matrix]] = None,
@@ -37,6 +38,7 @@ class SingleCellFingerprintBase:
         :param gene_idx_list: list of gene indices (these indices could correspond to gene identities in an
             external gene list)
         :param gene_names_list: list of gene names (corresponding to gene_idx_list)
+        :param gene_ids_list: list of gene IDs (corresponding to gene_idx_list)
         :param max_family_size: maximum allowed family size per molecule
         :param barcode_list: list of barcodes (in an integer representation)
         :param csr_fingerprint_list: list of sparse fingerprint matrices corresponding to the barcodes in
@@ -50,6 +52,7 @@ class SingleCellFingerprintBase:
         assert len(gene_idx_list) > 0, \
             "The fingerprint must have at least one gene!"
         assert len(gene_names_list) == len(gene_idx_list)
+        assert len(gene_ids_list) == len(gene_idx_list)
 
         if barcode_list is None:
             barcode_list = list()
@@ -60,6 +63,7 @@ class SingleCellFingerprintBase:
 
         self.gene_idx_list = gene_idx_list
         self.gene_names_list = gene_names_list
+        self.gene_ids_list = gene_ids_list
 
         self.max_family_size = max_family_size
         self.csr_fingerprint_dict: Dict[int, sp.csr_matrix] = dict()
@@ -109,6 +113,7 @@ class SingleCellFingerprintBase:
         with open(output_path, 'wb') as f:
             pickle.dump(self.gene_idx_list, f)
             pickle.dump(self.gene_names_list, f)
+            pickle.dump(self.gene_ids_list, f)
             pickle.dump(self.csr_fingerprint_dict, f)
 
     @staticmethod
@@ -118,15 +123,17 @@ class SingleCellFingerprintBase:
             loader = pickle.Unpickler(f)
             gene_idx_list = loader.load()
             gene_names_list = loader.load()
+            gene_ids_list = loader.load()
             csr_fingerprint_dict = loader.load()
 
         max_family_size = csr_fingerprint_dict.items().__iter__().__next__()[1].shape[1]
-        new = SingleCellFingerprintBase(gene_idx_list, gene_names_list, max_family_size)
+        new = SingleCellFingerprintBase(
+            gene_idx_list, gene_names_list, gene_ids_list, max_family_size)
         for barcode, csr_fingerprint in csr_fingerprint_dict.items():
             new._add_new_barcode(barcode, csr_fingerprint)
         return new
 
-    @property
+    @cachedproperty
     def n_genes(self):
         return len(self.gene_idx_list)
 
@@ -231,12 +238,14 @@ class SingleCellFingerprintBase:
 
         kept_gene_idx_list = [self.gene_idx_list[i_gene] for i_gene in kept_gene_array_idx_list]
         kept_gene_names_list = [self.gene_names_list[i_gene] for i_gene in kept_gene_array_idx_list]
+        kept_gene_ids_list = [self.gene_ids_list[i_gene] for i_gene in kept_gene_array_idx_list]
         self._logger.warning(f"Number of genes failed the maximum Good-Turing criterion: {num_failed_good_turing}")
         self._logger.warning(f"Number of genes failed the minimum expression criterion: {num_failed_min_expression}")
         self._logger.warning(f"Number of genes failed both criteria: {num_failed_both}")
         self._logger.warning(f"Number of retained genes: {len(kept_gene_idx_list)}")
 
-        new = SingleCellFingerprintBase(kept_gene_idx_list, kept_gene_names_list, self.max_family_size)
+        new = SingleCellFingerprintBase(
+            kept_gene_idx_list, kept_gene_names_list, kept_gene_ids_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
             new._add_new_barcode(barcode, csr_fingerprint[kept_gene_array_idx_list, :])
         return new
@@ -255,7 +264,9 @@ class SingleCellFingerprintBase:
             gene_index: old_list_index for old_list_index, gene_index in enumerate(self.gene_idx_list)}
         keep_index = list(map(gene_idx_to_old_list_index_map.get, subset_gene_idx_list))
         subset_gene_names_list = [self.gene_names_list[idx] for idx in keep_index]
-        new = SingleCellFingerprintBase(subset_gene_idx_list, subset_gene_names_list, self.max_family_size)
+        subset_gene_ids_list = [self.gene_ids_list[idx] for idx in keep_index]
+        new = SingleCellFingerprintBase(
+            subset_gene_idx_list, subset_gene_names_list, subset_gene_ids_list, self.max_family_size)
         for barcode, csr_fingerprint in self.csr_fingerprint_dict.items():
             new._add_new_barcode(barcode, csr_fingerprint[keep_index, :])
         return new
@@ -270,7 +281,8 @@ class SingleCellFingerprintBase:
             "Some of the barcodes in ``subset_barcode_list`` do not exist in the instance!"
         assert len(set(subset_barcode_list)) == len(subset_barcode_list), \
             "The subset barcode list contains repeated entries!"
-        new = SingleCellFingerprintBase(self.gene_idx_list, self.max_family_size)
+        new = SingleCellFingerprintBase(
+            self.gene_idx_list, self.gene_names_list, self.gene_ids_list, self.max_family_size)
         for barcode in subset_barcode_list:
             new._add_new_barcode(barcode, self[barcode])
         return new
