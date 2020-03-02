@@ -15,6 +15,7 @@ from matplotlib.axes import Axes
 from matplotlib import pylab
 
 from fingerprint import SingleCellFingerprintDTM
+import consts
 
 
 class HighlyVariableGenesSelector:
@@ -164,46 +165,65 @@ class HighlyVariableGenesSelector:
                 minibatch_silent_cells_per_gene=self.hvg_expr_trainer_minibatch_silent_cells_per_gene,
                 minibatch_sampling_strategy=self.hvg_expr_trainer_minibatch_sampling_strategy)
 
+    # # deprecated
+    # @cachedproperty
+    # def log_pearson_residual_std_per_group(self) -> Dict[str, np.ndarray]:
+    #     log_pearson_residual_std_per_group_dict: Dict[str, np.ndarray] = dict()
+    #     for gene_group_name in self.gene_group_names:
+    #
+    #         expr_model = self.expr_model_dict[gene_group_name]
+    #         grouped_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
+    #
+    #         with torch.no_grad():
+    #             expr_model.set_mode("model")
+    #             expr_model.vsgp.set_data(
+    #                 X=expr_model.log_mean_obs_expr_g1,
+    #                 y=None)
+    #             beta_loc_rg, _ = expr_model.vsgp.model()
+    #             beta_loc_gr = beta_loc_rg.permute(-1, -2)
+    #
+    #         normed_total_counts_n = torch.tensor(
+    #             grouped_sc_fingerprint_dtm.total_obs_molecules_per_cell / consts.TOTAL_COUNT_NORM_SCALE,
+    #             device=self.device, dtype=self.dtype)
+    #
+    #         log_pearson_res_g = np.zeros((grouped_sc_fingerprint_dtm.n_genes,))
+    #         for gene_index in range(grouped_sc_fingerprint_dtm.n_genes):
+    #             # get counts for gene_index
+    #             counts_n = torch.tensor(
+    #                 grouped_sc_fingerprint_dtm.dense_count_matrix_ndarray[:, gene_index],
+    #                 device=self.device, dtype=self.dtype)
+    #
+    #             # calculate NB prior loc and scale for each particle
+    #             beta_0 = beta_loc_gr[gene_index, 0]
+    #             beta_1 = beta_loc_gr[gene_index, 1]
+    #             prior_loc_n = beta_0.exp() * normed_total_counts_n
+    #             prior_scale_n = (prior_loc_n + beta_1.exp() * prior_loc_n.pow(2)).sqrt()
+    #
+    #             # calculate the one-sided p-value of having excess variance for each particle
+    #             pearson_res_n = (counts_n - prior_loc_n) / prior_scale_n
+    #             log_pearson_res_g[gene_index] = torch.std(pearson_res_n).log().item()
+    #
+    #         log_pearson_residual_std_per_group_dict[gene_group_name] = log_pearson_res_g
+    #
+    #     return log_pearson_residual_std_per_group_dict
+
     @cachedproperty
-    def log_pearson_residual_std_per_group(self) -> Dict[str, np.ndarray]:
-        log_pearson_residual_std_per_group_dict: Dict[str, np.ndarray] = dict()
+    def log_residual_overdispersion_per_group(self) -> Dict[str, np.ndarray]:
+        log_residual_overdispersion_per_group_dict: Dict[str, np.ndarray] = dict()
         for gene_group_name in self.gene_group_names:
-
             expr_model = self.expr_model_dict[gene_group_name]
-            grouped_sc_fingerprint_dtm = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]
-
             with torch.no_grad():
                 expr_model.set_mode("model")
                 expr_model.vsgp.set_data(
                     X=expr_model.log_mean_obs_expr_g1,
                     y=None)
-                beta_loc_rg, _ = expr_model.vsgp.model()
-                beta_loc_gr = beta_loc_rg.permute(-1, -2)
-
-            total_counts_n = torch.tensor(
-                grouped_sc_fingerprint_dtm.total_obs_molecules_per_cell,
-                device=self.device, dtype=self.dtype)
-
-            log_pearson_res_g = np.zeros((grouped_sc_fingerprint_dtm.n_genes,))
-            for gene_index in range(grouped_sc_fingerprint_dtm.n_genes):
-                # get counts for gene_index
-                counts_n = torch.tensor(
-                    grouped_sc_fingerprint_dtm.dense_count_matrix_ndarray[:, gene_index],
-                    device=self.device, dtype=self.dtype)
-
-                # calculate NB prior loc and scale for each particle
-                beta_0 = beta_loc_gr[gene_index, 0]
-                beta_1 = beta_loc_gr[gene_index, 1]
-                prior_loc_n = beta_0.exp() * total_counts_n
-                prior_scale_n = (prior_loc_n + beta_1.exp() * prior_loc_n.pow(2)).sqrt()
-
-                # calculate the one-sided p-value of having excess variance for each particle
-                pearson_res_n = (counts_n - prior_loc_n) / prior_scale_n
-                log_pearson_res_g[gene_index] = torch.std(pearson_res_n).log().item()
-
-            log_pearson_residual_std_per_group_dict[gene_group_name] = log_pearson_res_g
-
-        return log_pearson_residual_std_per_group_dict
+                beta_prior_loc_rg, _ = expr_model.vsgp.model()
+                beta_prior_loc_gr = beta_prior_loc_rg.permute(-1, -2)
+                beta_posterior_loc_gr = expr_model.beta_posterior_loc_gr
+                log_residual_overdispersion_g = beta_posterior_loc_gr[:, 1] - beta_prior_loc_gr[:, 1]
+                log_residual_overdispersion_per_group_dict[
+                    gene_group_name] = log_residual_overdispersion_g.cpu().numpy()
+        return log_residual_overdispersion_per_group_dict
 
     @cachedproperty
     def highly_variable_gene_indices_per_group(self) -> Dict[str, List[int]]:
@@ -215,7 +235,7 @@ class HighlyVariableGenesSelector:
         :return:
         """
         highly_variable_gene_indices_per_group_dict: Dict[str, List[int]] = dict()
-        for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
+        for gene_group_name, log_residual_overdispersion_g in self.log_residual_overdispersion_per_group.items():
             group_n_genes = self.grouped_sc_fingerprint_dtm_dict[gene_group_name].n_genes
             sorted_lo_cutoff_index = int(np.floor(self.hvg_neglect_expr_bottom_fraction * group_n_genes))
             sorted_hi_cutoff_index = min(
@@ -227,12 +247,12 @@ class HighlyVariableGenesSelector:
             censored_gene_indices = [
                 gene_index for gene_index in range(group_n_genes)
                 if x_lo_cutoff <= x_data[gene_index] <= x_hi_cutoff]
-            indexed_log_pearson_residual_std_g = [
-                (gene_index, log_pearson_residual_std_g[gene_index])
+            indexed_log_residual_overdispersion_g = [
+                (gene_index, log_residual_overdispersion_g[gene_index])
                 for gene_index in censored_gene_indices]
             group_highly_variable_gene_indices = list(
                 map(itemgetter(0),
-                    sorted(indexed_log_pearson_residual_std_g,
+                    sorted(indexed_log_residual_overdispersion_g,
                            key=itemgetter(1), reverse=True)))
             highly_variable_gene_indices_per_group_dict[gene_group_name] = group_highly_variable_gene_indices
         return highly_variable_gene_indices_per_group_dict
@@ -241,7 +261,7 @@ class HighlyVariableGenesSelector:
     def highly_variable_gene_indices(self) -> List[int]:
         highly_variable_gene_per_group = int(np.ceil(self.hvg_n_selected_genes / self.n_groups))
         highly_variable_gene_indices = []
-        for gene_group_name, log_pearson_residual_std_g in self.log_pearson_residual_std_per_group.items():
+        for gene_group_name, log_residual_overdispersion_g in self.log_residual_overdispersion_per_group.items():
             highly_variable_gene_indices_in_group = \
                 self.highly_variable_gene_indices_per_group[gene_group_name]
             n_selected_in_group = min(highly_variable_gene_per_group, len(highly_variable_gene_indices_in_group))
@@ -253,7 +273,7 @@ class HighlyVariableGenesSelector:
         return highly_variable_gene_indices
 
     def plot_highly_variable_genes(self, gene_group_name: str, ax: Axes, top_n_annotate=10):
-        residual_log_std = self.log_pearson_residual_std_per_group[gene_group_name]
+        log_residual_overdispersion_g = self.log_residual_overdispersion_per_group[gene_group_name]
         highly_variable_gene_indices_in_group = \
             self.highly_variable_gene_indices_per_group[gene_group_name]
         indices_to_annotate = highly_variable_gene_indices_in_group[
@@ -262,7 +282,7 @@ class HighlyVariableGenesSelector:
         data_x = self.expr_model_dict[gene_group_name].log_mean_obs_expr_g1.detach().cpu().numpy()[:, 0]
         gene_names_list_in_group = self.grouped_sc_fingerprint_dtm_dict[gene_group_name]\
             .sc_fingerprint_base.gene_names_list
-        data_y = residual_log_std
+        data_y = log_residual_overdispersion_g
 
         # shade out lowly expressed genes that are not included in HVG analysis
         group_n_genes = self.grouped_sc_fingerprint_dtm_dict[gene_group_name].n_genes
