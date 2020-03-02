@@ -19,6 +19,7 @@ import pyro.contrib.gp.kernels as kernels
 
 from pyro_extras import NegativeBinomial, WhiteNoiseWithMinVariance
 from fingerprint import SingleCellFingerprintDTM
+import consts
 
 
 class GeneExpressionModel(Parameterized):
@@ -44,7 +45,7 @@ class GeneExpressionModel(Parameterized):
 class VSGPGeneExpressionModel(GeneExpressionModel):
     DEFAULT_GENE_GROUP_NAME = 'all'
     INPUT_DIM = 1
-    LATENT_DIM = 3
+    LATENT_DIM = 2
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
@@ -199,13 +200,14 @@ class VSGPGeneExpressionModel(GeneExpressionModel):
             output_dict: Dict[str, torch.Tensor],
             data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         assert 'beta_nr' in output_dict
-        assert 'empirical_droplet_efficiency_tensor' in data
+        assert 'total_obs_molecules_per_cell_tensor' in data
 
         beta_nr = output_dict['beta_nr']
-        eta_n = data['empirical_droplet_efficiency_tensor']
+        log_normed_total_counts_n = torch.log(
+            data['total_obs_molecules_per_cell_tensor'] / consts.TOTAL_COUNT_NORM_SCALE)
 
-        log_mu_e_hi_n = beta_nr[:, 0] + beta_nr[:, 1] * eta_n.log()
-        log_phi_e_hi_n = beta_nr[:, 2]
+        log_mu_e_hi_n = beta_nr[:, 0] + log_normed_total_counts_n
+        log_phi_e_hi_n = beta_nr[:, 1]
 
         return {
             'log_mu_e_hi_n': log_mu_e_hi_n,
@@ -521,7 +523,6 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         assert 'log_alpha_n' in output_dict
         assert 'gene_index_tensor' in data
         assert 'cell_features_tensor' in data
-        assert 'empirical_droplet_efficiency_tensor' in data
 
         gamma_nf = output_dict['gamma_nf']
         log_alpha_n = output_dict['log_alpha_n']
@@ -625,7 +626,7 @@ class FeatureBasedGeneExpressionModelTrainer:
                 minibatch_expressing_cells_per_gene,
                 minibatch_silent_cells_per_gene,
                 minibatch_sampling_strategy,
-                count_matrix_type='mt-fst')
+                count_matrix_type='fst')
 
             mb_loss = self.svi.step(mb_data) / self.loss_scale
 

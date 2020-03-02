@@ -1,0 +1,3 @@
+# fingerprint
+TOTAL_COUNT_NORM_SCALE = 10_000
+

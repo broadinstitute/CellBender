@@ -119,10 +119,10 @@ class HighlyVariableGenesSelector:
                         [sc_fingerprint_dtm.sc_fingerprint_base.gene_idx_list[j]
                          for j in gene_group_fingerprint_indices]))
 
-                # workaround to make sure that all fingerprint share the same empirical droplet
-                # efficiency regardless of the included genes
-                grouped_sc_fingerprint_dtm.empirical_droplet_efficiency = \
-                    sc_fingerprint_dtm.empirical_droplet_efficiency
+                # workaround to make sure that all fingerprint share the same total obs molecules
+                # per cell regardless of the included genes
+                grouped_sc_fingerprint_dtm.total_obs_molecules_per_cell = \
+                    sc_fingerprint_dtm.total_obs_molecules_per_cell
 
             else:
                 # no need to partition
@@ -180,9 +180,9 @@ class HighlyVariableGenesSelector:
                 beta_loc_rg, _ = expr_model.vsgp.model()
                 beta_loc_gr = beta_loc_rg.permute(-1, -2)
 
-            log_eta_n = torch.tensor(
-                grouped_sc_fingerprint_dtm.empirical_droplet_efficiency,
-                device=self.device, dtype=self.dtype).log()
+            total_counts_n = torch.tensor(
+                grouped_sc_fingerprint_dtm.total_obs_molecules_per_cell,
+                device=self.device, dtype=self.dtype)
 
             log_pearson_res_g = np.zeros((grouped_sc_fingerprint_dtm.n_genes,))
             for gene_index in range(grouped_sc_fingerprint_dtm.n_genes):
@@ -194,9 +194,8 @@ class HighlyVariableGenesSelector:
                 # calculate NB prior loc and scale for each particle
                 beta_0 = beta_loc_gr[gene_index, 0]
                 beta_1 = beta_loc_gr[gene_index, 1]
-                beta_2 = beta_loc_gr[gene_index, 2]
-                prior_loc_n = (beta_0 + beta_1 * log_eta_n).exp()
-                prior_scale_n = (prior_loc_n + beta_2.exp() * prior_loc_n.pow(2)).sqrt()
+                prior_loc_n = beta_0.exp() * total_counts_n
+                prior_scale_n = (prior_loc_n + beta_1.exp() * prior_loc_n.pow(2)).sqrt()
 
                 # calculate the one-sided p-value of having excess variance for each particle
                 pearson_res_n = (counts_n - prior_loc_n) / prior_scale_n

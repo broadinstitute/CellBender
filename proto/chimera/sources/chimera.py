@@ -14,6 +14,7 @@ from pyro.contrib.gp.parameterized import Parameterized
 from fingerprint import SingleCellFingerprintDTM
 from stats import gamma_loc_scale_to_concentration_rate
 from utils import get_cell_averaged_from_collapsed_samples, get_detached_on_non_inducing_genes
+import consts
 
 
 class ChimeraRateModel(Parameterized):
@@ -131,7 +132,7 @@ class UniformChimeraRateModel(ChimeraRateModel):
         assert 'gene_index_tensor_n' in parents_dict
         assert 'cell_sampling_site_scale_factor_tensor_n' in parents_dict
         assert 'mu_fsd_hi_n' in parents_dict
-        assert 'eta_n' in parents_dict
+        assert 'total_obs_molecules_per_cell_tensor_n' in parents_dict
 
         alpha_c = output_dict['alpha_c']
         beta_c = output_dict['beta_c']
@@ -163,7 +164,8 @@ class UniformChimeraRateModel(ChimeraRateModel):
         gene_index_tensor_n = parents_dict['gene_index_tensor_n']
         cell_sampling_site_scale_factor_tensor_n = parents_dict['cell_sampling_site_scale_factor_tensor_n']
         mu_fsd_hi_n = parents_dict['mu_fsd_hi_n']
-        eta_n = parents_dict['eta_n']
+        total_obs_molecules_per_cell_tensor_n = parents_dict['total_obs_molecules_per_cell_tensor_n']
+        norm_total_counts_n = total_obs_molecules_per_cell_tensor_n / consts.TOTAL_COUNT_NORM_SCALE
 
         # auxiliary
         total_fragments_scaled_n = mu_e_hi_n * mu_fsd_hi_n / self.mean_empirical_fsd_mu_hi
@@ -178,7 +180,7 @@ class UniformChimeraRateModel(ChimeraRateModel):
             device=self.device)
 
         # calculate per-cell chimera rate
-        mu_e_lo_n = (alpha_c_n + beta_c_n * eta_n) * total_fragments_scaled_cell_averaged_n
+        mu_e_lo_n = (alpha_c_n + beta_c_n * norm_total_counts_n) * total_fragments_scaled_cell_averaged_n
 
         return {
             'mu_e_lo_n': mu_e_lo_n

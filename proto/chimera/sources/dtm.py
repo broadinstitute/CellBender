@@ -122,10 +122,10 @@ class DropletTimeMachineModel(torch.nn.Module):
         assert 'cell_sampling_site_scale_factor_tensor' in data
         assert 'empirical_fsd_mu_hi_tensor' in data
         assert 'arithmetic_mean_obs_expr_per_gene_tensor' in data
+        assert 'total_obs_molecules_per_cell_tensor' in data
         assert 'gene_index_tensor' in data
         assert 'cell_index_tensor' in data
         assert 'cell_features_tensor' in data
-        assert 'empirical_droplet_efficiency_tensor' in data
 
         # input tensors
         fingerprint_tensor_nr = data['fingerprint_tensor']
@@ -136,7 +136,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         gene_index_tensor_n = data['gene_index_tensor']
         cell_index_tensor_n = data['cell_index_tensor']
         cell_features_tensor_nf = data['cell_features_tensor']
-        eta_n = data['empirical_droplet_efficiency_tensor']
+        total_obs_molecules_per_cell_tensor_n = data['total_obs_molecules_per_cell_tensor']
 
         # sizes
         mb_size = fingerprint_tensor_nr.shape[0]
@@ -249,7 +249,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 'gene_index_tensor_n': gene_index_tensor_n,
                 'cell_sampling_site_scale_factor_tensor_n': cell_sampling_site_scale_factor_tensor_n,
                 'mu_fsd_hi_n': mu_fsd_hi_n,
-                'eta_n': eta_n,
+                'total_obs_molecules_per_cell_tensor_n': total_obs_molecules_per_cell_tensor_n,
                 'inducing_binary_mask_tensor_n': inducing_binary_mask_tensor_n,
                 'non_inducing_binary_mask_tensor_n': non_inducing_binary_mask_tensor_n
             })
