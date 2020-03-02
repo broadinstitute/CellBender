@@ -1024,6 +1024,7 @@ class SingleCellFingerprintDTM:
 
         arithmetic_mean_obs_expr_per_gene_array = self.arithmetic_mean_obs_expr_per_gene[gene_index_array]
         geometric_mean_obs_expr_per_gene_array = self.geometric_mean_obs_expr_per_gene[gene_index_array]
+        total_obs_molecules_per_cell_array = self.total_obs_molecules_per_cell[cell_index_array]
         # empirical_droplet_efficiency_array = self.empirical_droplet_efficiency[cell_index_array]
 
         if counts_array is None:
@@ -1075,6 +1076,11 @@ class SingleCellFingerprintDTM:
 
             'arithmetic_mean_obs_expr_per_gene_tensor': torch.tensor(
                 arithmetic_mean_obs_expr_per_gene_array,
+                device=self.device,
+                dtype=self.dtype),
+
+            'total_obs_molecules_per_cell_tensor': torch.tensor(
+                total_obs_molecules_per_cell_array,
                 device=self.device,
                 dtype=self.dtype),
 
