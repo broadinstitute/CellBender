@@ -648,7 +648,7 @@ class SingleCellFingerprintDTM:
         # log1p transformation after count normalization
         fst_total_counts_n = self.eps + np.sum(fst_count_matrix_ng, -1)
         log1p_normed_fst_count_matrix_ng = np.log1p(
-            consts.TOTAL_COUNT_NORM_SCALE * fst_count_matrix_ng / fst_total_counts_n)
+            consts.TOTAL_COUNT_NORM_SCALE * fst_count_matrix_ng / fst_total_counts_n[:, None])
 
         # perform PCA
         pca_features_nk = PCA(
