@@ -469,7 +469,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
                 "phi_n",
                 dist.Gamma(
                     concentration=self.phi_prior_concentration.expand([mb_size]),
-                    scale=self.phi_prior_rate.expand([mb_size])))
+                    rate=self.phi_prior_rate.expand([mb_size])))
 
         return {
             'gamma_nf': gamma_nf,
