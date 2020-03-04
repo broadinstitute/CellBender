@@ -1,6 +1,15 @@
 import torch
 
 
+activation_from_str = {
+    'softplus': torch.nn.Softplus(),
+    'relu': torch.nn.ReLU(),
+    'leaky_relu': torch.nn.LeakyReLU(),
+    'elu': torch.nn.ELU(),
+    'selu': torch.nn.SELU(),
+}
+
+
 def get_cell_averaged_from_collapsed_samples(
         input_tensor_n: torch.Tensor,
         gene_index_tensor_n: torch.Tensor,

@@ -18,7 +18,9 @@ from pyro.infer import SVI, Trace_ELBO
 import pyro.contrib.gp.kernels as kernels
 
 from pyro_extras import NegativeBinomial, WhiteNoiseWithMinVariance
+from stats import gamma_loc_scale_to_concentration_rate
 from fingerprint import SingleCellFingerprintDTM
+from utils import activation_from_str
 import consts
 
 
@@ -378,28 +380,21 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 enable_phi_prior: bool = True,
-                 enable_phi_training: bool = True,
-                 enable_ard: bool = True,
-                 init_features_ard_scale: float = 1.0,
-                 phi_scale: float = 0.1,
-                 hidden_dims: List[int] = [],
-                 activation: torch.nn.Module = torch.nn.Softplus(),
+                 init_params_dict: Dict[str, Any],
                  device: torch.device = torch.device('cuda'),
                  dtype: torch.dtype = torch.float):
         super(FeatureBasedGeneExpressionModel, self).__init__()
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
+
+        self.init_ard_prior_scale = init_params_dict['feature_based_expr.init_ard_prior_scale']
+        self.init_phi_prior_loc = init_params_dict['feature_based_expr.init_phi_prior_loc']
+        self.init_phi_prior_scale = init_params_dict['feature_based_expr.init_phi_prior_scale']
+        self.hidden_dims = init_params_dict['feature_based_expr.hidden_dims']
+        self.activation = activation_from_str[init_params_dict['feature_based_expr.activation']]
+
         self.device = device
         self.dtype = dtype
-        self.init_features_ard_scale = init_features_ard_scale
-        self.phi_scale = phi_scale
-        self.enable_ard = enable_ard
-        self.enable_phi_prior = enable_phi_prior
-        self.enable_phi_training = enable_phi_training
-        self.hidden_dims = hidden_dims
-        self.activation = activation
-        self._eps = 1e-7
 
         # input and output dims
         self.n_input_features = sc_fingerprint_dtm.features_per_cell.shape[1]
@@ -413,20 +408,29 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
             last_dim = hidden_dim
         self.n_intermediate_features = last_dim
 
-        # log mu weights ARD precisions
-        if self.enable_ard:
-            self.gamma_ard_scale_f = PyroParam(
-                self.init_features_ard_scale * torch.ones(
-                    (self.n_intermediate_features,), device=device, dtype=dtype),
-                constraints.positive)
+        # ard precisions of expression readout weights
+        self.gamma_ard_scale_f = PyroParam(
+            self.init_ard_prior_scale * torch.ones(
+                (self.n_intermediate_features,), device=device, dtype=dtype),
+            constraints.positive)
 
-        # log alpha (posterior)
-        if enable_phi_training:
-            self.log_alpha_posterior_loc_g = PyroParam(
-                - np.log(self.phi_scale) * torch.ones((self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype))
-        else:
-            self.log_alpha_posterior_loc_g = - np.log(self.phi_scale) * torch.ones(
-                (self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype)
+        # phi prior
+        alpha, beta = gamma_loc_scale_to_concentration_rate(
+            loc=self.init_phi_prior_loc,
+            scale=self.init_phi_prior_scale)
+
+        self.phi_prior_concentration = PyroParam(
+            torch.tensor(alpha, device=device, dtype=dtype),
+            constraints.positive)
+
+        self.phi_prior_rate = PyroParam(
+            torch.tensor(beta, device=device, dtype=dtype),
+            constraints.positive)
+
+        # phi posterior
+        self.phi_posterior_loc_g = PyroParam(
+            self.init_phi_prior_loc * torch.ones((self.sc_fingerprint_dtm.n_genes,), device=device, dtype=dtype),
+            constraints.positive)
 
         # log mu bias (posterior)
         self.beta_posterior_loc_g = PyroParam(
@@ -446,38 +450,30 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         self.set_mode("model")
 
         assert 'gene_sampling_site_scale_factor_tensor' in data
-        assert 'gene_index_tensor' in data
 
         gene_sampling_site_scale_factor_tensor_n = data['gene_sampling_site_scale_factor_tensor']
-        gene_index_tensor_n = data['gene_index_tensor']
         mb_size = gene_sampling_site_scale_factor_tensor_n.shape[0]
 
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
 
             # sample log mu weights
-            if self.enable_ard:
-                gamma_nf = pyro.sample(
-                    "gamma_nf",
-                    dist.Normal(
-                        loc=torch.zeros((mb_size, self.n_intermediate_features), device=self.device, dtype=self.dtype),
-                        scale=self.gamma_ard_scale_f.expand((mb_size, self.n_intermediate_features))
-                    ).to_event(1))
-            else:
-                gamma_nf = self.gamma_posterior_loc_gf[gene_index_tensor_n, :]
+            gamma_nf = pyro.sample(
+                "gamma_nf",
+                dist.Normal(
+                    loc=torch.zeros((mb_size, self.n_intermediate_features), device=self.device, dtype=self.dtype),
+                    scale=self.gamma_ard_scale_f.expand((mb_size, self.n_intermediate_features))
+                ).to_event(1))
 
             # sample log alpha
-            if self.enable_phi_prior:
-                log_alpha_n = pyro.sample(
-                    "log_alpha_n",
-                    dist.Gumbel(
-                        loc=-np.log(self.phi_scale) * torch.ones((mb_size,), device=self.device, dtype=self.dtype),
-                        scale=torch.ones((mb_size,), device=self.device, dtype=self.dtype)))
-            else:
-                log_alpha_n = self.log_alpha_posterior_loc_g[gene_index_tensor_n]
+            phi_n = pyro.sample(
+                "phi_n",
+                dist.Gamma(
+                    concentration=self.phi_prior_concentration.expand([mb_size]),
+                    scale=self.phi_prior_rate.expand([mb_size])))
 
         return {
             'gamma_nf': gamma_nf,
-            'log_alpha_n': log_alpha_n
+            'phi_n': phi_n
         }
 
     @pyro_method
@@ -494,24 +490,18 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         with poutine.scale(scale=gene_sampling_site_scale_factor_tensor_n):
 
             # sample log mu weights
-            if self.enable_ard:
-                gamma_nf = pyro.sample(
-                    "gamma_nf",
-                    dist.Delta(v=self.gamma_posterior_loc_gf[gene_index_tensor_n, :]).to_event(1))
-            else:
-                gamma_nf = self.gamma_posterior_loc_gf[gene_index_tensor_n, :]
+            gamma_nf = pyro.sample(
+                "gamma_nf",
+                dist.Delta(v=self.gamma_posterior_loc_gf[gene_index_tensor_n, :]).to_event(1))
 
-            if self.enable_phi_prior:
-                # sample log alpha
-                log_alpha_n = pyro.sample(
-                    "log_alpha_n",
-                    dist.Delta(v=self.log_alpha_posterior_loc_g[gene_index_tensor_n]))
-            else:
-                log_alpha_n = self.log_alpha_posterior_loc_g[gene_index_tensor_n]
+            # sample log alpha
+            phi_n = pyro.sample(
+                "phi_n",
+                dist.Delta(v=self.phi_posterior_loc_g[gene_index_tensor_n]))
 
         return {
             'gamma_nf': gamma_nf,
-            'log_alpha_n': log_alpha_n
+            'phi_n': phi_n
         }
 
     def decode_output_to_nb_params_dict(
@@ -520,12 +510,12 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
             data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
 
         assert 'gamma_nf' in output_dict
-        assert 'log_alpha_n' in output_dict
+        assert 'phi_n' in output_dict
         assert 'gene_index_tensor' in data
         assert 'cell_features_tensor' in data
 
         gamma_nf = output_dict['gamma_nf']
-        log_alpha_n = output_dict['log_alpha_n']
+        phi_n = output_dict['phi_n']
         gene_index_tensor_n = data['gene_index_tensor']
         cell_features_nf = data['cell_features_tensor']
 
@@ -536,7 +526,7 @@ class FeatureBasedGeneExpressionModel(GeneExpressionModel):
         log_mu_e_hi_n = (
                 self.beta_posterior_loc_g[gene_index_tensor_n]
                 + torch.einsum('nf,nf->n', gamma_nf, processed_features_nf))
-        log_phi_e_hi_n = - log_alpha_n
+        log_phi_e_hi_n = phi_n.log()
 
         return {
             'log_mu_e_hi_n': log_mu_e_hi_n,
@@ -548,15 +538,28 @@ class FeatureBasedGeneExpressionModelTrainer:
             self,
             feature_based_gene_expression_model: FeatureBasedGeneExpressionModel,
             sc_fingerprint_dtm: SingleCellFingerprintDTM,
-            adam_lr: float = 1e-2,
-            adam_betas: Tuple[float, float] = (0.9, 0.99)):
+            init_params_dict: Dict[str, Any]):
         super(FeatureBasedGeneExpressionModelTrainer, self).__init__()
 
         self.feature_based_gene_expression_model = feature_based_gene_expression_model
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
 
+        self.adam_lr = init_params_dict['feature_based_expr.trainer.adam_lr']
+        self.adam_betas = init_params_dict['feature_based_expr.trainer.adam_betas']
+        self.n_training_iterations = init_params_dict['feature_based_expr.trainer.n_training_iterations']
+        self.training_log_frequency = init_params_dict['feature_based_expr.trainer.training_log_frequency']
+        self.count_matrix_type = init_params_dict['feature_based_expr.trainer.count_matrix_type']
+        self.minibatch_genes_per_gene_group = \
+            init_params_dict['feature_based_expr.trainer.minibatch.genes_per_gene_group']
+        self.minibatch_expressing_cells_per_gene = \
+            init_params_dict['feature_based_expr.trainer.minibatch.expressing_cells_per_gene']
+        self.minibatch_silent_cells_per_gene = \
+            init_params_dict['feature_based_expr.trainer.minibatch.silent_cells_per_gene']
+        self.minibatch_sampling_strategy = \
+            init_params_dict['feature_based_expr.trainer.minibatch.sampling_strategy']
+
         # training
-        self.optim = pyro.optim.Adam({'lr': adam_lr, 'betas': adam_betas})
+        self.optim = pyro.optim.Adam({'lr': self.adam_lr, 'betas': self.adam_betas})
         self.svi = SVI(
             model=self.model,
             guide=self.guide,
@@ -607,26 +610,20 @@ class FeatureBasedGeneExpressionModelTrainer:
 
         self.feature_based_gene_expression_model.guide(data)
 
-    def run_training(self,
-                     n_training_iterations: int = 1000,
-                     training_log_frequency: int = 100,
-                     minibatch_genes_per_gene_group: int = 20,
-                     minibatch_expressing_cells_per_gene: int = 20,
-                     minibatch_silent_cells_per_gene: int = 5,
-                     minibatch_sampling_strategy: str = 'without_replacement'):
+    def run_training(self):
         t0 = time.time()
         i_iter = 0
         mb_loss_list = []
 
         logging.warning(f"[FeatureBasedGeneExpressionModelTrainer] training started...")
 
-        while i_iter < n_training_iterations:
+        while i_iter < self.n_training_iterations:
             mb_data = self.sc_fingerprint_dtm.generate_counts_stratified_sample(
-                minibatch_genes_per_gene_group,
-                minibatch_expressing_cells_per_gene,
-                minibatch_silent_cells_per_gene,
-                minibatch_sampling_strategy,
-                count_matrix_type='fst')
+                genes_per_gene_group=self.minibatch_genes_per_gene_group,
+                expressing_cells_per_gene=self.minibatch_expressing_cells_per_gene,
+                silent_cells_per_gene=self.minibatch_silent_cells_per_gene,
+                sampling_strategy=self.minibatch_sampling_strategy,
+                count_matrix_type=self.count_matrix_type)
 
             mb_loss = self.svi.step(mb_data) / self.loss_scale
 
@@ -634,7 +631,7 @@ class FeatureBasedGeneExpressionModelTrainer:
             self.loss_hist.append(mb_loss)
             i_iter += 1
 
-            if i_iter % training_log_frequency == 0 and i_iter > 0:
+            if i_iter % self.training_log_frequency == 0 and i_iter > 0:
                 # calculate loss stats
                 t1 = time.time()
                 mb_loss_mean, mb_loss_std = np.mean(mb_loss_list), np.std(mb_loss_list)
