@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, List, Dict, Union, Optional
+from typing import Tuple, List, Dict, Union, Optional, Any
 
 from pyro.distributions.torch_distribution import TorchDistribution
 from boltons.cacheutils import cachedproperty
@@ -85,6 +85,7 @@ class SortByComponentWeights(transforms.Transform):
         return NotImplementedError
 
 
+# todo asserts
 class FSDModelGPLVM(FSDModel):
     """NB mixture for real components, VSGP from real for chimeric component."""
 
@@ -92,37 +93,39 @@ class FSDModelGPLVM(FSDModel):
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 init_params_dict: Dict[str, float],
+                 init_params_dict: Dict[str, Any],
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
         super(FSDModelGPLVM, self).__init__()
 
         self.sc_fingerprint_dtm = sc_fingerprint_dtm
-        self.n_fsd_lo_comps = init_params_dict['fsd.n_fsd_lo_comps']
-        self.n_fsd_hi_comps = init_params_dict['fsd.n_fsd_hi_comps']
+        self.n_fsd_lo_comps: int = init_params_dict['fsd.n_fsd_lo_comps']
+        self.n_fsd_hi_comps: int = init_params_dict['fsd.n_fsd_hi_comps']
+        self.posterior_init_type: str = init_params_dict['fsd.posterior_init_type']
+        assert self.posterior_init_type in 'randomized_prior', 'estimated'
 
-        self.fsd_init_min_mu_lo = init_params_dict['fsd.init_min_mu_lo']
-        self.fsd_init_min_mu_hi = init_params_dict['fsd.init_min_mu_hi']
-        self.fsd_init_max_phi_lo = init_params_dict['fsd.init_max_phi_lo']
-        self.fsd_init_max_phi_hi = init_params_dict['fsd.init_max_phi_hi']
-        self.fsd_init_mu_decay = init_params_dict['fsd.init_mu_decay']
-        self.fsd_init_w_decay = init_params_dict['fsd.init_w_decay']
-        self.fsd_init_mu_lo_to_mu_hi_ratio = init_params_dict['fsd.init_mu_lo_to_mu_hi_ratio']
+        self.fsd_init_min_mu_lo: float = init_params_dict['fsd.init_min_mu_lo']
+        self.fsd_init_min_mu_hi: float = init_params_dict['fsd.init_min_mu_hi']
+        self.fsd_init_max_phi_lo: float = init_params_dict['fsd.init_max_phi_lo']
+        self.fsd_init_max_phi_hi: float = init_params_dict['fsd.init_max_phi_hi']
+        self.fsd_init_mu_decay: float = init_params_dict['fsd.init_mu_decay']
+        self.fsd_init_w_decay: float = init_params_dict['fsd.init_w_decay']
+        self.fsd_init_mu_lo_to_mu_hi_ratio: float = init_params_dict['fsd.init_mu_lo_to_mu_hi_ratio']
 
-        self.fsd_gplvm_init_rbf_kernel_variance = \
+        self.fsd_gplvm_init_rbf_kernel_variance: float = \
             init_params_dict['fsd.gplvm.init_rbf_kernel_variance']
-        self.fsd_gplvm_init_rbf_kernel_lengthscale = \
+        self.fsd_gplvm_init_rbf_kernel_lengthscale: float = \
             init_params_dict['fsd.gplvm.init_rbf_kernel_lengthscale']
-        self.fsd_gplvm_init_whitenoise_kernel_variance = \
+        self.fsd_gplvm_init_whitenoise_kernel_variance: float = \
             init_params_dict['fsd.gplvm.init_whitenoise_kernel_variance']
 
-        self.fsd_gplvm_n_inducing_points = int(init_params_dict['fsd.gplvm.n_inducing_points'])
-        self.fsd_gplvm_latent_dim = int(init_params_dict['fsd.gplvm.latent_dim'])
+        self.fsd_gplvm_n_inducing_points: int = int(init_params_dict['fsd.gplvm.n_inducing_points'])
+        self.fsd_gplvm_latent_dim: int = int(init_params_dict['fsd.gplvm.latent_dim'])
 
-        self.fsd_gplvm_cholesky_jitter = init_params_dict['fsd.gplvm.cholesky_jitter']
-        self.fsd_gplvm_min_noise = init_params_dict['fsd.gplvm.min_noise']
-        self.fsd_init_xi_posterior_scale = init_params_dict['fsd.init_fsd_xi_posterior_scale']
-        self.fsd_xi_posterior_min_scale = init_params_dict['fsd.xi_posterior_min_scale']
+        self.fsd_gplvm_cholesky_jitter: float = init_params_dict['fsd.gplvm.cholesky_jitter']
+        self.fsd_gplvm_min_noise: float = init_params_dict['fsd.gplvm.min_noise']
+        self.fsd_init_xi_posterior_scale: float = init_params_dict['fsd.init_fsd_xi_posterior_scale']
+        self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
 
         self.device = device
         self.dtype = dtype
@@ -175,12 +178,22 @@ class FSDModelGPLVM(FSDModel):
                 device=device, dtype=dtype),
             constraints.greater_than(self.fsd_gplvm_min_noise))
 
-        # self.fsd_xi_posterior_loc_gq = PyroParam(
-        #     self.init_fsd_xi_loc_prior.clone().detach().expand([sc_fingerprint_dtm.n_genes, self.fsd_xi_dim])
-        #     + self.fsd_init_xi_posterior_scale * torch.randn_like(self.init_fsd_xi_loc_posterior))
+        if self.posterior_init_type == 'randomized_prior':
 
-        self.fsd_xi_posterior_loc_gq = PyroParam(
-            self.init_fsd_xi_loc_posterior.clone().detach())
+            # prior + random noise
+            self.fsd_xi_posterior_loc_gq = PyroParam(
+                self.init_fsd_xi_loc_prior.clone().detach().expand(
+                    [sc_fingerprint_dtm.n_genes, self.fsd_xi_dim])
+                + self.fsd_init_xi_posterior_scale * torch.randn_like(self.init_fsd_xi_loc_posterior))
+
+        elif self.posterior_init_type == 'estimated':
+
+            self.fsd_xi_posterior_loc_gq = PyroParam(
+                self.init_fsd_xi_loc_posterior.clone().detach())
+
+        else:
+
+            raise ValueError('Unknown posterior_init_type; valid options are: "randomized_prior", "estimated"')
 
         self.fsd_xi_posterior_scale_gq = PyroParam(
             self.fsd_init_xi_posterior_scale * torch.ones(
