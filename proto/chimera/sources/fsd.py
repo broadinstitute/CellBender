@@ -114,7 +114,7 @@ class FSDModelGPLVM(FSDModel):
 
         self.fsd_gplvm_init_rbf_kernel_variance: float = \
             init_params_dict['fsd.gplvm.init_rbf_kernel_variance']
-        self.fsd_gplvm_init_rbf_kernel_lengthscale: float = \
+        self.fsd_gplvm_init_rbf_kernel_lengthscale: np.ndarray = \
             init_params_dict['fsd.gplvm.init_rbf_kernel_lengthscale']
         self.fsd_gplvm_init_whitenoise_kernel_variance: float = \
             init_params_dict['fsd.gplvm.init_whitenoise_kernel_variance']
@@ -130,12 +130,14 @@ class FSDModelGPLVM(FSDModel):
         self.device = device
         self.dtype = dtype
 
+        assert self.fsd_gplvm_init_rbf_kernel_lengthscale.ndim == 1
+        assert self.fsd_gplvm_init_rbf_kernel_lengthscale.size == self.fsd_gplvm_latent_dim
+
         # GPLVM kernel setup
         kernel_rbf = kernels.RBF(
             input_dim=self.fsd_gplvm_latent_dim,
             variance=torch.tensor(self.fsd_gplvm_init_rbf_kernel_variance, device=device, dtype=dtype),
-            lengthscale=(self.fsd_gplvm_init_rbf_kernel_lengthscale
-                         * torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype)))
+            lengthscale=torch.tensor(self.fsd_gplvm_init_rbf_kernel_lengthscale, device=device, dtype=dtype))
         kernel_whitenoise = WhiteNoiseWithMinVariance(
             input_dim=self.fsd_gplvm_latent_dim,
             variance=torch.tensor(self.fsd_gplvm_init_whitenoise_kernel_variance, device=device, dtype=dtype),
@@ -449,7 +451,7 @@ class FSDModelGPLVMRestricted(FSDModel):
 
     def __init__(self,
                  sc_fingerprint_dtm: SingleCellFingerprintDTM,
-                 init_params_dict: Dict[str, float],
+                 init_params_dict: Dict[str, Any],
                  device: torch.device = torch.device("cuda"),
                  dtype: torch.dtype = torch.float):
         super(FSDModelGPLVMRestricted, self).__init__()
@@ -468,7 +470,7 @@ class FSDModelGPLVMRestricted(FSDModel):
 
         self.fsd_gplvm_init_rbf_kernel_variance = \
             init_params_dict['fsd.gplvm.init_rbf_kernel_variance']
-        self.fsd_gplvm_init_rbf_kernel_lengthscale = \
+        self.fsd_gplvm_init_rbf_kernel_lengthscale: np.ndarray = \
             init_params_dict['fsd.gplvm.init_rbf_kernel_lengthscale']
         self.fsd_gplvm_init_whitenoise_kernel_variance = \
             init_params_dict['fsd.gplvm.init_whitenoise_kernel_variance']
@@ -482,6 +484,9 @@ class FSDModelGPLVMRestricted(FSDModel):
 
         self.detach_non_inducing_genes = init_params_dict['fsd.chimera.detach_non_inducing_genes']
 
+        assert self.fsd_gplvm_init_rbf_kernel_lengthscale.ndim == 1
+        assert self.fsd_gplvm_init_rbf_kernel_lengthscale.size == self.fsd_gplvm_latent_dim
+
         self.device = device
         self.dtype = dtype
 
@@ -489,8 +494,7 @@ class FSDModelGPLVMRestricted(FSDModel):
         kernel_rbf = kernels.RBF(
             input_dim=self.fsd_gplvm_latent_dim,
             variance=torch.tensor(self.fsd_gplvm_init_rbf_kernel_variance, device=device, dtype=dtype),
-            lengthscale=(self.fsd_gplvm_init_rbf_kernel_lengthscale
-                         * torch.ones(self.fsd_gplvm_latent_dim, device=device, dtype=dtype)))
+            lengthscale=torch.tensor(self.fsd_gplvm_init_rbf_kernel_lengthscale, device=device, dtype=dtype))
         kernel_whitenoise = WhiteNoiseWithMinVariance(
             input_dim=self.fsd_gplvm_latent_dim,
             variance=torch.tensor(self.fsd_gplvm_init_whitenoise_kernel_variance, device=device, dtype=dtype),
