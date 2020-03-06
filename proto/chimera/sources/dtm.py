@@ -305,6 +305,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                     mu_e_hi_n=mu_e_hi_n,
                     p_obs_lo_n=p_obs_lo_n,
                     p_obs_hi_n=p_obs_hi_n,
+                    e_obs_cell_averaged_n=arithmetic_mean_obs_expr_per_gene_tensor_n,
                     inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
                     non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n,
                     gene_index_tensor_n=gene_index_tensor_n,
@@ -317,6 +318,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                                          mu_e_hi_n: torch.Tensor,
                                          p_obs_lo_n: torch.Tensor,
                                          p_obs_hi_n: torch.Tensor,
+                                         e_obs_cell_averaged_n: torch.Tensor,
                                          inducing_binary_mask_tensor_n: torch.Tensor,
                                          non_inducing_binary_mask_tensor_n: torch.Tensor,
                                          gene_index_tensor_n: torch.Tensor,
@@ -332,18 +334,20 @@ class DropletTimeMachineModel(torch.nn.Module):
             dtype=self.dtype,
             device=self.device)
 
-        e_hi_obs_cell_averaged_n = get_cell_averaged_from_collapsed_samples(
-            input_tensor_n=mu_e_hi_n * p_obs_hi_n,
-            gene_index_tensor_n=gene_index_tensor_n,
-            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
-            n_genes=self.sc_fingerprint_dtm.n_genes,
-            dtype=self.dtype,
-            device=self.device)
+        # e_hi_obs_cell_averaged_n = get_cell_averaged_from_collapsed_samples(
+        #     input_tensor_n=mu_e_hi_n * p_obs_hi_n,
+        #     gene_index_tensor_n=gene_index_tensor_n,
+        #     cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+        #     n_genes=self.sc_fingerprint_dtm.n_genes,
+        #     dtype=self.dtype,
+        #     device=self.device)
 
-        # we detach e_hi so that only chimera-related quantities will get a gradient
-        prior_chimera_fraction_n = e_lo_obs_cell_averaged_n / (
-                e_lo_obs_cell_averaged_n
-                + e_hi_obs_cell_averaged_n.clone().detach())
+        # # we detach e_hi so that only chimera-related quantities will get a gradient
+        # prior_chimera_fraction_n = e_lo_obs_cell_averaged_n / (
+        #         e_lo_obs_cell_averaged_n
+        #         + e_hi_obs_cell_averaged_n.clone().detach())
+
+        prior_chimera_fraction_n = e_lo_obs_cell_averaged_n / e_obs_cell_averaged_n
 
         prior_chimera_fraction_alpha = pyro.param(
             "prior_chimera_fraction_alpha",
