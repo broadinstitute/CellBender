@@ -102,7 +102,7 @@ class FSDModelGPLVM(FSDModel):
         self.n_fsd_lo_comps: int = init_params_dict['fsd.n_fsd_lo_comps']
         self.n_fsd_hi_comps: int = init_params_dict['fsd.n_fsd_hi_comps']
         self.posterior_init_type: str = init_params_dict['fsd.posterior_init_type']
-        assert self.posterior_init_type in 'randomized_prior', 'estimated'
+        assert self.posterior_init_type in {'randomized_prior', 'estimated'}
 
         self.fsd_init_min_mu_lo: float = init_params_dict['fsd.init_min_mu_lo']
         self.fsd_init_min_mu_hi: float = init_params_dict['fsd.init_min_mu_hi']
