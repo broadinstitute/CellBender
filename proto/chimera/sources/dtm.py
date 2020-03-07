@@ -376,7 +376,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         with poutine.scale(scale=auto_regularization_strength * gene_sampling_site_scale_factor_tensor_n):
             pyro.sample(
                 "prior_chimera_fraction_autoreg",
-                dist.Beta(prior_chimera_fraction_alpha_n, prior_chimera_fraction_beta_n),
+                dist.Gamma(prior_chimera_fraction_alpha_n, prior_chimera_fraction_beta_n),
                 obs=prior_chimera_fraction_n)
 
     def guide(self,
