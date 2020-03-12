@@ -57,6 +57,7 @@ class DropletTimeMachineModel(torch.nn.Module):
         self.w_hi_dirichlet_concentration: float = init_params_dict['fsd.w_hi_dirichlet_concentration']
         self.fsd_xi_posterior_min_scale: float = init_params_dict['fsd.xi_posterior_min_scale']
         self.n_particles_fingerprint_log_like: int = init_params_dict['dtm.n_particles_fingerprint_log_like']
+        self.enable_chimera: bool = init_params_dict['dtm.enable_chimera']
 
         # observed chimera rate auto-regularization
         self.enable_chimera_rate_auto_regularization: bool = init_params_dict['chimera.autoreg.enable']
@@ -253,7 +254,12 @@ class DropletTimeMachineModel(torch.nn.Module):
                 'inducing_binary_mask_tensor_n': inducing_binary_mask_tensor_n,
                 'non_inducing_binary_mask_tensor_n': non_inducing_binary_mask_tensor_n
             })
-        mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']
+
+        # simple trick to disable chimera entirely
+        if self.enable_chimera:
+            mu_e_lo_n = chimera_rate_params_dict['mu_e_lo_n']
+        else:
+            mu_e_lo_n = torch.zeros_like(chimera_rate_params_dict['mu_e_lo_n'])
 
         if posterior_sampling_mode:
 
@@ -299,7 +305,7 @@ class DropletTimeMachineModel(torch.nn.Module):
                 batch_shape=batch_shape)
 
             # observed chimeric fraction regularization
-            if self.enable_chimera_rate_auto_regularization:
+            if self.enable_chimera and self.enable_chimera_rate_auto_regularization:
                 self._sample_chimera_fraction_autoreg(
                     mu_e_lo_n=mu_e_lo_n,
                     mu_e_hi_n=mu_e_hi_n,
@@ -1034,7 +1040,6 @@ class PosteriorGeneExpressionSampler(object):
             n_particles_cell=n_particles_cell,
             run_mode=run_mode)
         n_cells = len(cell_index_list)
-        batch_size = n_particles_cell * n_cells
 
         omega_posterior_samples_mn = self.generate_bootstrap_posterior_samples(
             proposal_distribution=omega_importance_sampler_inputs.proposal_distribution,
