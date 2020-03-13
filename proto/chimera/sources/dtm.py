@@ -262,62 +262,59 @@ class DropletTimeMachineModel(torch.nn.Module):
             mu_e_lo_n = torch.zeros_like(chimera_rate_params_dict['mu_e_lo_n'])
 
         if posterior_sampling_mode:
-
             # just return the calculated auxiliary tensors
             return locals()
 
-        else:
+        # sample the fingerprint
+        self._sample_fingerprint(
+            batch_shape=batch_shape,
+            cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+            fingerprint_tensor_nr=fingerprint_tensor_nr,
+            log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
+            log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
+            mu_e_lo_n=mu_e_lo_n,
+            phi_e_lo_n=None,
+            mu_e_hi_n=mu_e_hi_n,
+            phi_e_hi_n=phi_e_hi_n,
+            n_particles=self.n_particles_fingerprint_log_like)
 
-            # sample the fingerprint
-            self._sample_fingerprint(
-                batch_shape=batch_shape,
-                cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
-                fingerprint_tensor_nr=fingerprint_tensor_nr,
-                log_prob_fsd_lo_obs_nr=log_prob_fsd_lo_obs_nr,
-                log_prob_fsd_hi_obs_nr=log_prob_fsd_hi_obs_nr,
+        # sample fsd sparsity regularization
+        if self.enable_fsd_w_dirichlet_reg:
+            self._sample_fsd_weight_sparsity_regularization(
+                w_lo_dirichlet_reg_strength=self.w_lo_dirichlet_reg_strength,
+                w_hi_dirichlet_reg_strength=self.w_hi_dirichlet_reg_strength,
+                w_lo_dirichlet_concentration=self.w_lo_dirichlet_concentration,
+                w_hi_dirichlet_concentration=self.w_hi_dirichlet_concentration,
+                n_fsd_lo_comps=self.fsd_model.n_fsd_lo_comps,
+                n_fsd_hi_comps=self.fsd_model.n_fsd_hi_comps,
+                w_fsd_lo_comps_nj=w_fsd_lo_comps_nj,
+                w_fsd_hi_comps_nj=w_fsd_hi_comps_nj,
+                gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n)
+
+        # sample (soft) constraints
+        total_obs_expr_per_gene_tensor_n = \
+            self.sc_fingerprint_dtm.n_cells * arithmetic_mean_obs_expr_per_gene_tensor_n
+        self._sample_gene_plate_soft_constraints(
+            model_constraint_params_dict=self.model_constraint_params_dict,
+            model_vars_dict=locals(),
+            gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
+            total_obs_expr_per_gene_tensor_n=total_obs_expr_per_gene_tensor_n,
+            batch_shape=batch_shape)
+
+        # observed chimeric fraction regularization
+        if self.enable_chimera and self.enable_chimera_rate_auto_regularization:
+            self._sample_chimera_fraction_autoreg(
                 mu_e_lo_n=mu_e_lo_n,
-                phi_e_lo_n=None,
                 mu_e_hi_n=mu_e_hi_n,
-                phi_e_hi_n=phi_e_hi_n,
-                n_particles=self.n_particles_fingerprint_log_like)
-
-            # sample fsd sparsity regularization
-            if self.enable_fsd_w_dirichlet_reg:
-                self._sample_fsd_weight_sparsity_regularization(
-                    w_lo_dirichlet_reg_strength=self.w_lo_dirichlet_reg_strength,
-                    w_hi_dirichlet_reg_strength=self.w_hi_dirichlet_reg_strength,
-                    w_lo_dirichlet_concentration=self.w_lo_dirichlet_concentration,
-                    w_hi_dirichlet_concentration=self.w_hi_dirichlet_concentration,
-                    n_fsd_lo_comps=self.fsd_model.n_fsd_lo_comps,
-                    n_fsd_hi_comps=self.fsd_model.n_fsd_hi_comps,
-                    w_fsd_lo_comps_nj=w_fsd_lo_comps_nj,
-                    w_fsd_hi_comps_nj=w_fsd_hi_comps_nj,
-                    gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n)
-
-            # sample (soft) constraints
-            total_obs_expr_per_gene_tensor_n = \
-                self.sc_fingerprint_dtm.n_cells * arithmetic_mean_obs_expr_per_gene_tensor_n
-            self._sample_gene_plate_soft_constraints(
-                model_constraint_params_dict=self.model_constraint_params_dict,
-                model_vars_dict=locals(),
+                p_obs_lo_n=p_obs_lo_n,
+                p_obs_hi_n=p_obs_hi_n,
+                e_obs_cell_averaged_n=arithmetic_mean_obs_expr_per_gene_tensor_n,
+                inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
+                non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n,
+                gene_index_tensor_n=gene_index_tensor_n,
                 gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
-                total_obs_expr_per_gene_tensor_n=total_obs_expr_per_gene_tensor_n,
-                batch_shape=batch_shape)
-
-            # observed chimeric fraction regularization
-            if self.enable_chimera and self.enable_chimera_rate_auto_regularization:
-                self._sample_chimera_fraction_autoreg(
-                    mu_e_lo_n=mu_e_lo_n,
-                    mu_e_hi_n=mu_e_hi_n,
-                    p_obs_lo_n=p_obs_lo_n,
-                    p_obs_hi_n=p_obs_hi_n,
-                    e_obs_cell_averaged_n=arithmetic_mean_obs_expr_per_gene_tensor_n,
-                    inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
-                    non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n,
-                    gene_index_tensor_n=gene_index_tensor_n,
-                    gene_sampling_site_scale_factor_tensor_n=gene_sampling_site_scale_factor_tensor_n,
-                    cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
-                    auto_regularization_strength=self.chimera_rate_auto_regularization_strength)
+                cell_sampling_site_scale_factor_tensor_n=cell_sampling_site_scale_factor_tensor_n,
+                auto_regularization_strength=self.chimera_rate_auto_regularization_strength)
 
     def _sample_chimera_fraction_autoreg(self,
                                          mu_e_lo_n: torch.Tensor,

@@ -75,12 +75,20 @@ class UniformChimeraRateModel(ChimeraRateModel):
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # trainable parameters
-        self.alpha_c_posterior_loc = PyroParam(
-            torch.tensor(self.alpha_c_prior_a / self.alpha_c_prior_b, device=self.device, dtype=self.dtype),
+        self.alpha_c_posterior_concentration_scalar = PyroParam(
+            self.alpha_c_concentration_scalar.clone(),
             constraints.positive)
 
-        self.beta_c_posterior_loc = PyroParam(
-            torch.tensor(self.beta_c_prior_a / self.beta_c_prior_b, device=self.device, dtype=self.dtype),
+        self.alpha_c_posterior_rate_scalar = PyroParam(
+            self.alpha_c_rate_scalar.clone(),
+            constraints.positive)
+
+        self.beta_c_posterior_concentration_scalar = PyroParam(
+            self.beta_c_concentration_scalar.clone(),
+            constraints.positive)
+
+        self.beta_c_posterior_rate_scalar = PyroParam(
+            self.beta_c_rate_scalar.clone(),
             constraints.positive)
 
     @pyro_method
@@ -110,8 +118,17 @@ class UniformChimeraRateModel(ChimeraRateModel):
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode('guide')
 
-        alpha_c = pyro.sample("alpha_c", dist.Delta(v=self.alpha_c_posterior_loc))
-        beta_c = pyro.sample("beta_c", dist.Delta(v=self.beta_c_posterior_loc))
+        alpha_c = pyro.sample(
+            "alpha_c",
+            dist.Gamma(
+                concentration=self.alpha_c_posterior_concentration_scalar,
+                rate=self.alpha_c_posterior_rate_scalar))
+
+        beta_c = pyro.sample(
+            "beta_c",
+            dist.Gamma(
+                concentration=self.beta_c_posterior_concentration_scalar,
+                rate=self.beta_c_posterior_rate_scalar))
 
         return {
             'alpha_c': alpha_c,
