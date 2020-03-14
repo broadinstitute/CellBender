@@ -1088,31 +1088,18 @@ class PosteriorGeneExpressionSampler(object):
             .permute(2, 1, 0) \
             .contiguous() \
             .view(n_cells, -1) \
-            .permute(1, 0) \
- \
-                def get_gene_expression_posterior_sampling_summary(
-                        self,
-                        gene_index: int,
-                        n_proposals_omega: int,
-                        n_particles_omega: int,
-                        n_particles_cell: int,
-                        n_particles_expression: int,
-                        cell_shard_size: int,
-                        run_mode: str,
-                        only_expressing_cells: bool) -> Dict[str, np.ndarray]:
+            .permute(1, 0)
 
-            """
-
-        :param gene_index:
-        :param n_proposals_omega:
-        :param n_particles_omega:
-        :param n_particles_cell:
-        :param n_particles_expression:
-        :param cell_shard_size:
-        :param run_mode:
-        :param only_expressing_cells:
-        :return:
-        """
+    def get_gene_expression_posterior_sampling_summary(
+            self,
+            gene_index: int,
+            n_proposals_omega: int,
+            n_particles_omega: int,
+            n_particles_cell: int,
+            n_particles_expression: int,
+            cell_shard_size: int,
+            run_mode: str,
+            only_expressing_cells: bool) -> Dict[str, np.ndarray]:
 
         def __fix_scalar(a: np.ndarray):
             if a.ndim == 0:
