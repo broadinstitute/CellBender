@@ -214,11 +214,11 @@ class DropletTimeMachineModel(torch.nn.Module):
 
         mu_fsd_lo_zero_truncated_n = mu_fsd_lo_n / p_obs_lo_n
         mu_fsd_hi_zero_truncated_n = mu_fsd_hi_n / p_obs_hi_n
-        mu_fsd_lo_zero_truncated_to_mu_fsd_empirical_ratio_n =\
+        mu_fsd_lo_zero_truncated_to_mu_fsd_empirical_ratio_n = \
             mu_fsd_lo_zero_truncated_n / empirical_mu_fsd_tensor_n
-        mu_fsd_hi_zero_truncated_to_mu_fsd_empirical_ratio_n =\
+        mu_fsd_hi_zero_truncated_to_mu_fsd_empirical_ratio_n = \
             mu_fsd_hi_zero_truncated_n / empirical_mu_fsd_tensor_n
-        
+
         # observation probability for each component of the distribution
         alpha_fsd_lo_comps_nj = (self.eps + phi_fsd_lo_comps_nj).reciprocal()
         log_p_unobs_lo_comps_nj = alpha_fsd_lo_comps_nj * (
@@ -484,10 +484,10 @@ class DropletTimeMachineModel(torch.nn.Module):
             log_rate_e_lo_nr,  # + omega_lo_mn.log().unsqueeze(-1),
             log_rate_e_hi_nr + omega_hi_mn.log().unsqueeze(-1))
         log_poisson_e_hi_mn = (
-            (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
-            - total_obs_rate_lo_n  # * omega_lo_mn
-            - total_obs_rate_hi_n * omega_hi_mn
-            - fingerprint_log_norm_factor_n)  # data-dependent norm factor can be dropped
+                (fingerprint_tensor_nr * log_rate_combined_mnr).sum(-1)
+                - total_obs_rate_lo_n  # * omega_lo_mn
+                - total_obs_rate_hi_n * omega_hi_mn
+                - fingerprint_log_norm_factor_n)  # data-dependent norm factor can be dropped
 
         # step 3. average over the Gamma particles
         log_like_n = log_poisson_e_hi_mn.logsumexp(0) - np.log(n_particles)
@@ -533,10 +533,10 @@ class DropletTimeMachineModel(torch.nn.Module):
 
                     if self.monitor_constraint_pressure:
                         self.constraint_pressure_dict[var_name]['lower_bound_pressure'] = (
-                            self.constraint_pressure_forgetting_factor
-                            * self.constraint_pressure_dict[var_name]['lower_bound_pressure']
-                            + (1 - self.constraint_pressure_forgetting_factor)
-                            * constraint_log_prob.abs().sum().item())
+                                self.constraint_pressure_forgetting_factor
+                                * self.constraint_pressure_dict[var_name]['lower_bound_pressure']
+                                + (1 - self.constraint_pressure_forgetting_factor)
+                                * constraint_log_prob.abs().sum().item())
 
                 if 'upper_bound_value' in var_constraint_params:
                     value = var_constraint_params['upper_bound_value']
@@ -653,6 +653,7 @@ class DropletTimeMachineModel(torch.nn.Module):
 
 class PosteriorGeneExpressionSampler(object):
     """Calculates the real gene expression from a trained model using importance sampling"""
+
     def __init__(self,
                  dtm_model: DropletTimeMachineModel,
                  device: torch.device,
@@ -1006,10 +1007,10 @@ class PosteriorGeneExpressionSampler(object):
 
         # draw proper posterior samples via bootstrap re-sampling
         log_posterior_mn = (
-            prior_log_prob_mn
-            + fingerprint_log_likelihood_mn
-            - proposal_log_prob_mn
-            - log_posterior_norm_n)
+                prior_log_prob_mn
+                + fingerprint_log_likelihood_mn
+                - proposal_log_prob_mn
+                - log_posterior_norm_n)
         posterior_bootstrap_sample_indices_mn = torch.distributions.Categorical(
             logits=log_posterior_mn.permute((1, 0))).sample((n_particles,))
         posterior_bootstrap_samples_mn = torch.gather(
@@ -1083,23 +1084,24 @@ class PosteriorGeneExpressionSampler(object):
             raise ValueError("Unknown run mode! valid choices are 'full' and 'only_observed'")
 
         return e_hi_posterior_samples_smn \
-            .int() \
+            .to(torch.int32) \
             .permute(2, 1, 0) \
             .contiguous() \
             .view(n_cells, -1) \
-            .permute(1, 0)
+            .permute(1, 0) \
+ \
+                def get_gene_expression_posterior_sampling_summary(
+                        self,
+                        gene_index: int,
+                        n_proposals_omega: int,
+                        n_particles_omega: int,
+                        n_particles_cell: int,
+                        n_particles_expression: int,
+                        cell_shard_size: int,
+                        run_mode: str,
+                        only_expressing_cells: bool) -> Dict[str, np.ndarray]:
 
-    def get_gene_expression_posterior_sampling_summary(
-            self,
-            gene_index: int,
-            n_proposals_omega: int,
-            n_particles_omega: int,
-            n_particles_cell: int,
-            n_particles_expression: int,
-            cell_shard_size: int,
-            run_mode: str,
-            only_expressing_cells: bool) -> Dict[str, np.ndarray]:
-        """
+            """
 
         :param gene_index:
         :param n_proposals_omega:
@@ -1119,7 +1121,7 @@ class PosteriorGeneExpressionSampler(object):
 
         e_hi_mean_shard_list = []
         e_hi_std_shard_list = []
-        e_hi_map_shard_list = []
+        e_hi_median_shard_list = []
         included_cell_indices = []
 
         for cell_index_list in self._sharded_cell_index_generator(gene_index, cell_shard_size, only_expressing_cells):
@@ -1134,21 +1136,19 @@ class PosteriorGeneExpressionSampler(object):
                 n_particles_expression=n_particles_expression,
                 run_mode=run_mode)
 
-            e_hi_mean_shard_list.append(__fix_scalar(
-                torch.mean(e_hi_posterior_samples_sn.float(), dim=0).cpu().numpy()))
-            e_hi_std_shard_list.append(__fix_scalar(
-                torch.std(e_hi_posterior_samples_sn.float(), dim=0).cpu().numpy()))
-            e_hi_map_shard_list.append(__fix_scalar(
-                int_ndarray_mode(e_hi_posterior_samples_sn.int().cpu().numpy(), axis=0)))
+            e_hi_mean_shard_list.append(torch.mean(e_hi_posterior_samples_sn.float(), dim=0))
+            e_hi_std_shard_list.append(torch.std(e_hi_posterior_samples_sn.float(), dim=0))
+            e_hi_median_shard_list.append(torch.median(e_hi_posterior_samples_sn, dim=0).values)
 
         e_hi_mean = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.float)
         e_hi_std = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.float)
-        e_hi_map = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.int)
+        e_hi_median = np.zeros((self.dtm_model.sc_fingerprint_dtm.n_cells,), dtype=np.int)
 
-        e_hi_mean[included_cell_indices] = np.concatenate(e_hi_mean_shard_list)
-        e_hi_std[included_cell_indices] = np.concatenate(e_hi_std_shard_list)
-        e_hi_map[included_cell_indices] = np.concatenate(e_hi_map_shard_list)
+        e_hi_mean[included_cell_indices] = torch.cat(e_hi_mean_shard_list).cpu().numpy()
+        e_hi_std[included_cell_indices] = torch.cat(e_hi_std_shard_list).cpu().numpy()
+        e_hi_median[included_cell_indices] = torch.cat(e_hi_median_shard_list).cpu().numpy()
 
-        return {'e_hi_map': e_hi_map,
+        return {'included_cell_indices': included_cell_indices,
+                'e_hi_median': e_hi_median,
                 'e_hi_std': e_hi_std,
                 'e_hi_mean': e_hi_mean}
