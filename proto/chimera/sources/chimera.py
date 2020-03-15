@@ -51,66 +51,85 @@ class UniformChimeraRateModel(ChimeraRateModel):
         self.dtype = dtype
         self._eps = 1e-7
 
-        self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
-            loc=init_params_dict['chimera.alpha_c_prior_loc'],
-            scale=init_params_dict['chimera.alpha_c_prior_scale'])
+        # self.alpha_c_prior_a, self.alpha_c_prior_b = gamma_loc_scale_to_concentration_rate(
+        #     loc=init_params_dict['chimera.alpha_c_prior_loc'],
+        #     scale=init_params_dict['chimera.alpha_c_prior_scale'])
+        #
+        # self.beta_c_prior_a, self.beta_c_prior_b = gamma_loc_scale_to_concentration_rate(
+        #     loc=init_params_dict['chimera.beta_c_prior_loc'],
+        #     scale=init_params_dict['chimera.beta_c_prior_scale'])
+        #
+        # self.detach_non_inducing_genes = init_params_dict['chimera.detach_non_inducing_genes']
+        #
+        # # chimera hyperparameters
+        # self.alpha_c_concentration_scalar = torch.tensor(
+        #     self.alpha_c_prior_a, device=self.device, dtype=self.dtype)
+        # self.alpha_c_rate_scalar = torch.tensor(
+        #     self.alpha_c_prior_b, device=self.device, dtype=self.dtype)
+        # self.beta_c_concentration_scalar = torch.tensor(
+        #     self.beta_c_prior_a, device=self.device, dtype=self.dtype)
+        # self.beta_c_rate_scalar = torch.tensor(
+        #     self.beta_c_prior_b, device=self.device, dtype=self.dtype)
+        #
+        # # empirical normalization factors
+        # self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
+        #
+        # # trainable parameters
+        # self.alpha_c_posterior_concentration_scalar = PyroParam(
+        #     self.alpha_c_concentration_scalar.clone(),
+        #     constraints.positive)
+        #
+        # self.alpha_c_posterior_rate_scalar = PyroParam(
+        #     self.alpha_c_rate_scalar.clone(),
+        #     constraints.positive)
+        #
+        # self.beta_c_posterior_concentration_scalar = PyroParam(
+        #     self.beta_c_concentration_scalar.clone(),
+        #     constraints.positive)
+        #
+        # self.beta_c_posterior_rate_scalar = PyroParam(
+        #     self.beta_c_rate_scalar.clone(),
+        #     constraints.positive)
 
-        self.beta_c_prior_a, self.beta_c_prior_b = gamma_loc_scale_to_concentration_rate(
-            loc=init_params_dict['chimera.beta_c_prior_loc'],
-            scale=init_params_dict['chimera.beta_c_prior_scale'])
+        self.init_log_alpha_c = init_params_dict['chimera.init_log_alpha_c']
+        self.init_log_beta_c = init_params_dict['chimera.init_log_beta_c']
 
         self.detach_non_inducing_genes = init_params_dict['chimera.detach_non_inducing_genes']
-
-        # chimera hyperparameters
-        self.alpha_c_concentration_scalar = torch.tensor(
-            self.alpha_c_prior_a, device=self.device, dtype=self.dtype)
-        self.alpha_c_rate_scalar = torch.tensor(
-            self.alpha_c_prior_b, device=self.device, dtype=self.dtype)
-        self.beta_c_concentration_scalar = torch.tensor(
-            self.beta_c_prior_a, device=self.device, dtype=self.dtype)
-        self.beta_c_rate_scalar = torch.tensor(
-            self.beta_c_prior_b, device=self.device, dtype=self.dtype)
 
         # empirical normalization factors
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
 
         # trainable parameters
-        self.alpha_c_posterior_concentration_scalar = PyroParam(
-            self.alpha_c_concentration_scalar.clone(),
-            constraints.positive)
-
-        self.alpha_c_posterior_rate_scalar = PyroParam(
-            self.alpha_c_rate_scalar.clone(),
-            constraints.positive)
-
-        self.beta_c_posterior_concentration_scalar = PyroParam(
-            self.beta_c_concentration_scalar.clone(),
-            constraints.positive)
-
-        self.beta_c_posterior_rate_scalar = PyroParam(
-            self.beta_c_rate_scalar.clone(),
-            constraints.positive)
+        self.log_alpha_c = PyroParam(
+            torch.tensor(self.init_log_alpha_c, device=device, dtype=dtype))
+        self.log_beta_c = PyroParam(
+            torch.tensor(self.init_log_beta_c, device=device, dtype=dtype))
 
     @pyro_method
     @autoname.scope(prefix="uniform_chimera")
     def model(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode('model')
 
-        # sample chimera rate parameters
-        alpha_c = pyro.sample(
-            "alpha_c",
-            dist.Gamma(
-                concentration=self.alpha_c_concentration_scalar,
-                rate=self.alpha_c_rate_scalar))
-        beta_c = pyro.sample(
-            "beta_c",
-            dist.Gamma(
-                concentration=self.beta_c_concentration_scalar,
-                rate=self.beta_c_rate_scalar))
+        # # sample chimera rate parameters
+        # alpha_c = pyro.sample(
+        #     "alpha_c",
+        #     dist.Gamma(
+        #         concentration=self.alpha_c_concentration_scalar,
+        #         rate=self.alpha_c_rate_scalar))
+        # beta_c = pyro.sample(
+        #     "beta_c",
+        #     dist.Gamma(
+        #         concentration=self.beta_c_concentration_scalar,
+        #         rate=self.beta_c_rate_scalar))
+        #
+        # return {
+        #     'alpha_c': alpha_c,
+        #     'beta_c': beta_c
+        # }
 
         return {
-            'alpha_c': alpha_c,
-            'beta_c': beta_c
+            'alpha_c': self.log_alpha_c.exp(),
+            'beta_c': self.log_beta_c.exp()
         }
 
     @pyro_method
@@ -118,21 +137,26 @@ class UniformChimeraRateModel(ChimeraRateModel):
     def guide(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self.set_mode('guide')
 
-        alpha_c = pyro.sample(
-            "alpha_c",
-            dist.Gamma(
-                concentration=self.alpha_c_posterior_concentration_scalar,
-                rate=self.alpha_c_posterior_rate_scalar))
-
-        beta_c = pyro.sample(
-            "beta_c",
-            dist.Gamma(
-                concentration=self.beta_c_posterior_concentration_scalar,
-                rate=self.beta_c_posterior_rate_scalar))
+        # alpha_c = pyro.sample(
+        #     "alpha_c",
+        #     dist.Gamma(
+        #         concentration=self.alpha_c_posterior_concentration_scalar,
+        #         rate=self.alpha_c_posterior_rate_scalar))
+        #
+        # beta_c = pyro.sample(
+        #     "beta_c",
+        #     dist.Gamma(
+        #         concentration=self.beta_c_posterior_concentration_scalar,
+        #         rate=self.beta_c_posterior_rate_scalar))
+        #
+        # return {
+        #     'alpha_c': alpha_c,
+        #     'beta_c': beta_c
+        # }
 
         return {
-            'alpha_c': alpha_c,
-            'beta_c': beta_c
+            'alpha_c': self.log_alpha_c.exp(),
+            'beta_c': self.log_beta_c.exp()
         }
 
     @abstractmethod

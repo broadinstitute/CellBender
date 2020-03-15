@@ -62,12 +62,8 @@ class DropletTimeMachineModel(torch.nn.Module):
         # observed chimera rate auto-regularization
         self.enable_chimera_rate_auto_regularization: bool = init_params_dict['chimera.autoreg.enable']
         self.chimera_rate_auto_regularization_strength: float = init_params_dict['chimera.autoreg.strength']
-        self.prior_chimera_fraction_alpha_init = init_params_dict['chimera.autoreg.init_alpha']
-        self.prior_chimera_fraction_alpha_lower_bound = init_params_dict['chimera.autoreg.min_alpha']
-        self.prior_chimera_fraction_alpha_upper_bound = init_params_dict['chimera.autoreg.max_alpha']
-        self.prior_chimera_fraction_beta_init = init_params_dict['chimera.autoreg.init_beta']
-        self.prior_chimera_fraction_beta_lower_bound = init_params_dict['chimera.autoreg.min_beta']
-        self.prior_chimera_fraction_beta_upper_bound = init_params_dict['chimera.autoreg.max_beta']
+        self.prior_log_chimera_fraction_loc_init = init_params_dict['chimera.autoreg.init_log_chimera_fraction_loc']
+        self.prior_log_chimera_fraction_scale_init = init_params_dict['chimera.autoreg.init_log_chimera_fraction_scale']
 
         # empirical normalization factors
         self.mean_empirical_fsd_mu_hi: float = np.mean(sc_fingerprint_dtm.empirical_fsd_mu_hi).item()
@@ -350,37 +346,34 @@ class DropletTimeMachineModel(torch.nn.Module):
         #         e_lo_obs_cell_averaged_n
         #         + e_hi_obs_cell_averaged_n.clone().detach())
 
-        prior_chimera_fraction_n = e_lo_obs_cell_averaged_n / e_obs_cell_averaged_n
+        log_prior_chimera_fraction_n = e_lo_obs_cell_averaged_n.log() - e_obs_cell_averaged_n.log()
 
-        prior_chimera_fraction_alpha = pyro.param(
-            "prior_chimera_fraction_alpha",
-            torch.tensor(self.prior_chimera_fraction_alpha_init, device=self.device, dtype=self.dtype),
-            constraint=constraints.interval(
-                lower_bound=self.prior_chimera_fraction_alpha_lower_bound,
-                upper_bound=self.prior_chimera_fraction_alpha_upper_bound))
+        prior_log_chimera_fraction_loc = pyro.param(
+            "prior_log_chimera_fraction_loc",
+            torch.tensor(self.prior_log_chimera_fraction_loc_init, device=self.device, dtype=self.dtype))
 
-        prior_chimera_fraction_beta = pyro.param(
-            "prior_chimera_fraction_beta",
-            torch.tensor(self.prior_chimera_fraction_beta_init, device=self.device, dtype=self.dtype),
-            constraint=constraints.interval(
-                lower_bound=self.prior_chimera_fraction_beta_lower_bound,
-                upper_bound=self.prior_chimera_fraction_beta_upper_bound))
+        prior_log_chimera_fraction_scale = pyro.param(
+            "prior_log_chimera_fraction_scale",
+            torch.tensor(self.prior_log_chimera_fraction_scale_init, device=self.device, dtype=self.dtype),
+            constraint=constraints.positive)
 
-        prior_chimera_fraction_alpha_n = get_detached_on_non_inducing_genes(
-            input_scalar=prior_chimera_fraction_alpha,
+        prior_log_chimera_fraction_loc_n = get_detached_on_non_inducing_genes(
+            input_scalar=prior_log_chimera_fraction_loc,
             inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
             non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
 
-        prior_chimera_fraction_beta_n = get_detached_on_non_inducing_genes(
-            input_scalar=prior_chimera_fraction_beta,
+        prior_log_chimera_fraction_scale_n = get_detached_on_non_inducing_genes(
+            input_scalar=prior_log_chimera_fraction_scale,
             inducing_binary_mask_tensor_n=inducing_binary_mask_tensor_n,
             non_inducing_binary_mask_tensor_n=non_inducing_binary_mask_tensor_n)
 
         with poutine.scale(scale=auto_regularization_strength * gene_sampling_site_scale_factor_tensor_n):
             pyro.sample(
-                "prior_chimera_fraction_autoreg",
-                dist.Gamma(prior_chimera_fraction_alpha_n, prior_chimera_fraction_beta_n),
-                obs=prior_chimera_fraction_n)
+                "prior_log_chimera_fraction_autoreg",
+                dist.Normal(
+                    loc=prior_log_chimera_fraction_loc_n,
+                    scale=prior_log_chimera_fraction_scale_n),
+                obs=log_prior_chimera_fraction_n)
 
     def guide(self,
               data: Dict[str, torch.Tensor],
