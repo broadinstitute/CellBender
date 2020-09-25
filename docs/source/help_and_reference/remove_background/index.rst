@@ -31,6 +31,11 @@ input options, which are described in detail
 Troubleshooting
 ---------------
 
+* The learning curve in the output PDF has large downward spikes, or looks super wobbly.
+
+  * This could indicate instabilities during training that should be addressed. The solution
+    is typically to reduce the ``--learning-rate`` by a factor of two.
+
 * The following warning is emitted in the log file: "Warning: few empty droplets identified.
   Low UMI cutoff may be too high. Check the UMI decay curve, and decrease the
   ``--low-count-threshold`` parameter if necessary."
@@ -61,7 +66,7 @@ Troubleshooting
 
   * Try estimating ``--expected-cells`` from the UMI curve rather than a priori, and
     increase the number if necessary.
-  * Experiment with increasing ``--total-droplets-included``.
+  * Experiment with increasing or decreasing ``--total-droplets-included``.
 
 
 * The PCA plot of latent gene expression shows no clusters or structure.
@@ -72,17 +77,5 @@ Troubleshooting
   * This is not necessarily a bad thing, although it indicates that cells in the experiment
     had a continuum of expression, or that there was only one cell type.  If this is
     known to be false, some sort of QC failure with the experiment would be suspected.
-    Perform a downstream clustering analysis to see if the results are the same.
-
-
-* During downstream analysis, it seems there has been too much imputation.  I am seeing
-  genes expressed in clusters where they were not expressed before.
-
-  * You should not see genes expressed where they were not expressed before.
-    ``remove-background`` does involve some amount of imputation, since we are inferring the
-    true, background-removed counts in the context of our probabilistic model.  Gene expression
-    is modeled using an autoencoder.  The amount of imputation can be minimized by
-    maximizing the capacity of this autoencoder.  The default dimension of the latent space,
-    ``--z-dim``, is 20.  The default dimension of the hidden layer in the autoencoder,
-    ``--z-layers``, is 500.  Try setting ``--z-dim`` to 200 and ``--z-layers`` to 1000.
-    This will minimize imputation.
+    Perform a downstream clustering analysis with and without ``cellbender remove-background``
+    and compare the two.

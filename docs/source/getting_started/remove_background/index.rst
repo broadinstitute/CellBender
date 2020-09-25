@@ -7,9 +7,9 @@ In this tutorial, we will run ``remove-background`` on a small dataset derived f
 ``pbmc4k`` scRNA-seq dataset (v2 Chemistry, CellRanger 2.1.0).
 
 As a first step, we download the full dataset and generate a smaller `trimmed` copy by selecting 500 barcodes
-with high UMI count (likely non-empty) and an additional 50'000 barcodes with small UMI count (likely empty). Note
+with high UMI count (likely non-empty) and an additional 50,000 barcodes with small UMI count (likely empty). Note
 that the trimming step is performed in order to allow us go through this tutorial in a matter of minutes on a
-typical personal computer. Processing the full untrimmed dataset requires a CUDA-enabled GPU (e.g. NVIDIA Testla K80)
+typical CPU. Processing the full untrimmed dataset requires a CUDA-enabled GPU (e.g. NVIDIA Testla K80)
 and takes about 30 minutes to finish.
 
 We have created a python script to download and trim the dataset. Navigate to ``examples/remove_background/``
@@ -34,6 +34,9 @@ We proceed to run ``remove-background`` on the trimmed dataset using the followi
         --output ./tiny_10x_pbmc.h5 \
         --expected-cells 500 \
         --total-droplets-included 5000
+
+Again, here we leave out the ``--cuda`` flag solely for the purposes of being able to run this
+command on a CPU.  But a GPU is highly recommended for real datasets.
 
 The computation will finish within a minute or two (after ~ 150 epochs). The tool outputs the following files:
 

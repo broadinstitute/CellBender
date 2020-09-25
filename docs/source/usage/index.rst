@@ -21,6 +21,15 @@ analysis using Seurat, scanpy, your own custom analysis, etc.
 The output of ``remove-background`` includes a new .h5 count matrix, with background RNA removed,
 that can directly be used in downstream analysis in Seurat or scanpy as if it were the raw dataset.
 
+Proposed pipeline
+~~~~~~~~~~~~~~~~~
+
+#. Run ``cellranger count`` or some other quantification tool to obtain a count matrix
+#. Run ``cellbender remove-background``
+#. Perform per-cell quality control checks, and filter out dead / dying cells,
+   as appropriate for your experiment
+
+
 A few caveats and hints:
 
 * ``remove-background`` removes the background RNA that makes up the "ambient plateau": the same
@@ -44,11 +53,11 @@ Example
 Pre-requisites:
 
 * ``raw_feature_bc_matrix.h5``: A raw h5 count matrix file produced by `cellranger count
-  <https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/3.1/what-is-cell-ranger>`_.
+  <https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/what-is-cell-ranger>`_.
   (In CellRanger v2 this file was called ``raw_gene_bc_matrices_h5.h5``).
 
 Run ``remove-background`` on the dataset using the following command
-(leave out the flag ``--cuda`` if you are not using a GPU):
+(leave out the flag ``--cuda`` if you are not using a GPU... but you should use a GPU!):
 
 .. code-block:: console
 
@@ -57,8 +66,9 @@ Run ``remove-background`` on the dataset using the following command
                     --output output.h5 \
                     --cuda \
                     --expected-cells 5000 \
-                    --total-droplets-included 15000 \
-                    --epochs 200
+                    --total-droplets-included 20000 \
+                    --fpr 0.01 \
+                    --epochs 150
 
 (The output filename "output.h5" can be replaced with a filename of choice.)
 
@@ -89,8 +99,12 @@ Quality control checks
     * Look at the upper plot to check whether
       it appears that the inference procedure has converged.  ``remove-background`` does not
       implement automatic early stopping, and it will not extend the number of epochs
-      automatically.  If the value of the ELBO appears not to have converged to a reasonably
-      stable value, then re-running with more epochs would be recommended.
+      automatically.  If you see large downward dips of the ELBO value where it is not
+      monotonically increasing (apart from noise), then try reducing the learning rate by a
+      factor of 2.
+      If the value of the ELBO appears not to have converged to a reasonably
+      stable value, then re-running with more epochs would be recommended.  Do not
+      exceed 300, as a rule of thumb.
     * Check the middle plot to see which droplets have been called as cells.  A converged
       inference procedure should result in the vast majority of cell probabilities
       being very close to either zero or one.  If the cell calls look problematic, check
@@ -104,10 +118,22 @@ Quality control checks
     * The lower plot shows a two-dimensional (PCA) projection of the inferred latent
       variable ``z`` that encodes gene expression.  Clusters in ``z``-space often
       correspond to different cell types.  If you see clustering in this plot, this is
-      a good sign.  A lack of clustering could be due to only one cell type, or it could
+      a good sign.  A lack of clustering could be due to a dataset that has only one cell
+      type, or it could
       indicate QC problems with the dataset.  (For instance, if cells were all ruptured,
       all cells would appear to be the same "type".  This would coincide with
       difficulties in calling which droplets contain cells.)
+
+* Create some validation plots of various analyses with and without
+  ``cellbender remove-background``.  One convenient way to do this is in ``scanpy``
+  and storing the raw count matrix and the background-removed count matrix as
+  separate `"layers" <https://anndata.readthedocs.io/en/latest/anndata.AnnData.layers.html>`_.
+
+    * UMAPs with and without (on the same set of cell barcodes)
+    * Marker gene dotplots and violin plots (you should see less background)
+
+* Directly subtract the output count matrix from the input count matrix and take a close
+  look at what was removed.
 
 Recommended best practices
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -115,23 +141,30 @@ Recommended best practices
 The default settings are good for getting started with a clean and simple dataset like
 the publicly available `PBMC dataset from 10x Genomics
 <https://support.10xgenomics.com/single-cell-gene-expression/datasets/2.1.0/pbmc8k>`_.
-Only 150 epochs of training are necessary, and a low-capacity autoencoder is sufficient.
 
-For datasets with more background RNA, and in order to do the least possible amount of
-imputation, the following parameter settings are recommended:
+Considerations for setting parameters:
 
-* ``--epochs``: 300
+* ``--epochs``: 150 is typically a good choice.  Look for a reasonably-converged ELBO value
+  in the output PDF learning curve (meaning it looks like it has reached some saturating
+  value). Though it may be tempting to train for more epochs, it is not advisable to
+  over-train, since this increases the likelihood of over-fitting. (We regularize to
+  prevent over-fitting, but training for more than 300 epochs is too much.)
 * ``--expected-cells``: Base this on either the number of cells expected a priori from the
   experimental design, or if this is not known, base this number on the UMI curve as shown
-  above.
-* ``--total-droplets-included``: Choose a number that goes a few thousand barcodes into the "empty
-  droplet plateau".  Include some droplets that you think are surely empty.  But be aware that
-  the larger this number, the longer the algorithm takes to run (linear).  See the UMI curve
-  below, where an appropriate choice would be 15,000.
-  (This curve can be seen in the ``web_summary.html`` output from ``cellranger count``.)
+  below, where the appropriate number would be 5000. Pick a number where you are reasonably
+  sure that all droplets to the left on the UMI curve are real cells.
+* ``--total-droplets-included``: Choose a number that goes a few thousand barcodes into the
+  "empty droplet plateau".  Include some droplets that you think are surely empty.
+  But be aware that the larger this number, the longer the algorithm takes to run (linear).
+  See the UMI curve below, where an appropriate choice would be 15,000.  Every droplet
+  to the right of this number on the UMI curve should be surely-empty.
+  (This kind of UMI curve can be seen in the ``web_summary.html`` output from
+  ``cellranger count``.)
 * ``--cuda``: Include this flag.  The code is meant to be run on a GPU.
-* ``--z-dim``: 200
-* ``--z-layers``: 1000
+* ``--learning-rate``: The default value of 1e-4 is typically fine, but this value can be
+  adjusted if problems arise during quality-control checks of the learning curve (as above).
+* ``--fpr``: A value of 0.01 is generally quite good, but you can generate a few output
+  count matrices and compare them by choosing a few values: 0.01 0.05 0.1
 
 .. image:: /_static/remove_background/UMI_curve_defs.png
    :width: 250 px
