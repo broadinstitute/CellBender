@@ -14,7 +14,7 @@ task run_cellbender_remove_background_gpu {
   String output_directory  # Google bucket path
 
   # Docker image for cellbender remove-background version
-  String? docker_image = "us.gcr.io/broad-dsde-methods/cellbender:latest"
+  String? docker_image = "us.gcr.io/broad-dsde-methods/cellbender:0.2.0"
 
   # Method configuration inputs
   Int? expected_cells
@@ -28,14 +28,16 @@ task run_cellbender_remove_background_gpu {
   Float? empty_drop_training_fraction
   String? blacklist_genes  # in quotes: integers separated by whitespace
   Float? learning_rate
+  Boolean? exclude_antibody_capture = false
 
   # Hardware-related inputs
   String? hardware_zones = "us-east1-d us-east1-c us-central1-a us-central1-c us-west1-b"
   Int? hardware_disk_size_GB = 50
   Int? hardware_boot_disk_size_GB = 20
-  Int? hardware_preemptible_tries = 2
+  Int? hardware_preemptible_tries = 0
   Int? hardware_cpu_count = 4
   Int? hardware_memory_GB = 15
+  String? hardware_gpu_type = "nvidia-tesla-t4"
 
   command {
     cellbender remove-background \
@@ -52,7 +54,8 @@ task run_cellbender_remove_background_gpu {
       ${"--z-layers " + z_layers} \
       ${"--empty-drop-training-fraction " + empty_drop_training_fraction} \
       ${"--blacklist-genes " + blacklist_genes} \
-      ${"--learning-rate " + learning_rate}
+      ${"--learning-rate " + learning_rate} \
+      ${true="--exclude-antibody-capture" false=" " exclude_antibody_capture}
 
     gsutil -m cp ${sample_name}_out* ${output_directory}/${sample_name}/
   }
@@ -73,7 +76,7 @@ task run_cellbender_remove_background_gpu {
     cpu: hardware_cpu_count
     zones: "${hardware_zones}"
     gpuCount: 1
-    gpuType: "nvidia-tesla-k80"
+    gpuType: "${hardware_gpu_type}"
     preemptible: hardware_preemptible_tries
     maxRetries: 0
   }
