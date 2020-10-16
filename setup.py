@@ -12,6 +12,8 @@ def readme():
 def get_requirements_filename():
     if 'READTHEDOCS' in os.environ:
         return "REQUIREMENTS-RTD.txt"
+    elif 'DOCKER' in os.environ:
+        return "REQUIREMENTS-DOCKER.txt"
     else:
         return "REQUIREMENTS.txt"
 

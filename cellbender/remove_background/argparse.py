@@ -54,9 +54,9 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "analyzed. The largest 'total_droplets' "
                                 "droplets will have their cell "
                                 "probabilities inferred as an output.")
-    subparser.add_argument("--model", nargs=None, type=str, default="full",
-                           choices=["simple", "ambient",
-                                    "swapping", "full"],
+    subparser.add_argument("--model", nargs=None, type=str,
+                           default="full",
+                           choices=["simple", "ambient", "swapping", "full"],
                            dest="model",
                            help="Which model is being used for count data. "
                                 " 'simple' does not model either ambient "
@@ -84,23 +84,21 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "correct prior for empty droplet counts "
                                 "in the rare case where empty counts "
                                 "are extremely high (over 200).")
-    subparser.add_argument("--z-dim", type=int, default=20,
+    subparser.add_argument("--z-dim", type=int, default=100,
                            dest="z_dim",
                            help="Dimension of latent variable z.")
     subparser.add_argument("--z-layers", nargs="+", type=int, default=[500],
                            dest="z_hidden_dims",
                            help="Dimension of hidden layers in the encoder "
                                 "for z.")
-    subparser.add_argument("--d-layers", nargs="+", type=int,
-                           default=[5, 2, 2],
-                           dest="d_hidden_dims",
-                           help="Dimension of hidden layers in the encoder "
-                                "for d.")
-    subparser.add_argument("--p-layers", nargs="+", type=int,
-                           default=[100, 10],
-                           dest="p_hidden_dims",
-                           help="Dimension of hidden layers in the encoder "
-                                "for p.")
+    subparser.add_argument("--training-fraction",
+                           type=float, nargs=None,
+                           default=consts.TRAINING_FRACTION,
+                           dest="training_fraction",
+                           help="Training detail: the fraction of the "
+                                "data used for training.  The rest is never "
+                                "seen by the inference algorithm.  Speeds up "
+                                "learning.")
     subparser.add_argument("--empty-drop-training-fraction",
                            type=float, nargs=None,
                            default=consts.FRACTION_EMPTIES,
@@ -116,11 +114,28 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "entirely.  In the output count matrix, "
                                 "the counts for these genes will be set "
                                 "to zero.")
+    subparser.add_argument("--fpr", nargs="+",
+                           type=float, default=[0.01],
+                           dest="fpr",
+                           help="Target false positive rate in (0, 1).  A false "
+                                "positive is a true signal count that is "
+                                "erroneously removed.  More background removal "
+                                "is accompanied by more signal removal "
+                                "at high values of FPR.  You can specify "
+                                "multiple values, which will create multiple "
+                                "output files.")
+    subparser.add_argument("--exclude-antibody-capture",
+                           dest="exclude_antibodies", action="store_true",
+                           help="Including the flag --exclude-antibody-capture "
+                                "will cause remove-background to operate on "
+                                "gene counts only, ignoring other features.")
     subparser.add_argument("--learning-rate", nargs=None,
-                           type=float, default=1e-3,
+                           type=float, default=1e-4,
                            dest="learning_rate",
-                           help="Training detail: learning rate for "
-                                "inference (probably "
+                           help="Training detail: lower learning rate for "
+                                "inference. A OneCycle learning rate schedule "
+                                "is used, where the upper learning rate is ten "
+                                "times this value. (For this value, probably "
                                 "do not exceed 1e-3).")
 
     return subparsers

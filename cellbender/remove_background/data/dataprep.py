@@ -10,7 +10,7 @@ import cellbender.remove_background.consts as consts
 import torch
 import torch.utils.data
 
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 
 class SparseDataset(torch.utils.data.Dataset):
@@ -47,7 +47,7 @@ class DataLoader:
 
     def __init__(self,
                  dataset: sp.csr_matrix,
-                 empty_drop_dataset: sp.csr_matrix,
+                 empty_drop_dataset: Optional[sp.csr_matrix],
                  batch_size: int = consts.DEFAULT_BATCH_SIZE,
                  fraction_empties: float = consts.FRACTION_EMPTIES,
                  shuffle: bool = True,
@@ -55,7 +55,10 @@ class DataLoader:
         self.dataset = dataset
         self.ind_list = np.arange(self.dataset.shape[0])
         self.empty_drop_dataset = empty_drop_dataset
-        self.empty_ind_list = np.arange(self.empty_drop_dataset.shape[0])
+        if self.empty_drop_dataset is None:
+            self.empty_ind_list = np.array([])
+        else:
+            self.empty_ind_list = np.arange(self.empty_drop_dataset.shape[0])
         self.batch_size = batch_size
         self.fraction_empties = fraction_empties
         self.cell_batch_size = int(batch_size * (1. - fraction_empties))
@@ -73,7 +76,8 @@ class DataLoader:
         self.ptr = 0
 
     def __len__(self):
-        return int(self.ind_list.size * (1 + self.fraction_empties))  # ...ish
+        return int(self.ind_list.size *
+                   (1 + (self.fraction_empties / (1 - self.fraction_empties))))  # ...ish
 
     def __iter__(self):
         return self

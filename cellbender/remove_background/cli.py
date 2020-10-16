@@ -56,11 +56,13 @@ class CLI(AbstractCLI):
             "fraction_empties must be between 0 and 1, exclusive.  This is " \
             "the fraction of each minibatch that is composed of empty droplets."
 
-        assert args.learning_rate < 0.1, "learning_rate must be < 0.1"
-        assert args.learning_rate > 0, "learning_rate must be > 0"
+        assert args.learning_rate < 0.1, "learning-rate must be < 0.1"
+        assert args.learning_rate > 0, "learning-rate must be > 0"
 
         # Set training_fraction to consts.TRAINING_FRACTION (which is 1.).
-        args.training_fraction = consts.TRAINING_FRACTION
+        # args.training_fraction = consts.TRAINING_FRACTION
+        assert args.training_fraction > 0, "training-fraction must be > 0"
+        assert args.training_fraction <= 1., "training-fraction must be <= 1"
 
         # If cuda is requested, make sure it is available.
         if args.use_cuda:
@@ -74,12 +76,21 @@ class CLI(AbstractCLI):
                                  "significant speed-ups.\n\n")
                 sys.stdout.flush()  # Write immediately
 
+        # Ensure all network layer dimensions are positive.
+        for n in args.z_hidden_dims:
+            assert n > 0, "--z-layers must be all positive integers."
+
         # Ensure that z_hidden_dims are in encoder order.
         # (The same dimensions are used in reverse order for the decoder.)
         args.z_hidden_dims = sorted(args.z_hidden_dims, reverse=True)
 
         # Set use_jit to False.
         args.use_jit = False
+
+        # Ensure false positive rate is between zero and one.
+        for fpr in args.fpr:
+            assert (fpr > 0.) and (fpr < 1.), \
+                "False positive rate --fpr must be between 0 and 1."
 
         self.args = args
 
@@ -132,15 +143,15 @@ def run_remove_background(args):
     try:
         dataset_obj = \
             SingleCellRNACountsDataset(input_file=args.input_file,
-                                       expected_cell_count=
-                                       args.expected_cell_count,
-                                       total_droplet_barcodes=
-                                       args.total_droplets,
+                                       expected_cell_count=args.expected_cell_count,
+                                       total_droplet_barcodes=args.total_droplets,
                                        fraction_empties=args.fraction_empties,
                                        model_name=args.model,
                                        gene_blacklist=args.blacklisted_genes,
-                                       low_count_threshold=
-                                       args.low_count_threshold)
+                                       exclude_antibodies=args.exclude_antibodies,
+                                       low_count_threshold=args.low_count_threshold,
+                                       fpr=args.fpr)
+
     except OSError:
         logging.error(f"OSError: Unable to open file {args.input_file}.")
         sys.exit(1)

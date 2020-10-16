@@ -8,7 +8,7 @@ enable CellBender commands to be run on cloud computing architecture.
 ``remove-background``
 ---------------------
 
-The workflow that runs ``cellbender remove-background`` on a Tesla K80 GPU on a
+The workflow that runs ``cellbender remove-background`` on a (Tesla K80) GPU on a
 Google Cloud virtual machine is located at ``wdl/cellbender_remove_background.wdl``.
 
 Method inputs:
@@ -32,6 +32,12 @@ Required:
 
 Optional and recommended:
 
+* ``fpr``: Float value(s) in the range (0, 1) that specify "how much noise to remove". Each
+  value will produce a separate output count matrix. FPR stands for the expected false
+  positive rate, where a false positive is a real count that is erroneously removed.
+  A value of 0.01 means "remove as much noise as possible while not removing more than
+  1% of the real signal". (A value of 0 would return the input, and a value of 1 would
+  return a completely empty count matrix.)
 * ``expected_cells``: Number of cells expected a priori based on experimental
   design, as an Int (e.g. 5000).
 * ``total_droplets_included``: Total number of droplets to include in the analysis,
@@ -39,18 +45,12 @@ Optional and recommended:
   be called as either cell or empty droplet by the inference procedure.  Any
   droplets not included in the ``total_droplets_included`` largest UMI-count
   droplets will be treated as surely empty.
-* ``epochs``: Number of epochs to train during inference, as an Int (e.g. 300).
+
 
 Optional:
 
-* ``z_dim``: Dimension of the latent gene expression space, as an Int.  Use a smaller
-  value (e.g. 20) for slightly more imputation, and a larger value (e.g. 200) for
-  less imputation.
-* ``z_layers``: Architecture of the neural network autoencoder for the latent representation
-  of gene expression.  ``z_layers`` specifies the size of each hidden layer.
-  Input as a whitespace-delimited String of integers, (e.g. "1000").
-  Only use one hidden layer.  [Two hidden layers could be specified with "500 100" for
-  example, but only one hidden layer should be used.]
+* ``learning_rate``: The learning rate used during inference, as a Float (e.g. ``1e-4``).
+* ``epochs``: Number of epochs to train during inference, as an Int (e.g. 150).
 * ``model``: One of {"full", "ambient", "swapping", "simple"}.  This specifies how
   the count data should be modeled.  "full" specifies an ambient RNA plus chimera
   formation model, while "ambient" specifies a model with only ambient RNA, and
@@ -60,8 +60,6 @@ Optional:
   Droplets with total unique UMI count below ``low_count_threshold`` will be
   entirely excluded from the analysis.  They are assumed not even to be empty droplets,
   but some barcode error artifacts that are not useful for inference.
-* ``empty_drop_training_fraction``: Specifies what fraction of the data in each
-  minibatch should come from surely empty droplets, as a Float (e.g. 0.3).
 * ``blacklist_genes``: A whitespace-delimited String of integers
   (e.g. "523 10021 10022 33693 33694") that specifies genes that should be completely
   excluded from analysis.  Counts of these genes are set to zero in the output count matrix.
@@ -71,12 +69,16 @@ Optional but discouraged:
 
 [There should not be any need to change these parameters from their default values.]
 
-* ``d_layers``: A whitespace-delimited String of integers (e.g. "5 2 2") that
-  specifies the size of the hidden layers in the encoder for the cell size latent variable.
-* ``p_layers``: A whitespace-delimited String of integers (e.g. "100 10") that
-  specifies the size of the hidden layers in the encoder for the cell probability
-  latent variable.
-* ``learning_rate``: The learning rate used during inference, as a Float (e.g. 0.001).
+* ``z_dim``: Dimension of the latent gene expression space, as an Int.  Use a smaller
+  value (e.g. 20) for slightly more imputation, and a larger value (e.g. 200) for
+  less imputation.
+* ``z_layers``: Architecture of the neural network autoencoder for the latent representation
+  of gene expression.  ``z_layers`` specifies the size of each hidden layer.
+  Input as a whitespace-delimited String of integers, (e.g. "1000").
+  Only use one hidden layer.  [Two hidden layers could be specified with "500 100" for
+  example, but only one hidden layer should be used.]
+* ``empty_drop_training_fraction``: Specifies what fraction of the data in each
+  minibatch should come from surely empty droplets, as a Float (e.g. 0.3).
 
 Optional runtime specifications:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -90,9 +92,11 @@ Software:
 
 Hardware:
 
+* ``hardware_gpu_type``: Specify a `GPU type <https://cloud.google.com/compute/docs/gpus>`_
 * ``hardware_zones``: Specify `Google Cloud compute zones
   <https://cloud.google.com/compute/docs/regions-zones/>`_ as a whitespace-delimited String.
-  The chosen zones should have Tesla K80 GPU hardware available.
+  The chosen zones should have the appropriate GPU hardware available, otherwise this
+  will cause an error.
 * ``hardware_disk_size_GB``: Specify the size of the disk attached to the VM, as
   an Int in units of GB.
 * ``hardware_preemptible_tries``: Specify the number of preemptible runs to attempt,
@@ -105,11 +109,11 @@ Outputs:
 ``cellbender remove-background`` outputs five files, and each of these output files is
 included as an output of the workflow.
 
-* ``h5``: Full count matrix as an h5 file, with background RNA removed.  This file
-  contains all the original droplet barcodes.
-* ``h5_filt``: Filtered count matrix as an h5 file, with background RNA removed.
-  The word "filtered" means that this file contains only the droplets which were
-  determined to have a > 50% posterior probability of containing cells.
+If multiple FPR values are specified, then separate ``h5`` and
+
+* ``h5_array``: Array of output count matrix files, with background RNA removed.
+* ``output_directory``: Same as the workflow input parameter, useful for populating
+  a column of the Terra data model.
 * ``csv``: CSV file containing all the droplet barcodes which were determined to have
   a > 50% posterior probability of containing cells.  Barcodes are written in plain text.
   This information is also contained in each of the above outputs, but is included as a separate

@@ -41,6 +41,10 @@ A GPU-enabled docker image is available from the Google Container Registry (GCR)
 
 ``us.gcr.io/broad-dsde-methods/cellbender:latest``
 
+Older versions are available at the same location, for example as
+
+``us.gcr.io/broad-dsde-methods/cellbender:0.1.0``
+
 
 Terra Workflow
 --------------
