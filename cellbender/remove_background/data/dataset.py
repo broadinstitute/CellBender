@@ -141,7 +141,7 @@ class SingleCellRNACountsDataset:
             
         elif data_type == 'anndata':
             
-            logging.info(f"Loading daa from file {self.input_file}")
+            logging.info(f"Loading data from file {self.input_file}")
             self.data = get_matrix_from_anndata(self.input_file)
 
         else:
@@ -858,15 +858,11 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
         matrix_file = os.path.join(filedir, 'matrix.mtx')
         gene_file = os.path.join(filedir, "genes.tsv")
         barcode_file = os.path.join(filedir, "barcodes.tsv")
-        logging.info(f"matrix file path is {matrix_file}")
-        logging.info(f"gene file path is {gene_file}")
-        logging.info(f"barcode file path is {barcode_file}")
 
         # Read in gene names.
         gene_data = np.genfromtxt(fname=gene_file,
                                   delimiter="\t", skip_header=0,
                                   dtype='<U100')
-        logging.info("Read gene names.")
         if len(gene_data.shape) == 1:  # custom file format with just gene names
             gene_names = gene_data.squeeze()
             gene_ids = None
@@ -883,12 +879,10 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
 
     # Read in sparse count matrix.
     count_matrix = io.mmread(matrix_file).tocsr().transpose()
-    logging.info("Read count matrix.")
 
     # Read in barcode names.
     barcodes = np.genfromtxt(fname=barcode_file,
                              delimiter="\t", skip_header=0, dtype='<U20')
-    logging.info("Read barcodes.")
     
     # Issue warnings if necessary, based on dimensions matching.
     if count_matrix.shape[1] != len(gene_names):
@@ -1125,22 +1119,22 @@ def get_matrix_from_anndata(filename: str) \
         # given the manual convention, we prefer this matrix to 
         # .X since it is less likely to represent something other
         # than counts
-        logging.info("Found `.layers['counts']. Using for count data.")
+        logging.info("Found `.layers['counts']`. Using for count data.")
         count_matrix = adata.layers["counts"]
-    elif "spliced" in adata.layers.keys():
+    elif "spliced" in adata.layers.keys() and adata.X is None:
         # alignment using kallisto | bustools with intronic counts
         # does not populate `.X` by default, but does populate
         # `.layers['spliced'], .layers['unspliced']`.
         # we use spliced counts for analysis
-        logging.info("Found `.layers['spliced']. Using for count data.")
+        logging.info("Found `.layers['spliced']`. Using for count data.")
         count_matrix = adata.layers["spliced"]
     else:
+        logging.info("Using `.X` for count data.")
         count_matrix = adata.X
         
     # check that `count_matrix` contains a large number of barcodes,
     # consistent with a raw single cell experiment
-    n_expected_barcodes = 1e5
-    if count_matrix.shape[0] < n_expected_barcodes:
+    if count_matrix.shape[0] < consts.MINIMUM_BARCODES_H5AD:
         # this experiment might be prefiltered
         msg = f"Only {count_matrix.shape[0]} barcodes were found.\n"
         msg += "This suggests the matrix was prefiltered.\n"
@@ -1148,16 +1142,33 @@ def get_matrix_from_anndata(filename: str) \
         logging.warning(msg)
         
     # AnnData is [Cells, Genes], no need to transpose
+    # we typecast explicitly in the off chance `count_matrix` was dense.
     count_matrix = sp.csr_matrix(count_matrix)
     # feature names and ids are not consistently delineated in AnnData objects
-    # so we report both as the name of column annotations `.var_names`
+    # so we attempt to find relevant features using common values.
     feature_names = np.array(adata.var_names)
-    feature_ids = np.array(adata.var_names)
-    # feature types aren't consistently encoded for AnnData objects
-    feature_types = [np.array(['unknown']*len(adata.var_names))]
     barcodes = np.array(adata.obs_names)
-    # AnnData does not consistently encode the genome
-    genomes = np.array(['unknown'])
+
+    # Make an attempt to find feature_IDs if they are present.
+    feature_ids = np.empty(adata.var_names.size, dtype=str)
+    if 'gene_ids' in adata.var.keys():
+        feature_ids = adata.var['gene_ids']
+    elif 'gene_id' in adata.var.keys():
+        feature_ids = adata.var['gene_id']
+
+    # Make an attempt to find feature_types if they are present.
+    feature_types = np.empty(adata.var_names.size, dtype=str)
+    if 'feature_types' in adata.var.keys():
+        feature_types = adata.var['feature_types']
+    elif 'feature_type' in adata.var.keys():
+        feature_types = adata.var['feature_type']
+
+    # Make an attempt to find genomes if they are present.
+    genomes = np.empty(adata.var_names.size, dtype=str)
+    if 'genomes' in adata.var.keys():
+        genomes = adata.var['genomes']
+    elif 'genome' in adata.var.keys():
+        genomes = adata.var['genome']
 
     # Issue warnings if necessary, based on dimensions matching.
     if count_matrix.shape[1] != feature_names.size:
