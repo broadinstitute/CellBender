@@ -557,6 +557,9 @@ class SingleCellRNACountsDataset:
         # CellRanger version (format output like input).
         if self._detect_input_data_type() == 'cellranger_h5':
             cellranger_version = detect_cellranger_version_h5(self.input_file)
+        elif self._detect_input_data_type() == 'anndata':
+            # Arbitrarily peg output format for anndata inputs to be CellRanger v3 format
+            cellranger_version = 3
         else:
             cellranger_version = detect_cellranger_version_mtx(self.input_file)
 
@@ -1146,29 +1149,29 @@ def get_matrix_from_anndata(filename: str) \
     count_matrix = sp.csr_matrix(count_matrix)
     # feature names and ids are not consistently delineated in AnnData objects
     # so we attempt to find relevant features using common values.
-    feature_names = np.array(adata.var_names)
-    barcodes = np.array(adata.obs_names)
-
+    feature_names = np.array(adata.var_names, dtype=str)
+    barcodes = np.array(adata.obs_names, dtype=str)
+    
     # Make an attempt to find feature_IDs if they are present.
-    feature_ids = np.empty(adata.var_names.size, dtype=str)
+    feature_ids = None
     if 'gene_ids' in adata.var.keys():
-        feature_ids = adata.var['gene_ids']
+        feature_ids = np.array(adata.var['gene_ids'].values, dtype=str)
     elif 'gene_id' in adata.var.keys():
-        feature_ids = adata.var['gene_id']
+        feature_ids = np.array(adata.var['gene_id'].values, dtype=str)
 
     # Make an attempt to find feature_types if they are present.
-    feature_types = np.empty(adata.var_names.size, dtype=str)
+    feature_types = None
     if 'feature_types' in adata.var.keys():
-        feature_types = adata.var['feature_types']
+        feature_types = np.array(adata.var['feature_types'].values, dtype=str)
     elif 'feature_type' in adata.var.keys():
-        feature_types = adata.var['feature_type']
+        feature_types = np.array(adata.var['feature_type'].values, dtype=str)
 
     # Make an attempt to find genomes if they are present.
-    genomes = np.empty(adata.var_names.size, dtype=str)
+    genomes = None
     if 'genomes' in adata.var.keys():
-        genomes = adata.var['genomes']
+        genomes = np.array(adata.var['genomes'].values, dtype=str)
     elif 'genome' in adata.var.keys():
-        genomes = adata.var['genome']
+        genomes = np.array(adata.var['genome'].values, dtype=str)
 
     # Issue warnings if necessary, based on dimensions matching.
     if count_matrix.shape[1] != feature_names.size:
