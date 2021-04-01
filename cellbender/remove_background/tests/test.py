@@ -9,8 +9,9 @@ from cellbender.remove_background.data.extras.simulate import \
     simulate_dataset_with_ambient_rna
 from cellbender.remove_background.data.dataset import \
     SingleCellRNACountsDataset, write_matrix_to_cellranger_h5, \
-    get_matrix_from_cellranger_h5
+    get_matrix_from_cellranger_h5, get_matrix_from_anndata
 import numpy as np
+import anndata
 import sys
 
 
@@ -48,15 +49,25 @@ class TestConsole(unittest.TestCase):
                 np.array([f'bc_{i}' for i in
                           range(csr_barcode_gene_synthetic.shape[0])])
 
-            # Save the data to a temporary file.
+            # Save the data to a temporary cellranger h5 file.
             temp_file_name = 'testfile.h5'
-            write_matrix_to_cellranger_h5(temp_file_name,
+            write_matrix_to_cellranger_h5(cellranger_version=3,
+                                          output_file=temp_file_name,
                                           loss=None,
                                           gene_names=gene_names,
                                           barcodes=barcode_names,
                                           inferred_count_matrix=
                                           csr_barcode_gene_synthetic.tocsc(),
                                           ambient_expression=chi[0, :])
+            
+            # Save the data to a temporary AnnData file.
+            temp_h5ad_name = 'testfile.h5ad'
+            temp_adata = anndata.AnnData(
+                X=csr_barcode_gene_synthetic,
+            )
+            temp_adata.var_names = gene_names
+            temp_adata.obs_names = barcode_names
+            temp_adata.write_h5ad(temp_h5ad_name)
 
             # Read the data back in.
             reconstructed = get_matrix_from_cellranger_h5(temp_file_name)
@@ -72,7 +83,19 @@ class TestConsole(unittest.TestCase):
 
             # Remove the temporary file.
             os.remove(temp_file_name)
-
+            
+            # Check that anndata matches.
+            reconstructed_h5ad = get_matrix_from_anndata(temp_h5ad_name)
+            matrix_h5ad = reconstructed_h5ad['matrix']
+            assert (csr_barcode_gene_synthetic.sum(axis=1) ==
+                    matrix_h5ad.sum(axis=1)).all(), \
+                "Saved and re-opened AnnData is not accurate."
+            assert (csr_barcode_gene_synthetic.sum(axis=0) ==
+                    matrix_h5ad.sum(axis=0)).all(), \
+                "Saved and re-opened AnnData is not accurate."
+            
+            os.remove(temp_h5ad_name)
+            
             return 1
 
         except TestConsole.failureException:

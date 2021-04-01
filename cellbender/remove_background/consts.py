@@ -77,3 +77,7 @@ CELLS_POSTERIOR_REG_CALC = 100
 POSTERIOR_REG_MIN = 0.1
 POSTERIOR_REG_MAX = 500
 POSTERIOR_REG_SEARCH_MAX_ITER = 20
+
+# Minimum number of barcodes we expect in an unfiltered `h5ad` input file.
+# Throws a warning if the input has fewer than this number.
+MINIMUM_BARCODES_H5AD = 1e5
