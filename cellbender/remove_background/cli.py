@@ -92,6 +92,12 @@ class CLI(AbstractCLI):
             assert (fpr > 0.) and (fpr < 1.), \
                 "False positive rate --fpr must be between 0 and 1."
 
+        assert args.num_training_tries > 0, "num-training-tries must be > 0"
+        assert args.epoch_elbo_fail_fraction is None or args.epoch_elbo_fail_fraction > 0., \
+            "--epoch-elbo-fail-fraction must be > 0"
+        assert args.final_elbo_fail_fraction is None or args.final_elbo_fail_fraction > 0., \
+            "--epoch-elbo-fail-fraction must be > 0"
+
         self.args = args
 
         return args
