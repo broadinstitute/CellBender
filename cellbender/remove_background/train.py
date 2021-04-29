@@ -226,53 +226,56 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
     # Configure pyro options (skip validations to improve speed).
     pyro.enable_validation(False)
     pyro.distributions.enable_validation(False)
-    pyro.set_rng_seed(0)
-    pyro.clear_param_store()
-
-    # Set up the variational autoencoder:
-
-    # Encoder.
-    encoder_z = EncodeZ(input_dim=count_matrix.shape[1],
-                        hidden_dims=args.z_hidden_dims,
-                        output_dim=args.z_dim,
-                        input_transform='normalize')
-
-    encoder_other = EncodeNonZLatents(n_genes=count_matrix.shape[1],
-                                      z_dim=args.z_dim,
-                                      hidden_dims=consts.ENC_HIDDEN_DIMS,
-                                      log_count_crossover=dataset_obj.priors['log_counts_crossover'],
-                                      prior_log_cell_counts=np.log1p(dataset_obj.priors['cell_counts']),
-                                      input_transform='normalize')
-
-    encoder = CompositeEncoder({'z': encoder_z,
-                                'other': encoder_other})
-
-    # Decoder.
-    decoder = Decoder(input_dim=args.z_dim,
-                      hidden_dims=args.z_hidden_dims[::-1],
-                      output_dim=count_matrix.shape[1])
 
     # Load the dataset into DataLoaders.
     frac = args.training_fraction  # Fraction of barcodes to use for training
     batch_size = int(min(300, frac * dataset_obj.analyzed_barcode_inds.size / 2))
-    train_loader, test_loader = \
-        prep_data_for_training(dataset=count_matrix,
-                               empty_drop_dataset=
-                               dataset_obj.get_count_matrix_empties(),
-                               random_state=dataset_obj.random,
-                               batch_size=batch_size,
-                               training_fraction=frac,
-                               fraction_empties=args.fraction_empties,
-                               shuffle=True,
-                               use_cuda=args.use_cuda)
 
     for attempt in range(args.num_training_tries):
+        # set seed for every attempt for reproducibility
+        pyro.set_rng_seed(0)
+        pyro.clear_param_store()
+
+        # Set up the variational autoencoder:
+
+        # Encoder.
+        encoder_z = EncodeZ(input_dim=count_matrix.shape[1],
+                            hidden_dims=args.z_hidden_dims,
+                            output_dim=args.z_dim,
+                            input_transform='normalize')
+
+        encoder_other = EncodeNonZLatents(n_genes=count_matrix.shape[1],
+                                          z_dim=args.z_dim,
+                                          hidden_dims=consts.ENC_HIDDEN_DIMS,
+                                          log_count_crossover=dataset_obj.priors['log_counts_crossover'],
+                                          prior_log_cell_counts=np.log1p(dataset_obj.priors['cell_counts']),
+                                          input_transform='normalize')
+
+        encoder = CompositeEncoder({'z': encoder_z,
+                                    'other': encoder_other})
+
+        # Decoder.
+        decoder = Decoder(input_dim=args.z_dim,
+                          hidden_dims=args.z_hidden_dims[::-1],
+                          output_dim=count_matrix.shape[1])
+
         # Set up the pyro model for variational inference.
         model = RemoveBackgroundPyroModel(model_type=args.model,
                                           encoder=encoder,
                                           decoder=decoder,
                                           dataset_obj=dataset_obj,
                                           use_cuda=args.use_cuda)
+
+        train_loader, test_loader = \
+            prep_data_for_training(dataset=count_matrix,
+                                   empty_drop_dataset=
+                                   dataset_obj.get_count_matrix_empties(),
+                                   random_state=dataset_obj.random,
+                                   batch_size=batch_size,
+                                   training_fraction=frac,
+                                   fraction_empties=args.fraction_empties,
+                                   shuffle=True,
+                                   use_cuda=args.use_cuda)
 
         # Set up the optimizer.
         optimizer = pyro.optim.clipped_adam.ClippedAdam
