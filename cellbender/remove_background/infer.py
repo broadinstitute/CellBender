@@ -12,6 +12,8 @@ from typing import Tuple, List, Dict, Optional
 from abc import ABC, abstractmethod
 import logging
 
+from cellbender.remove_background.consts import PROP_POSTERIOR_BATCH_SIZE
+
 
 class Posterior(ABC):
     """Base class Posterior handles posterior count inference.
@@ -321,13 +323,15 @@ class ProbPosterior(Posterior):
                  dataset_obj: 'SingleCellRNACountsDataset',
                  vi_model: 'RemoveBackgroundPyroModel',
                  fpr: float = 0.01,
-                 float_threshold: float = 0.5):
+                 float_threshold: float = 0.5,
+                 batch_size: int = PROP_POSTERIOR_BATCH_SIZE):
         self.vi_model = vi_model
         self.use_cuda = vi_model.use_cuda
         self.fpr = fpr
         self.lambda_multiplier = None
         self._encodings = None
         self._mean = None
+        self.batch_size = batch_size
         self.random = np.random.RandomState(seed=1234)
         super(ProbPosterior, self).__init__(dataset_obj=dataset_obj,
                                             vi_model=vi_model,
@@ -376,7 +380,7 @@ class ProbPosterior(Posterior):
         analyzed_bcs_only = True
         data_loader = self.dataset_obj.get_dataloader(use_cuda=self.use_cuda,
                                                       analyzed_bcs_only=analyzed_bcs_only,
-                                                      batch_size=20,
+                                                      batch_size=self.batch_size,
                                                       shuffle=False)
         barcodes = []
         genes = []

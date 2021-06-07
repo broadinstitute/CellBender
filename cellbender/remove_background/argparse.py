@@ -138,4 +138,10 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "times this value. (For this value, probably "
                                 "do not exceed 1e-3).")
 
+    subparser.add_argument("--posterior-batch-size", type=int, default=consts.PROP_POSTERIOR_BATCH_SIZE,
+                           dest="posterior_batch_size",
+                           help="Size of batches when creating the posterior.  Reduce this to avoid "
+                                "running out of GPU memory creating the posterior (will be slower). "
+                                "(default: %(default)s)")
+
     return subparsers

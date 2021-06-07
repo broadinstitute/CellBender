@@ -81,3 +81,6 @@ POSTERIOR_REG_SEARCH_MAX_ITER = 20
 # Minimum number of barcodes we expect in an unfiltered `h5ad` input file.
 # Throws a warning if the input has fewer than this number.
 MINIMUM_BARCODES_H5AD = 1e5
+
+# reduce this if running out of GPU memory https://github.com/broadinstitute/CellBender/issues/67
+PROP_POSTERIOR_BATCH_SIZE = 20
