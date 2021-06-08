@@ -1,18 +1,16 @@
 # Posterior inference.
 
+import logging
+from abc import ABC, abstractmethod
+from typing import Tuple, List, Dict, Optional
+
+import numpy as np
 import pyro
 import pyro.distributions as dist
-import torch
-import numpy as np
 import scipy.sparse as sp
+import torch
 
 import cellbender.remove_background.consts as consts
-
-from typing import Tuple, List, Dict, Optional
-from abc import ABC, abstractmethod
-import logging
-
-from cellbender.remove_background.consts import PROP_POSTERIOR_BATCH_SIZE
 
 
 class Posterior(ABC):
@@ -324,7 +322,8 @@ class ProbPosterior(Posterior):
                  vi_model: 'RemoveBackgroundPyroModel',
                  fpr: float = 0.01,
                  float_threshold: float = 0.5,
-                 batch_size: int = PROP_POSTERIOR_BATCH_SIZE):
+                 batch_size: int = consts.PROP_POSTERIOR_BATCH_SIZE,
+                 cells_posterior_reg_calc: int = consts.CELLS_POSTERIOR_REG_CALC):
         self.vi_model = vi_model
         self.use_cuda = vi_model.use_cuda
         self.fpr = fpr
@@ -332,6 +331,7 @@ class ProbPosterior(Posterior):
         self._encodings = None
         self._mean = None
         self.batch_size = batch_size
+        self.cells_posterior_reg_calc = cells_posterior_reg_calc
         self.random = np.random.RandomState(seed=1234)
         super(ProbPosterior, self).__init__(dataset_obj=dataset_obj,
                                             vi_model=vi_model,
@@ -352,7 +352,7 @@ class ProbPosterior(Posterior):
 
         for i in range(lambda_mults.size):
 
-            n_cells = min(consts.CELLS_POSTERIOR_REG_CALC, cell_inds.size)
+            n_cells = min(self.cells_posterior_reg_calc, cell_inds.size)
             if n_cells == 0:
                 raise ValueError('No cells found!  Cannot compute expected FPR.')
             cell_ind_subset = self.random.choice(cell_inds, size=n_cells, replace=False)

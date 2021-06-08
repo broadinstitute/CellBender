@@ -70,7 +70,7 @@ REG_SCALE_AMBIENT_EXPRESSION = 0.01
 REG_SCALE_EMPTY_PROB = 1.0
 REG_SCALE_CELL_PROB = 10.0
 
-# Number of cells used to esitmate posterior regularization lambda. Memory hungry.
+# Number of cells used to estimate posterior regularization lambda. Memory hungry.
 CELLS_POSTERIOR_REG_CALC = 100
 
 # Posterior regularization constant's upper and lower bounds.
