@@ -53,7 +53,7 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "rank-ordered UMI plot that will be "
                                 "analyzed. The largest 'total_droplets' "
                                 "droplets will have their cell "
-                                "probabilities inferred as an output.")
+                                "probabilities inferred as an output. (default: %(default)s)")
     subparser.add_argument("--model", nargs=None, type=str,
                            default="full",
                            choices=["simple", "ambient", "swapping", "full"],
@@ -67,10 +67,10 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "assumes background RNA comes from random "
                                 "barcode swapping.  'full' uses a "
                                 "combined ambient and swapping model.  "
-                                "Defaults to 'full'.")
+                                "(default: %(default)s)")
     subparser.add_argument("--epochs", nargs=None, type=int, default=150,
                            dest="epochs",
-                           help="Number of epochs to train.")
+                           help="Number of epochs to train. (default: %(default)s)")
     subparser.add_argument("--cuda",
                            dest="use_cuda", action="store_true",
                            help="Including the flag --cuda will run the "
@@ -83,14 +83,14 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "analysis.  This can help identify the "
                                 "correct prior for empty droplet counts "
                                 "in the rare case where empty counts "
-                                "are extremely high (over 200).")
+                                "are extremely high (over 200). (default: %(default)s)")
     subparser.add_argument("--z-dim", type=int, default=100,
                            dest="z_dim",
-                           help="Dimension of latent variable z.")
+                           help="Dimension of latent variable z. (default: %(default)s)")
     subparser.add_argument("--z-layers", nargs="+", type=int, default=[500],
                            dest="z_hidden_dims",
                            help="Dimension of hidden layers in the encoder "
-                                "for z.")
+                                "for z. (default: %(default)s)")
     subparser.add_argument("--training-fraction",
                            type=float, nargs=None,
                            default=consts.TRAINING_FRACTION,
@@ -98,7 +98,7 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            help="Training detail: the fraction of the "
                                 "data used for training.  The rest is never "
                                 "seen by the inference algorithm.  Speeds up "
-                                "learning.")
+                                "learning. (default: %(default)s)")
     subparser.add_argument("--empty-drop-training-fraction",
                            type=float, nargs=None,
                            default=consts.FRACTION_EMPTIES,
@@ -106,7 +106,7 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            help="Training detail: the fraction of the "
                                 "training data each epoch "
                                 "that is drawn (randomly sampled) from "
-                                "surely empty droplets.")
+                                "surely empty droplets. (default: %(default)s)")
     subparser.add_argument("--blacklist-genes", nargs="+", type=int,
                            default=[],
                            dest="blacklisted_genes",
@@ -123,7 +123,7 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "is accompanied by more signal removal "
                                 "at high values of FPR.  You can specify "
                                 "multiple values, which will create multiple "
-                                "output files.")
+                                "output files. (default: %(default)s)")
     subparser.add_argument("--exclude-antibody-capture",
                            dest="exclude_antibodies", action="store_true",
                            help="Including the flag --exclude-antibody-capture "
@@ -136,6 +136,21 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "inference. A OneCycle learning rate schedule "
                                 "is used, where the upper learning rate is ten "
                                 "times this value. (For this value, probably "
-                                "do not exceed 1e-3).")
+                                "do not exceed 1e-3). (default: %(default)s)")
+    subparser.add_argument("--final-elbo-fail-fraction", type=float,
+                           help="Training is considered to have failed if "
+                                "final_training_ELBO >= best_training_ELBO*(1+FINAL_ELBO_FAIL_FRACTION). "
+                                "(default: do not fail training based on final_training_ELBO)")
+    subparser.add_argument("--epoch-elbo-fail-fraction", type=float,
+                           help="Training is considered to have failed if "
+                                "current_epoch_training_ELBO >= previous_epoch_training_ELBO*(1+EPOCH_ELBO_FAIL_FRACTION). "
+                                "(default: do not fail training based on epoch_training_ELBO)")
+    subparser.add_argument("--num-training-tries", type=int, default=1,
+                           help="Number of times to attempt to train the model.  Each subsequent "
+                                "attempt the learning rate is multiplied by LEARNING_RATE_RETRY_MULT. "
+                                "(default: %(default)s)")
+    subparser.add_argument("--learning-rate-retry-mult", type=float, default=0.5,
+                           help="Learning rate is multiplied by this amount each time "
+                                "(default: %(default)s)")
 
     return subparsers
