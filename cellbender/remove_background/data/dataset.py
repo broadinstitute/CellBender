@@ -485,6 +485,8 @@ class SingleCellRNACountsDataset:
             self,
             output_file: str,
             inferred_model: 'RemoveBackgroundPyroModel',
+            posterior_batch_size: int,
+            cells_posterior_reg_calc: int,
             save_plots: bool = False) -> bool:
         """Write the results of an inference procedure to an output file.
 
@@ -514,7 +516,9 @@ class SingleCellRNACountsDataset:
         # Create posterior.
         self.posterior = ProbPosterior(dataset_obj=self,
                                        vi_model=inferred_model,
-                                       fpr=self.fpr[0])
+                                       fpr=self.fpr[0],
+                                       batch_size=posterior_batch_size,
+                                       cells_posterior_reg_calc=cells_posterior_reg_calc)
 
         # Encoded values of latent variables.
         enc = self.posterior.latents

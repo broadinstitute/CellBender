@@ -70,7 +70,7 @@ REG_SCALE_AMBIENT_EXPRESSION = 0.01
 REG_SCALE_EMPTY_PROB = 1.0
 REG_SCALE_CELL_PROB = 10.0
 
-# Number of cells used to esitmate posterior regularization lambda. Memory hungry.
+# Number of cells used to estimate posterior regularization lambda. Memory hungry.
 CELLS_POSTERIOR_REG_CALC = 100
 
 # Posterior regularization constant's upper and lower bounds.
@@ -81,3 +81,6 @@ POSTERIOR_REG_SEARCH_MAX_ITER = 20
 # Minimum number of barcodes we expect in an unfiltered `h5ad` input file.
 # Throws a warning if the input has fewer than this number.
 MINIMUM_BARCODES_H5AD = 1e5
+
+# reduce this if running out of GPU memory https://github.com/broadinstitute/CellBender/issues/67
+PROP_POSTERIOR_BATCH_SIZE = 20

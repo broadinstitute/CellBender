@@ -153,4 +153,14 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            help="Learning rate is multiplied by this amount each time "
                                 "(default: %(default)s)")
 
+    subparser.add_argument("--posterior-batch-size", type=int, default=consts.PROP_POSTERIOR_BATCH_SIZE,
+                           dest="posterior_batch_size",
+                           help="Size of batches when creating the posterior.  Reduce this to avoid "
+                                "running out of GPU memory creating the posterior (will be slower). "
+                                "(default: %(default)s)")
+    subparser.add_argument("--cells-posterior-reg-calc", type=int, default=consts.CELLS_POSTERIOR_REG_CALC,
+                           dest="cells_posterior_reg_calc",
+                           help="Number of cells used to estimate posterior regularization lambda. "
+                                "(default: %(default)s)")
+
     return subparsers

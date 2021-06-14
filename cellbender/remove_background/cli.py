@@ -169,6 +169,8 @@ def run_remove_background(args):
     try:
         dataset_obj.save_to_output_file(args.output_file,
                                         inferred_model,
+                                        posterior_batch_size=args.posterior_batch_size,
+                                        cells_posterior_reg_calc=args.cells_posterior_reg_calc,
                                         save_plots=True)
 
         logging.info("Completed remove-background.")
