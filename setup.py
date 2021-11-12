@@ -39,7 +39,7 @@ setuptools.setup(
     url='http://github.com/broadinstitute/CellBender',
     author='Stephen Fleming, Mehrtash Babadi',
     license='BSD (3-Clause)',
-    packages=['cellbender'],
+    packages=setuptools.find_packages(),
     install_requires=install_requires,
     entry_points={
         'console_scripts': ['cellbender=cellbender.base_cli:main'],
