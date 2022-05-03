@@ -1,1 +1,2 @@
-tiny_raw_gene_bc_matrices
+*.h5
+*.h5ad
