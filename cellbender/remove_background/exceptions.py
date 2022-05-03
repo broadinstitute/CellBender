@@ -1,4 +1,4 @@
-# Exceptions defined by CellBender
+"""Exceptions defined by CellBender"""
 
 
 class NanException(ArithmeticError):
@@ -11,3 +11,14 @@ class NanException(ArithmeticError):
     def __init__(self, param: str):
         self.param = param
         self.message = 'A wild NaN appeared!  In param {' + self.param + '}'
+
+
+class ElboException(ValueError):
+    """Exception raised when training procedure is failing to meet expectations.
+
+    Attributes:
+        message: Message to write to log
+    """
+
+    def __init__(self, message: str):
+        self.message = message

@@ -1,13 +1,21 @@
 """Constant numbers used in remove-background."""
 
+# Seed for random number generators.
+RANDOM_SEED = 1234  # TODO ensure this gets used
+
 # Factor by which the mode UMI count of the empty droplet plateau is
 # multiplied to come up with a UMI cutoff below which no barcodes are used.
 EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD = 0.5
 
+# Features with fewer than this many counts summed over all empty droplets
+# are ignored during analysis, and the output count matrix for these features
+# is identical to the input.
+COUNTS_IN_EMPTIES_LOW_LIMIT = 0
+AMBIENT_COUNTS_IN_CELLS_LOW_LIMIT = 0.1
+
 # Default prior for the standard deviation of the LogNormal distribution for
 # cell size, used only in the case of the 'simple' model.
 SIMPLE_MODEL_D_STD_PRIOR = 0.2
-D_STD_PRIOR = 0.02
 
 # Probability cutoff for determining which droplets contain cells and which
 # are empty.  The droplets n with inferred probability q_n > CELL_PROB_CUTOFF
@@ -28,22 +36,27 @@ TRAINING_FRACTION = 0.9
 DEFAULT_BATCH_SIZE = 128
 
 # Fraction of totally empty droplets that makes up each minibatch, by default.
-FRACTION_EMPTIES = 0.5
+FRACTION_EMPTIES = 0.2
 
 # Prior on rho, the swapping fraction: the two concentration parameters alpha and beta.
-RHO_ALPHA_PRIOR = 18.
-RHO_BETA_PRIOR = 200.
+RHO_ALPHA_PRIOR = 1.5
+RHO_BETA_PRIOR = 50.
 
 # Constraints on rho posterior latents.
-RHO_PARAM_MIN = 1.
+RHO_PARAM_MIN = 0.001
 RHO_PARAM_MAX = 1000.
 
 # Prior on epsilon, the RT efficiency concentration parameter [Gamma(alpha, alpha)].
-EPSILON_PRIOR = 500.
+EPSILON_PRIOR = 50.
 
 # Prior used for the global overdispersion parameter.
 PHI_LOC_PRIOR = 0.2
 PHI_SCALE_PRIOR = 0.2
+
+# Prior for mixture weights in Gaussian mixture model.
+GMM_ALPHA_PRIOR = 1e-1
+GMM_COMPONENTS = 10
+GMM_EPOCHS = 500
 
 # Initial value of global latent scale for d_cell.
 D_CELL_SCALE_INIT = 0.02
@@ -64,23 +77,33 @@ NBPC_EXACT_N_TERMS = 50
 NBPC_MU_EPS_SAFEGAURD = 1e-10
 NBPC_ALPHA_EPS_SAFEGAURD = 1e-10
 NBPC_LAM_EPS_SAFEGAURD = 1e-10
+POISSON_EPS_SAFEGAURD = 1e-10
 
 # Scale factors for loss function regularization terms: semi-supervision.
 REG_SCALE_AMBIENT_EXPRESSION = 0.01
 REG_SCALE_EMPTY_PROB = 1.0
-REG_SCALE_CELL_PROB = 10.0
+REG_SCALE_CELL_PROB = 10.0  # TODO: not strong enough (apparently) for pbmc8k, 12k total droplets included
 
-# Number of cells used to estimate posterior regularization lambda. Memory hungry.
+# Regularize logit probabilities toward this value.
+REG_LOGIT_SCALE = 5.0
+
+# Number of cells used to esitmate posterior regularization lambda. Memory hungry.
 CELLS_POSTERIOR_REG_CALC = 100
 
 # Posterior regularization constant's upper and lower bounds.
-POSTERIOR_REG_MIN = 0.1
+POSTERIOR_REG_MIN = 0.01
 POSTERIOR_REG_MAX = 500
 POSTERIOR_REG_SEARCH_MAX_ITER = 20
 
-# Minimum number of barcodes we expect in an unfiltered `h5ad` input file.
-# Throws a warning if the input has fewer than this number.
+# For AnnData h5ad files, fewer than this many barcodes will trigger a warning,
+# since it indicates that the file might be "filtered" to cells only.
 MINIMUM_BARCODES_H5AD = 1e5
 
-# reduce this if running out of GPU memory https://github.com/broadinstitute/CellBender/issues/67
-PROP_POSTERIOR_BATCH_SIZE = 20
+# Batch size for posterior inference.
+PROB_POSTERIOR_BATCH_SIZE = 128
+
+# Name of checkpoint file.
+CHECKPOINT_FILE_NAME = 'ckpt.tar.gz'
+
+# Whether to create an extended report (for development purposes).
+EXTENDED_REPORT = False

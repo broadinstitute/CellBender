@@ -1,5 +1,8 @@
 """Helper functions for preparing dataloaders, as well as
 a class to implement loading data from a sparse matrix in mini-batches.
+
+Intentionally uses global random state, and does not keep its own random number
+generator, in order to facilitate checkpointing.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ import cellbender.remove_background.consts as consts
 import torch
 import torch.utils.data
 
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Callable
 
 
 class SparseDataset(torch.utils.data.Dataset):
@@ -51,9 +54,37 @@ class DataLoader:
                  batch_size: int = consts.DEFAULT_BATCH_SIZE,
                  fraction_empties: float = consts.FRACTION_EMPTIES,
                  shuffle: bool = True,
+                 sort_by: Optional[Callable[[sp.csr_matrix], np.ndarray]] = None,
                  use_cuda: bool = True):
+        """
+        Args:
+            dataset: Droplet count matrix [cell, gene]
+            empty_drop_dataset: Surely empty droplets count matrix
+            batch_size: Number of droplets in minibatch
+            fraction_empties: Fraction of each minibatch that will consist of
+                surely empty droplets
+            shuffle: True to shuffle data. Incompatible with sort_by.
+            sort_by: Lambda function which, when applied to the sparse matrix,
+                will return values that can be sorted to give a sort order to
+                the dataset. Dataloader will load data in order of increasing
+                values. Object attributes sort_order and unsort_order will be
+                made available.
+            use_cuda: True to load data to GPU
+        """
+        if shuffle:
+            assert sort_by is None, 'Cannot sort_by and shuffle at the same time'
+        self.sort_fn = sort_by
         self.dataset = dataset
-        self.ind_list = np.arange(self.dataset.shape[0])
+        if self.sort_fn is not None:
+            sort_values = self.sort_fn(self.dataset)
+            sort_order = np.argsort(sort_values)
+            self.ind_list = sort_order
+            self.sort_order = sort_order.copy()
+            self._unsort_dict = {i: val for i, val in enumerate(self.sort_order)}
+        else:
+            self.ind_list = np.arange(self.dataset.shape[0])
+            self.sort_order = self.ind_list.copy()
+            self._unsort_dict = {i: i for i in self.ind_list}
         self.empty_drop_dataset = empty_drop_dataset
         if self.empty_drop_dataset is None:
             self.empty_ind_list = np.array([])
@@ -63,16 +94,36 @@ class DataLoader:
         self.fraction_empties = fraction_empties
         self.cell_batch_size = int(batch_size * (1. - fraction_empties))
         self.shuffle = shuffle
-        self.random = np.random.RandomState(seed=1234)
         self.device = 'cpu'
         self.use_cuda = use_cuda
         if self.use_cuda:
             self.device = 'cuda'
         self._reset()
 
+    @torch.no_grad()
+    def unsort_inds(self, bcs):
+        if self.sort_fn is None:
+            return bcs  # just for speed
+        else:
+            return torch.tensor([self._unsort_dict[bc.item()] for bc in bcs], device='cpu')
+
     def _reset(self):
         if self.shuffle:
-            self.random.shuffle(self.ind_list)  # Shuffle cell inds in place
+            np.random.shuffle(self.ind_list)  # Shuffle cell inds in place
+        self.ptr = 0
+
+    def get_state(self):
+        """Internal state of the data loader, used for checkpointing"""
+        return {'ind_list': self.ind_list, 'ptr': self.ptr}
+
+    def set_state(self, ind_list: np.ndarray, ptr: int):
+        self.ind_list = ind_list
+        self.ptr = ptr
+        assert self.ptr <= len(self.ind_list), \
+            f'Problem setting dataloader state: pointer ({ptr}) is outside the ' \
+            f'length of the ind_list ({len(ind_list)})'
+
+    def reset_ptr(self):
         self.ptr = 0
 
     def __len__(self):
@@ -101,9 +152,9 @@ class DataLoader:
                              (1 - self.fraction_empties)))
             if self.empty_ind_list.size > 0:
                 # This does not happen for 'simple' model.
-                empty_inds = self.random.choice(self.empty_ind_list,
-                                                size=n_empties,
-                                                replace=True)
+                empty_inds = np.random.choice(self.empty_ind_list,
+                                              size=n_empties,
+                                              replace=True)
 
                 if empty_inds.size > 0:
                     csr_list = [self.dataset[cell_inds, :],
@@ -123,7 +174,6 @@ class DataLoader:
 
 def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
                                   empty_drop_dataset: sp.csr.csr_matrix,
-                                  random_state: np.random.RandomState,
                                   training_fraction: float = consts.TRAINING_FRACTION,
                                   fraction_empties: float = consts.FRACTION_EMPTIES,
                                   batch_size: int = consts.DEFAULT_BATCH_SIZE,
@@ -144,8 +194,6 @@ def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
             columns are genes.
         empty_drop_dataset: Matrix of gene counts, where rows are surely-empty
             droplet barcodes and columns are genes.
-        random_state: numpy.random.RandomState from the Dataset object, for
-            deterministic outputs.
         training_fraction: Fraction of data to use as the training set.  The
             rest becomes the test set.
         fraction_empties: Fraction of each minibatch to be composed of empty
@@ -167,15 +215,14 @@ def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
     """
 
     # Choose train and test indices from analysis dataset.
-    training_mask = random_state.rand(dataset.shape[0]) < training_fraction
+    training_mask = np.random.rand(dataset.shape[0]) < training_fraction
     training_indices = [idx for idx in range(dataset.shape[0])
                         if training_mask[idx]]
     test_indices = [idx for idx in range(dataset.shape[0])
                     if not training_mask[idx]]
 
     # Choose train and test indices from empty drop dataset.
-    training_mask_empty = (random_state.rand(empty_drop_dataset.shape[0])
-                           < training_fraction)
+    training_mask_empty = (np.random.rand(empty_drop_dataset.shape[0]) < training_fraction)
     training_indices_empty = [idx for idx in range(empty_drop_dataset.shape[0])
                               if training_mask_empty[idx]]
     test_indices_empty = [idx for idx in range(empty_drop_dataset.shape[0])

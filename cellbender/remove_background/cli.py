@@ -1,15 +1,15 @@
 """Command-line tool functionality for remove-background."""
 
 import torch
-from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
-from cellbender.remove_background.train import run_inference
-from cellbender.base_cli import AbstractCLI
-from cellbender.remove_background import consts
+import cellbender
+
+from cellbender.base_cli import AbstractCLI, get_version
+from cellbender.remove_background.checkpoint import create_workflow_hashcode
+from cellbender.remove_background.run import run_remove_background
 
 import logging
 import os
 import sys
-from datetime import datetime
 
 
 class CLI(AbstractCLI):
@@ -29,8 +29,16 @@ class CLI(AbstractCLI):
         try:
             args.input_file = os.path.expanduser(args.input_file)
             args.output_file = os.path.expanduser(args.output_file)
+            if args.truth_file is not None:
+                args.truth_file = os.path.expanduser(args.truth_file)
         except TypeError:
             raise ValueError("Problem with provided input and output paths.")
+
+        # Ensure that if truth data is specified, it is accessible
+        if args.truth_file is not None:
+            assert os.access(args.truth_file, os.R_OK), \
+                f"Cannot read specified simulated truth file {args.truth_file}. " \
+                f"Ensure the file exists and is read accessible."
 
         # Ensure write access to the save directory.
         file_dir, _ = os.path.split(args.output_file)  # Get the output directory
@@ -92,11 +100,35 @@ class CLI(AbstractCLI):
             assert (fpr > 0.) and (fpr < 1.), \
                 "False positive rate --fpr must be between 0 and 1."
 
-        assert args.num_training_tries > 0, "num-training-tries must be > 0"
-        assert args.epoch_elbo_fail_fraction is None or args.epoch_elbo_fail_fraction > 0., \
+        # Ensure that "exclude_features" specifies allowed features.
+        # As of CellRanger 6.0, the possible features are:
+        #     Gene Expression
+        #     Antibody Capture
+        #     CRISPR Guide Capture
+        #     Custom
+        allowed_features = ['Gene Expression', 'Antibody Capture',
+                            'CRISPR Guide Capture', 'Custom']
+        for feature in args.exclude_features:
+            assert feature in allowed_features, \
+                f"Specified '{feature}' using --exclude-features, but this is " \
+                f"not one of the allowed CellRanger feature designations: " \
+                f"{allowed_features}"
+
+        # Automatic training failures and restarts.
+        assert args.num_training_tries > 0, "--num-training-tries must be > 0"
+        assert (args.epoch_elbo_fail_fraction is None) or (args.epoch_elbo_fail_fraction > 0.), \
             "--epoch-elbo-fail-fraction must be > 0"
-        assert args.final_elbo_fail_fraction is None or args.final_elbo_fail_fraction > 0., \
-            "--epoch-elbo-fail-fraction must be > 0"
+        assert (args.final_elbo_fail_fraction is None) or (args.final_elbo_fail_fraction > 0.), \
+            "--final-elbo-fail-fraction must be > 0"
+
+        # Ensure timing of checkpoints is within bounds.
+        assert args.checkpoint_min > 0, "--checkpoint-min must be > 0"
+        if args.checkpoint_min > 15:
+            sys.stdout.write(f"Warning: Timing between checkpoints is specified as "
+                             f"{args.checkpoint_min} minutes.  Consider reducing "
+                             f"this number if you are concerned about the "
+                             f"possibility of lost work upon preemption.")
+            sys.stdout.flush()  # Write immediately
 
         self.args = args
 
@@ -109,96 +141,38 @@ class CLI(AbstractCLI):
         main(args)
 
 
-def run_remove_background(args):
-    """The full script for the command line tool to remove background RNA.
-
-    Args:
-        args: Inputs from the command line, already parsed using argparse.
-
-    Note: Returns nothing, but writes output to a file(s) specified from
-        command line.
-
-    """
-
-    # Load dataset, run inference, and write the output to a file.
+def main(args):
+    """Take command-line input, parse arguments, and run tests or tool."""
 
     # Send logging messages to stdout as well as a log file.
     file_dir, file_base = os.path.split(args.output_file)
     file_name = os.path.splitext(os.path.basename(file_base))[0]
     log_file = os.path.join(file_dir, file_name + ".log")
-    logging.basicConfig(level=logging.INFO,
-                        format="cellbender:remove-background: %(message)s",
-                        filename=log_file,
-                        filemode="w")
-    console = logging.StreamHandler()
-    formatter = logging.Formatter("cellbender:remove-background: "
-                                  "%(message)s")
-    console.setFormatter(formatter)  # Use the same format for stdout.
-    logging.getLogger('').addHandler(console)  # Log to stdout and a file.
+    logger = logging.getLogger('cellbender')  # name of the logger
+    logger.setLevel(logging.INFO if not args.debug else logging.DEBUG)
+    formatter = logging.Formatter('cellbender:remove-background: %(message)s')
+    file_handler = logging.FileHandler(filename=log_file, mode='w')
+    console_handler = logging.StreamHandler()
+    file_handler.setFormatter(formatter)  # set the file format
+    console_handler.setFormatter(formatter)  # use the same format for stdout
+    logger.addHandler(file_handler)  # log to file
+    logger.addHandler(console_handler)  # log to stdout
 
     # Log the command as typed by user.
-    logging.info("Command:\n" + ' '.join(['cellbender', 'remove-background']
-                                         + sys.argv[2:]))
+    logger.info("Command:\n"
+                + ' '.join(['cellbender', 'remove-background'] + sys.argv[2:]))
+    logger.info("CellBender " + get_version())
 
-    # Log the start time.
-    logging.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-    logging.info("Running remove-background")
-
-    # Load data from file and choose barcodes and genes to analyze.
-    try:
-        dataset_obj = \
-            SingleCellRNACountsDataset(input_file=args.input_file,
-                                       expected_cell_count=args.expected_cell_count,
-                                       total_droplet_barcodes=args.total_droplets,
-                                       fraction_empties=args.fraction_empties,
-                                       model_name=args.model,
-                                       gene_blacklist=args.blacklisted_genes,
-                                       exclude_antibodies=args.exclude_antibodies,
-                                       low_count_threshold=args.low_count_threshold,
-                                       fpr=args.fpr)
-
-    except OSError:
-        logging.error(f"OSError: Unable to open file {args.input_file}.")
-        sys.exit(1)
-
-    # Instantiate latent variable model and run full inference procedure.
-    inferred_model = run_inference(dataset_obj, args)
-
-    # Write outputs to file.
-    try:
-        dataset_obj.save_to_output_file(args.output_file,
-                                        inferred_model,
-                                        posterior_batch_size=args.posterior_batch_size,
-                                        cells_posterior_reg_calc=args.cells_posterior_reg_calc,
-                                        save_plots=True)
-
-        logging.info("Completed remove-background.")
-        logging.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S\n'))
-
-    # The exception allows user to end inference prematurely with CTRL-C.
-    except KeyboardInterrupt:
-
-        # If partial output has been saved, delete it.
-        full_file = args.output_file
-
-        # Name of the filtered (cells only) file.
-        file_dir, file_base = os.path.split(full_file)
-        file_name = os.path.splitext(os.path.basename(file_base))[0]
-        filtered_file = os.path.join(file_dir,
-                                     file_name + "_filtered.h5")
-
-        if os.path.exists(full_file):
-            os.remove(full_file)
-
-        if os.path.exists(filtered_file):
-            os.remove(filtered_file)
-
-        logging.info("Keyboard interrupt.  Terminated without saving.\n")
-
-
-def main(args):
-    """Take command-line input, parse arguments, and run tests or tool."""
+    # Set up checkpointing by creating a unique workflow hash.
+    hashcode = create_workflow_hashcode(
+        module_path=os.path.dirname(cellbender.__file__),
+        args_to_remove=(['output_file', 'fpr', 'input_checkpoint_tarball', 'debug',
+                         'posterior_batch_size', 'checkpoint_min', 'truth_file']
+                        + (['epochs'] if args.constant_learning_rate else [])),
+        args=args)[:10]
+    args.checkpoint_filename = hashcode  # store this in args
+    logger.info(f'(Workflow hash {hashcode})')
 
     # Run the tool.
     run_remove_background(args)
+    file_handler.close()

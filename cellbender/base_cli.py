@@ -5,14 +5,21 @@ Parses arguments and determines which tool should be called.
 """
 
 import sys
+import os
 import argparse
 from abc import ABC, abstractmethod
 from typing import Dict
 import importlib
 
-
 # New tools should be added to this list.
 TOOL_NAME_LIST = ['remove-background']
+
+
+def get_version() -> str:
+    """Version number is centrally located in the file called VERSION"""
+    with open(os.path.join(os.path.dirname(__file__), '..', 'VERSION')) as f:
+        version = f.read().strip()
+    return version
 
 
 class AbstractCLI(ABC):
@@ -62,8 +69,12 @@ def get_populated_argparser() -> argparse.ArgumentParser:
     # Set up argument parser.
     parser = argparse.ArgumentParser(
         prog="cellbender",
-        description="CellBender is a software package for eliminating technical artifacts from high-throughput "
-                    "single-cell RNA sequencing (scRNA-seq) data.")
+        description="CellBender is a software package for eliminating technical "
+                    "artifacts from high-throughput single-cell RNA sequencing "
+                    "(scRNA-seq) data.")
+
+    # Add the ability to display the version.
+    parser.add_argument('-v', '--version', action='version', version=get_version())
 
     # Declare the existence of sub-parsers.
     subparsers = parser.add_subparsers(
@@ -72,7 +83,7 @@ def get_populated_argparser() -> argparse.ArgumentParser:
         dest="tool")
 
     for tool_name in TOOL_NAME_LIST:
-        module_argparse_str_list = ["cellbender", tool_name.replace("-", "_"), "argparse"]
+        module_argparse_str_list = ["cellbender", tool_name.replace("-", "_"), "argparser"]
         module_argparse = importlib.import_module('.'.join(module_argparse_str_list))
         subparsers = module_argparse.add_subparser_args(subparsers)
 
@@ -103,3 +114,9 @@ def main():
     else:
 
         parser.print_help()
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
