@@ -81,11 +81,14 @@ POISSON_EPS_SAFEGAURD = 1e-10
 
 # Scale factors for loss function regularization terms: semi-supervision.
 REG_SCALE_AMBIENT_EXPRESSION = 0.01
-REG_SCALE_EMPTY_PROB = 1.0
-REG_SCALE_CELL_PROB = 10.0  # TODO: not strong enough (apparently) for pbmc8k, 12k total droplets included
+REG_SCALE_EMPTY_PROB = 10.0
+REG_SCALE_CELL_PROB = 1.0
+REG_SCALE_SOFT_SUPERVISION = 0.1
 
-# Regularize logit probabilities toward this value.
-REG_LOGIT_SCALE = 5.0
+# Regularize logit probabilities toward this lognormal distribution.
+REG_LOGIT_MEAN = 5.0
+REG_LOGIT_SCALE = 0.2
+REG_LOGIT_SOFT_SCALE = 1.0
 
 # Number of cells used to esitmate posterior regularization lambda. Memory hungry.
 CELLS_POSTERIOR_REG_CALC = 100

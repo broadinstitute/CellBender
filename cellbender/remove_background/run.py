@@ -200,6 +200,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                                           n_droplets=dataset_obj.analyzed_barcode_inds.size,
                                           analyzed_gene_names=dataset_obj.data['gene_names'][dataset_obj.analyzed_gene_inds],
                                           empty_UMI_threshold=dataset_obj.empty_UMI_threshold,
+                                          log_counts_crossover=dataset_obj.priors['log_counts_crossover'],
                                           use_cuda=args.use_cuda)
 
         # Load the dataset into DataLoaders.

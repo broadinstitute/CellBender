@@ -134,8 +134,13 @@ class GMM(nn.Module):
 
     def _filter_map_estimate(self, map_est) -> Dict[str, np.ndarray]:
         """Ensure there is no small 'cell' mode that's really part of the empties"""
-        empty_loc = map_est['loc'][0]
-        empty_scale = map_est['scale'][0]
+
+        # empty_loc = map_est['loc'][0]
+        # empty_scale = map_est['scale'][0]
+        empty_component_ind = np.argmin(map_est['loc'])
+        empty_loc = map_est['loc'][empty_component_ind]
+        empty_scale = map_est['scale'][empty_component_ind]
+
         three_stdev = empty_loc + 3 * empty_scale
         minimum_cutoff = max(three_stdev, self.cell_minimum)
         max_cell_loc_ind = np.argmax(map_est['loc'])
@@ -143,7 +148,7 @@ class GMM(nn.Module):
         # Figure out which components to keep based on being 3 stdev above empties.
         keep_inds = []
         for i, loc in enumerate(map_est['loc']):
-            if (i == 0) or (i == max_cell_loc_ind) or (loc > minimum_cutoff):
+            if (i == empty_component_ind) or (i == max_cell_loc_ind) or (loc > minimum_cutoff):
                 keep_inds.append(i)
 
         # Filter out modes that overlap empties.
@@ -162,7 +167,9 @@ class GMM(nn.Module):
     def plot_summary(self, exclude_weights_below: float = 1e-2):
 
         # Get MAP estimates for parameters
-        map_estimates = self.map_estimate(exclude_weights_below=exclude_weights_below)
+        map_estimates = self.map_estimate(sort_by='loc',
+                                          ascending=True,
+                                          exclude_weights_below=exclude_weights_below)
         weights = map_estimates['weight']
         locs = map_estimates['loc']
         scales = map_estimates['scale']

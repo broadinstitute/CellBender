@@ -4,11 +4,11 @@ from cellbender.remove_background.downstream import \
     load_anndata_from_input, \
     load_anndata_from_input_and_output, \
     _load_anndata_from_input_and_decontx
-from cellbender.remove_background.data.dataset import pca_2d
 from cellbender.base_cli import get_version
 from cellbender.remove_background import consts
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import scipy.sparse as sp
 from IPython.display import display, Markdown, HTML
 
@@ -20,6 +20,10 @@ from typing import Dict, Optional
 
 warnings = []
 TIMEOUT = 1200  # twenty minutes should always be way more than enough
+
+# counteract an error when I run locally
+# https://stackoverflow.com/questions/53014306/error-15-initializing-libiomp5-dylib-but-found-libiomp5-dylib-already-initial
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
 run_notebook_str = lambda file: \
     f'jupyter nbconvert ' \
@@ -141,7 +145,12 @@ def generate_summary_plots(input_file: str,
             display(Markdown('WARNING: There is an entry in the output greater than the input'))
 
     display(Markdown('## Examine how many counts were removed in total'))
-    assess_overall_count_removal(adata, raw_full_adata=raw_full_adata, out_key=out_key)
+    try:
+        assess_overall_count_removal(adata, raw_full_adata=raw_full_adata, out_key=out_key)
+    except ValueError:
+        display(Markdown('Skipping assessment over overall count removal. Presumably '
+                         'this is due to including the whole dataset in '
+                         '--total-droplets-included.'))
 
     # plot learning curve
     if out_key == 'cellbender':
@@ -188,7 +197,7 @@ def generate_summary_plots(input_file: str,
     # "mixed species" plots
     mixed_species_plots(adata, input_layer_key=input_layer_key, output_layer_key=out_key)
 
-    if dev_mode and (truth_file is not None):
+    if dev_mode or (truth_file is not None):
 
         # accuracy plots ==========================================
 
@@ -299,23 +308,23 @@ def generate_summary_plots(input_file: str,
         else:
             display(Markdown('Skipping gene expression embedding assessment.'))
 
-        if truth_file is not None:
+    if truth_file is not None:
 
-            # ROC curves
-            display(Markdown('## Quantification of performance'))
-            display(Markdown('Here we take a look at removal of noise counts from cell '
-                             'containing droplets only.'))
-            true_fpr = cell_roc_count_roc(
-                output_csr=adata.layers[out_key],
-                input_csr=adata.layers[input_layer_key],
-                truth_csr=adata.layers['truth'],
-                cell_calls=(adata.obs['cell_probability'] > 0.5),
-                truth_cell_labels=adata.obs['truth_cell_label'],
-            )
-            if true_fpr > adata.uns['target_false_positive_rate']:
-                warnings.append('FPR exceeds target FPR.')
-                display(Markdown(f'WARNING: FPR of {true_fpr:.4f} exceeds target FPR of '
-                                 f'{adata.uns["target_false_positive_rate"]}'))
+        # ROC curves
+        display(Markdown('## Quantification of performance'))
+        display(Markdown('Here we take a look at removal of noise counts from cell '
+                         'containing droplets only.'))
+        true_fpr = cell_roc_count_roc(
+            output_csr=adata.layers[out_key],
+            input_csr=adata.layers[input_layer_key],
+            truth_csr=adata.layers['truth'],
+            cell_calls=(adata.obs['cell_probability'] > 0.5),
+            truth_cell_labels=adata.obs['truth_cell_label'],
+        )
+        if true_fpr > adata.uns['target_false_positive_rate']:
+            warnings.append('FPR exceeds target FPR.')
+            display(Markdown(f'WARNING: FPR of {true_fpr:.4f} exceeds target FPR of '
+                             f'{adata.uns["target_false_positive_rate"]}'))
 
     display(Markdown('# Summary of warnings:'))
     if len(warnings) == 0:
@@ -390,15 +399,27 @@ def assess_overall_count_removal(adata, raw_full_adata, input_layer_key='raw', o
 
     estimated_ambient_per_droplet = np.exp(adata.uns['empty_droplet_size_lognormal_loc'])
     expected_fraction_removed_from_cells = estimated_ambient_per_droplet * cells.sum() / initial_counts
-    fpr = adata.uns['target_false_positive_rate']
-    expected_percentage = (expected_fraction_removed_from_cells + fpr) * 100
+
+    fpr = adata.uns['target_false_positive_rate'].item()  # this is an np.ndarray with one element
+    cohort_mode = False
+    if type(fpr) != float:
+        cohort_mode = True
+
     print('Rough estimate of expectations based on nothing but the plot above:')
     print(f'roughly {estimated_ambient_per_droplet * cells.sum():.0f} noise counts '
           f'should be in non-empty droplets')
     print(f'that is approximately {expected_fraction_removed_from_cells * 100:.2f}% of '
           f'the counts in non-empty droplets')
-    print(f'with a false-positive-rate [FPR] of {fpr * 100}%, we would expect to remove about '
-          f'{expected_percentage:.2f}% of the counts in non-empty droplets')
+
+    if not cohort_mode:
+        expected_percentage = (expected_fraction_removed_from_cells + fpr) * 100
+        print(f'with a false positive rate [FPR] of {fpr * 100}%, we would expect to remove about '
+              f'{expected_percentage:.2f}% of the counts in non-empty droplets')
+    else:
+        expected_percentage = expected_fraction_removed_from_cells * 100
+        print(f'ran in cohort mode, so no false positive rate [FPR] target was set, '
+              f'but we would still expect to remove about '
+              f'{expected_percentage:.2f}% of the counts in non-empty droplets')
 
     display(Markdown('\n'))
 
@@ -419,11 +440,11 @@ def assess_overall_count_removal(adata, raw_full_adata, input_layer_key='raw', o
     elif removed_percentage - expected_percentage > 5:
         display(Markdown('The algorithm seems to have removed more overall counts '
                          'than would be naively expected.'))
-        warnings.append('Algorithm removed more counts overall than naive expectations.',)
+        warnings.append('Algorithm removed more counts overall than naive expectations.', )
     elif expected_percentage - removed_percentage > 5:
         display(Markdown('The algorithm seems to have removed fewer overall counts '
                          'than would be naively expected.'))
-        warnings.append('Algorithm removed fewer counts overall than naive expectations.',)
+        warnings.append('Algorithm removed fewer counts overall than naive expectations.', )
 
 
 def assess_learning_curve(adata,
@@ -516,7 +537,8 @@ def assess_learning_curve(adata,
         warnings.append('Back-tracking in training ELBO.')
         display(Markdown('- We typically expect to see the training ELBO increase almost '
                          'monotonically.  This curve seems to have a concerted '
-                         f'period of motion in the wrong direction near epoch {backtracking_ind}.'))
+                         f'period of motion in the wrong direction near epoch {backtracking_ind}. '
+                         f'If this is early in training, this is probably okay.'))
     if runaway_test:
         warnings.append('Final test ELBO is much lower than the max test ELBO.')
         display(Markdown('- We hope to see the test ELBO follow the training ELBO, '
@@ -545,7 +567,7 @@ def assess_learning_curve(adata,
                          '--epochs might be indicated.  Consider re-running '
                          'for more epochs to compare the results.'))
     else:
-        display(Markdown('This learning curve looks totally normal.'))
+        display(Markdown('This learning curve looks normal.'))
 
 
 def plot_learning_curve(adata):
@@ -930,7 +952,7 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
     s = plt.scatter(x=adata.obsm['X_pca'][:, 0][cells][sizeorder],
                     y=adata.obsm['X_pca'][:, 1][cells][sizeorder],
                     c=np.log10(adata.obs['cell_size'][cells][sizeorder]),
-                    s=5,
+                    s=3,
                     cmap='brg',
                     alpha=0.5)
     plt.title('Gene expression embedding\ncolored by log10 inferred cell size $d_n$')
@@ -1669,3 +1691,18 @@ def plot_roc_points(tp: np.ndarray,
         plt.show()
     else:
         return fig
+
+
+def pca_2d(mat: np.ndarray) -> torch.Tensor:
+    """Perform PCA using pytorch and return top 2 PCs
+
+    Args:
+        mat: matrix where rows are observations and columns are features
+
+    Returns:
+        out: matrix where rows are observations and columns are top 2 PCs
+    """
+
+    A = torch.tensor(mat)
+    U, S, V = torch.pca_lowrank(A)
+    return torch.matmul(A, V[:, :2])

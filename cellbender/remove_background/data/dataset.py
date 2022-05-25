@@ -304,8 +304,8 @@ class SingleCellRNACountsDataset:
 
             # Set the low UMI count cutoff to be the greater of either
             # the user input value, or an empirically-derived value.
-            empirical_low_UMI = int(self.priors['empty_counts'] *
-                                    consts.EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD)
+            factor = consts.EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD
+            empirical_low_UMI = int(self.priors['empty_counts'] * factor)
             low_UMI_count_cutoff = max(low_UMI_count_cutoff, empirical_low_UMI)
             logger.info(f"Excluding barcodes with counts below {low_UMI_count_cutoff}")
 
@@ -446,10 +446,15 @@ class SingleCellRNACountsDataset:
             # TODO might add a failsafe in case this fit doesn't go well...
 
             # Cut off low counts.
+            logger.debug(f'Low count threshold is {self.low_count_threshold}')
             counts = counts[counts > self.low_count_threshold]
+
+            # TODO: rethink this "mode" approach, which can fail (especially on simulations)
+
             log_counts = torch.tensor(counts).float().log()
             log_counts = torch.round(log_counts * 5.) / 5.
             log_mode = log_counts.mode()[0].item()
+            logger.debug(f'Mode of log counts, rounded to nearest multiple of five: {log_mode}')
 
             # Gaussian PDF is about 60% peak height at 1 stdev away.
             x = np.linspace(log_counts.min().item(), log_counts.max().item(), num=100)
@@ -462,7 +467,11 @@ class SingleCellRNACountsDataset:
             self.priors['surely_empty_count_estimate'] = np.exp(log_mode + 2 * stdev)
             self.priors['total_droplet_barcodes'] = \
                 np.sum(counts > self.priors['surely_empty_count_estimate']).item() + 5000
+            logger.debug(f'surely_empty_count_estimate = {self.priors["surely_empty_count_estimate"]}')
+            logger.debug(f'total_droplet_barcodes = {self.priors["total_droplet_barcodes"]}')
             cutoff = np.exp(log_mode - 3 * stdev)
+            logger.debug(f'Cutting off counts below {cutoff} for the purposes '
+                         f'of GMM fitting: assuming they represent barcode errors')
             counts = counts[counts > cutoff]
 
             # Fit a Gaussian mixture model to the counts.
@@ -474,15 +483,28 @@ class SingleCellRNACountsDataset:
                       verbose=False)
             gmm.train(epochs=consts.GMM_EPOCHS)
             self.gmm = gmm  # save this for later plotting
-            map_est = gmm.map_estimate()
+
+            map_est = gmm.map_estimate(sort_by='weight')
+
+            # TODO: temp plotting upfront
+            # UMI count prior GMM plot.
+            fig = self.gmm.plot_summary()
+            fig.savefig('umi_hist.pdf', bbox_inches='tight', format='pdf')
+            logger.info("TEMP: Saved UMI count plot as umi_hist.pdf")
+
+            # TODO ======
 
             # Smallest mode is always empties.
             self.priors['empty_counts'] = np.exp(map_est['loc'][0]).item()
+            logger.debug('MAP estimates from GMM fit to counts')
+            logger.debug(map_est)
+            logger.debug(f'{len(map_est["loc"])} peaks found')
 
             # Other modes are cells: currently the prior mixes them all.
             # Find a cutoff midway between empties and lowest cell mode.
             # TODO: ensure we have a cell mode at all! (edge case where we only fit empties...)
             if len(map_est['loc']) < 2:
+                logger.debug('Attempting a workaround since only one peak was found by GMM')
                 # We failed to find a cell peak, so make an estimate
                 torch_counts = torch.tensor(counts, device='cpu').float().log()
                 mode = torch_counts.mode()[0].item()
@@ -498,6 +520,19 @@ class SingleCellRNACountsDataset:
             cell_logic = (counts > np.exp(self.priors['log_counts_crossover']))
             self.priors['n_cells'] = np.sum(cell_logic).item()
             self.priors['cell_counts'] = np.median(counts[cell_logic]).item()
+
+            # TODO: playing with variance priors 2022/05/16
+            # TODO: seems that a slim d_cell_scale prior is helpful in 0.2.0
+            # variance_priors = self._estimate_prior_variances(
+            #     empty_count_empirical_mean=np.exp(map_est['loc'][0]),
+            #     empty_count_empirical_variance=map_est['scale'][0],
+            #     log_cell_count_empirical_variance=np.log1p(counts[cell_logic]).var().item(),
+            # )
+            # self.priors['d_std'] = np.sqrt(variance_priors['d_cell_var'])
+            # self.priors['d_empty_std'] = np.sqrt(variance_priors['d_empty_var'])
+
+            # TODO ===============^^
+
             self.priors['d_std'] = \
                 np.std(np.log(counts)[np.log(counts) > self.priors['log_counts_crossover']]).item()
             self.priors['d_empty_std'] = \
@@ -516,7 +551,6 @@ class SingleCellRNACountsDataset:
 
             logger.debug(f"Prior on cell count std is {int(self.priors['d_std'])}")
             logger.debug(f"Prior on empty counts std is {int(self.priors['d_empty_std'])}")
-
 
         # # Estimate the log UMI count turning point between cells and 'empties'.
         # self.priors['log_counts_crossover'] = \
@@ -558,6 +592,33 @@ class SingleCellRNACountsDataset:
         #     # Estimate the ambient gene expression profile.
         #     self.priors['chi_ambient'], self.priors['chi_bar'] = \
         #         estimate_chi_ambient_from_dataset(self)
+
+    def _estimate_prior_variances(self,
+                                  empty_count_empirical_mean: float,
+                                  empty_count_empirical_variance: float,
+                                  log_cell_count_empirical_variance: float,
+                                  negbinom_overdispersion_phi: float = consts.PHI_LOC_PRIOR)\
+            -> Dict[str, float]:
+        """Estimate priors for variances
+
+        Strategy:
+            Assume the real variance of the number of molecules in the empties is
+            due to being a Poisson draw: thus the variance is the mean.
+            Overdispersion in the empirical variance beyond this is due to
+            epsilon, and can be calculated using the law of total variance.
+            Once the variance of epsilon is known, and given the overdispersion
+            Phi of the negative binomial used to sample cell counts, the
+            variance of d_cell can likewise be calculated.  This part is an
+            empirical estimate rather than derived.
+
+        """
+        gamma_var = ((empty_count_empirical_variance - 2. * empty_count_empirical_mean)
+                     / (empty_count_empirical_mean * (1. + empty_count_empirical_mean)))
+        epsilon_c = 1. / gamma_var
+        d_cell_var = log_cell_count_empirical_variance - negbinom_overdispersion_phi - 1. / epsilon_c
+        return {'epsilon_c': torch.clamp(torch.tensor(epsilon_c), min=10., max=10000.).item(),
+                'd_empty_var': empty_count_empirical_mean,
+                'd_cell_var': torch.clamp(torch.tensor(d_cell_var), min=0.01, max=1.).item()}
 
     def get_count_matrix(self) -> sp.csr.csr_matrix:
         """Get the count matrix, trimmed if trimming has occurred."""
@@ -699,7 +760,7 @@ class SingleCellRNACountsDataset:
         if inferred_model is not None:
             self.posterior = ProbPosterior(dataset_obj=self,
                                            vi_model=inferred_model,
-                                           fpr=self.fpr[0],  # fist FPR
+                                           fpr=self.fpr[0],  # first FPR
                                            posterior_batch_size=posterior_batch_size)
 
             # Encoded values of latent variables.
@@ -751,6 +812,10 @@ class SingleCellRNACountsDataset:
 
         logger.info("Preparing to write outputs to file...")
 
+        # Output file naming.
+        file_dir, file_base = os.path.split(output_file)
+        file_name = os.path.splitext(os.path.basename(file_base))[0]
+
         # Obtain latents from posterior.
         if self.posterior.name != 'naive':  # TODO: handle 'naive' as a Posterior too, and eliminate if-else
             # Encoded values of latent variables.
@@ -766,6 +831,52 @@ class SingleCellRNACountsDataset:
             p = torch.ones(self.analyzed_barcode_inds.size)
             epsilon = None
             phi_params = None
+
+        # Figure out the indices of barcodes that have cells.
+        if p is not None:
+            p[np.isnan(p)] = 0.
+            cell_barcode_inds = self.analyzed_barcode_inds
+            if (p > consts.CELL_PROB_CUTOFF).sum() == 0:
+                logger.warning("Warning: Found no cells!")
+            analyzed_barcode_logic = (p > consts.CELL_PROB_CUTOFF)
+        else:
+            cell_barcode_inds = self.analyzed_barcode_inds
+            analyzed_barcode_logic = np.arange(0, cell_barcode_inds.size)
+
+        # Save barcodes determined to contain cells as _cell_barcodes.csv
+        cell_barcodes = self.data['barcodes'][self.analyzed_barcode_inds[analyzed_barcode_logic]]
+        try:
+            barcode_names = np.array([str(cell_barcodes[i], encoding='UTF-8')
+                                      for i in range(cell_barcodes.size)])
+        except UnicodeDecodeError:
+            # necessary if barcodes are ints
+            barcode_names = cell_barcodes
+        except TypeError:
+            # necessary if barcodes are already decoded
+            barcode_names = cell_barcodes
+        bc_file_name = os.path.join(file_dir, file_name + "_cell_barcodes.csv")
+        np.savetxt(bc_file_name, barcode_names, delimiter=',', fmt='%s')
+        logger.info(f"Saved cell barcodes in {bc_file_name}")
+
+        # Save plots, if called for.
+        if save_plots:
+            try:
+                # File naming.
+                gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
+                summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
+
+                # UMI count prior GMM plot.
+                fig = self.gmm.plot_summary(visium=self.visium)
+                fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
+                logger.info(f"Saved UMI count plot as {gmm_fig_name}")
+
+                # Three-panel output summary plot.
+                fig = self.plot_summary(inferred_model=inferred_model, p=p, z=z)
+                fig.savefig(summary_fig_name, bbox_inches='tight', format='pdf')
+                logger.info(f"Saved summary plots as {summary_fig_name}")
+
+            except Exception:
+                logger.warning("Unable to save all plots.")
 
         # Estimate the ambient-background-subtracted UMI count matrix.
         if self.model_name == 'simple':
@@ -784,17 +895,6 @@ class SingleCellRNACountsDataset:
         # Convert the indices from trimmed gene set to original gene indices.
         ambient_expression = np.zeros(self.data['matrix'].shape[1])
         ambient_expression[self.analyzed_gene_inds] = ambient_expression_trimmed
-
-        # Figure out the indices of barcodes that have cells.
-        if p is not None:
-            p[np.isnan(p)] = 0.
-            cell_barcode_inds = self.analyzed_barcode_inds
-            if (p > consts.CELL_PROB_CUTOFF).sum() == 0:
-                logger.warning("Warning: Found no cells!")
-            analyzed_barcode_logic = (p > consts.CELL_PROB_CUTOFF)
-        else:
-            cell_barcode_inds = self.analyzed_barcode_inds
-            analyzed_barcode_logic = np.arange(0, cell_barcode_inds.size)
 
         def _write_matrix(file: str,
                           inferred_count_matrix: sp.csc_matrix,
@@ -863,9 +963,6 @@ class SingleCellRNACountsDataset:
             return write_succeeded
 
         # Write to output file, for each lambda specified by user.
-        file_dir, file_base = os.path.split(output_file)
-        file_name = os.path.splitext(os.path.basename(file_base))[0]
-
         logger.debug('Staring FPR loop')
 
         for i, fpr in enumerate(self.fpr):
@@ -898,6 +995,9 @@ class SingleCellRNACountsDataset:
             # Create an output file for this FPR.
             name_suffix = (f'_FPR_{fpr}' if len(self.fpr) > 1 else '')
             fpr_output_filename = os.path.join(file_dir, file_name + name_suffix + '.h5')
+
+            fpr = np.array('cohort', dtype=str) if (fpr == 'cohort') else fpr  # for pytables h5 writing
+
             write_succeeded = _write_matrix(file=fpr_output_filename,
                                             inferred_count_matrix=inferred_count_matrix,
                                             fpr=fpr)
@@ -929,51 +1029,16 @@ class SingleCellRNACountsDataset:
                     logger.warning("Unable to create report.")
 
             # Write output metrics file.
-            # try:
-            df = self.collect_output_metrics(inferred_count_matrix=inferred_count_matrix,
-                                             fpr=fpr,
-                                             cell_logic=(p >= consts.CELL_PROB_CUTOFF),
-                                             loss=inferred_model.loss)
-            metrics_file_name = os.path.join(file_dir, file_name + name_suffix + '_metrics.csv')
-            df.to_csv(metrics_file_name, index=True, header=False, float_format='%.3f')
-            logger.info(f'Saved output metrics as {metrics_file_name}')
-            # except Exception:
-            #     logger.warning("Unable to collect output metrics.")
-
-        # Save barcodes determined to contain cells as _cell_barcodes.csv
-        cell_barcodes = self.data['barcodes'][self.analyzed_barcode_inds[analyzed_barcode_logic]]
-        try:
-            barcode_names = np.array([str(cell_barcodes[i], encoding='UTF-8')
-                                      for i in range(cell_barcodes.size)])
-        except UnicodeDecodeError:
-            # necessary if barcodes are ints
-            barcode_names = cell_barcodes
-        except TypeError:
-            # necessary if barcodes are already decoded
-            barcode_names = cell_barcodes
-        bc_file_name = os.path.join(file_dir, file_name + "_cell_barcodes.csv")
-        np.savetxt(bc_file_name, barcode_names, delimiter=',', fmt='%s')
-        logger.info(f"Saved cell barcodes in {bc_file_name}")
-
-        # Save plots, if called for.
-        if save_plots:
             try:
-                # File naming.
-                gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
-                summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
-
-                # UMI count prior GMM plot.
-                fig = self.gmm.plot_summary()
-                fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
-                logger.info(f"Saved UMI count plot as {gmm_fig_name}")
-
-                # Three-panel output summary plot.
-                fig = self.plot_summary(inferred_model=inferred_model, p=p, z=z)
-                fig.savefig(summary_fig_name, bbox_inches='tight', format='pdf')
-                logger.info(f"Saved summary plots as {summary_fig_name}")
-
+                df = self.collect_output_metrics(inferred_count_matrix=inferred_count_matrix,
+                                                 fpr=fpr,
+                                                 cell_logic=(p >= consts.CELL_PROB_CUTOFF),
+                                                 loss=inferred_model.loss)
+                metrics_file_name = os.path.join(file_dir, file_name + name_suffix + '_metrics.csv')
+                df.to_csv(metrics_file_name, index=True, header=False, float_format='%.3f')
+                logger.info(f'Saved output metrics as {metrics_file_name}')
             except Exception:
-                logger.warning("Unable to save all plots.")
+                logger.warning("Unable to collect output metrics.")
 
         return write_succeeded
 
@@ -1043,7 +1108,7 @@ class SingleCellRNACountsDataset:
 
     def collect_output_metrics(self,
                                inferred_count_matrix: sp.csr_matrix,
-                               fpr: float,
+                               fpr: Union[float, str],
                                cell_logic,
                                loss) -> pd.DataFrame:
         """Create a table with a few output metrics. The idea is for these to

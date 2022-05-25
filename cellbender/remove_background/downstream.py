@@ -1,14 +1,11 @@
 """Functions for downstream work with outputs of remove-background."""
 
 from cellbender.remove_background.data.io import load_data
-# from cellbender.remove_background.data.dataset import _overwrite_matrix_with_columns_from_another
 
 import tables
 import numpy as np
 import scipy.sparse as sp
-import pandas as pd
 import anndata
-import os
 from typing import Dict, Optional
 
 
@@ -43,21 +40,26 @@ def anndata_from_h5(file: str,
     d = dict_from_h5(file)
     X = sp.csc_matrix((d.pop('data'), d.pop('indices'), d.pop('indptr')),
                       shape=d.pop('shape')).transpose().tocsr()
-    cell_prob_key = [k for k in d.keys() if 'cell_prob' in k]  # I have changed the name over time
-    low_prob_cells_absent = False if (len(cell_prob_key) == 0) else (d[cell_prob_key[0]].min() > 0.1)
+
+    # check and see if we have barcode index annotations, and if the file is filtered
+    barcode_key = [k for k in d.keys() if (('barcode' in k) and ('ind' in k))]
+    if len(barcode_key) > 0:
+        max_barcode_ind = d[barcode_key[0]].max()
+        filtered_file = (max_barcode_ind >= X.shape[0])
+    else:
+        filtered_file = True
 
     if analyzed_barcodes_only:
-        if 'barcode_indices_for_latents' in d.keys():
+        if filtered_file:
+            # filtered file being read, so we don't need to subset
+            print('Assuming we are loading a "filtered" file that contains only cells.')
+            pass
+        elif 'barcode_indices_for_latents' in d.keys():
             X = X[d['barcode_indices_for_latents'], :]
             d['barcodes'] = d['barcodes'][d['barcode_indices_for_latents']]
         elif 'barcodes_analyzed_inds' in d.keys():
             X = X[d['barcodes_analyzed_inds'], :]
             d['barcodes'] = d['barcodes'][d['barcodes_analyzed_inds']]
-        elif low_prob_cells_absent:
-            # TODO: bit of a hack
-            # filtered file being read, so we don't need to subset
-            print('Assuming we are loading a "filtered" file that contains only cells.')
-            pass
         else:
             print('Warning: analyzed_barcodes_only=True, but the key '
                   '"barcodes_analyzed_inds" or "barcode_indices_for_latents" '
@@ -69,7 +71,8 @@ def anndata_from_h5(file: str,
     adata = anndata.AnnData(X=X,
                             obs={'barcode': d.pop('barcodes').astype(str)},
                             var={'gene_name': (d.pop('gene_names') if 'gene_names' in d.keys()
-                                               else d.pop('name')).astype(str)})
+                                               else d.pop('name')).astype(str)},
+                            dtype=X.dtype)
     adata.obs.set_index('barcode', inplace=True)
     adata.var.set_index('gene_name', inplace=True)
 
@@ -107,6 +110,9 @@ def anndata_from_h5(file: str,
 
 def _fill_adata_slots_automatically(adata, d):
     """Add other information to the adata object in the appropriate slot."""
+
+    # TODO: what about "features_analyzed_inds"?  If not all features are analyzed, does this work?
+
     for key, value in d.items():
         try:
             if value is None:
@@ -167,6 +173,7 @@ def load_anndata_from_input_and_output(input_file: str,
                                        output_file: str,
                                        analyzed_barcodes_only: bool = True,
                                        input_layer_key: str = 'cellranger',
+                                       retain_input_metadata: bool = False,
                                        gene_expression_encoding_key: str = 'cellbender_embedding',
                                        truth_file: Optional[str] = None) -> 'anndata.AnnData':
     """Load remove-background output count matrix into an anndata object,
@@ -185,6 +192,9 @@ def load_anndata_from_input_and_output(input_file: str,
             properly into adata.obs and adata.obsm, rather than adata.uns.
         input_layer_key: Key of the anndata.layer that is created for the raw
             input count matrix.
+        retain_input_metadata: In addition to loading the CellBender metadata,
+            which happens automatically, set this to True to retain all the
+            metadata from the raw input file as well.
         gene_expression_encoding_key: The CellBender gene expression embedding
             will be loaded into adata.obsm[gene_expression_encoding_key]
         truth_file: File containing truth data if this is a simulation
@@ -204,23 +214,30 @@ def load_anndata_from_input_and_output(input_file: str,
     # Subset the raw dataset to the relevant barcodes.
     adata_raw = adata_raw[adata_out.obs.index]
 
+    # TODO: keep the stuff from the raw file too: from obs and var and uns
+    # TODO: maybe use _fill_adata_slots_automatically()?  or just copy stuff
+
     # Put count matrices into 'layers' in anndata for clarity.
     adata_out.layers[input_layer_key] = adata_raw.X.copy()
     adata_out.layers['cellbender'] = adata_out.X.copy()
 
     # Pre-compute a bit of metadata.
-    adata_out.var['n_' + input_layer_key] = np.array(adata_out.layers[input_layer_key].sum(axis=0)).squeeze()
-    adata_out.var['n_cellbender'] = np.array(adata_out.layers['cellbender'].sum(axis=0)).squeeze()
-    adata_out.obs['n_' + input_layer_key] = np.array(adata_out.layers[input_layer_key].sum(axis=1)).squeeze()
-    adata_out.obs['n_cellbender'] = np.array(adata_out.layers['cellbender'].sum(axis=1)).squeeze()
+    adata_out.var['n_' + input_layer_key] = \
+        np.array(adata_out.layers[input_layer_key].sum(axis=0), dtype=int).squeeze()
+    adata_out.var['n_cellbender'] = \
+        np.array(adata_out.layers['cellbender'].sum(axis=0), dtype=int).squeeze()
+    adata_out.obs['n_' + input_layer_key] = \
+        np.array(adata_out.layers[input_layer_key].sum(axis=1), dtype=int).squeeze()
+    adata_out.obs['n_cellbender'] = \
+        np.array(adata_out.layers['cellbender'].sum(axis=1), dtype=int).squeeze()
 
     # Load truth data, if present.
     if truth_file is not None:
         adata_truth = anndata_from_h5(truth_file, analyzed_barcodes_only=False)
         adata_truth = adata_truth[adata_out.obs.index]
         adata_out.layers['truth'] = adata_truth.X.copy()
-        adata_out.var['n_truth'] = np.array(adata_out.layers['truth'].sum(axis=0)).squeeze()
-        adata_out.obs['n_truth'] = np.array(adata_out.layers['truth'].sum(axis=1)).squeeze()
+        adata_out.var['n_truth'] = np.array(adata_out.layers['truth'].sum(axis=0), dtype=int).squeeze()
+        adata_out.obs['n_truth'] = np.array(adata_out.layers['truth'].sum(axis=1), dtype=int).squeeze()
         for key in adata_truth.obs.keys():
             if key.startswith('truth_'):
                 adata_out.obs[key] = adata_truth.obs[key].copy()

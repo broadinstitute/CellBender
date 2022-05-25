@@ -43,7 +43,7 @@ def calculate_lambda(model_type: str,
         #        + d_empty.unsqueeze(-1)) * chi_bar
         # lam = (rho.unsqueeze(-1) * y.unsqueeze(-1) * d_cell.unsqueeze(-1)
         #        + d_empty.unsqueeze(-1)) * chi_bar * epsilon.unsqueeze(-1)
-        lam = (rho.unsqueeze(-1) * chi_bar *
+        lam = (rho.unsqueeze(-1) * chi_bar * epsilon.unsqueeze(-1) *
                (y.unsqueeze(-1) * d_cell.unsqueeze(-1) + d_empty.unsqueeze(-1)))
 
     elif model_type == "full":
@@ -126,6 +126,8 @@ class RemoveBackgroundPyroModel(nn.Module):
                  n_droplets: int,
                  analyzed_gene_names: np.ndarray,
                  empty_UMI_threshold: int,
+                 log_counts_crossover: float,
+                 visium: bool,
                  use_cuda: bool,
                  phi_loc_prior: float = consts.PHI_LOC_PRIOR,
                  phi_scale_prior: float = consts.PHI_SCALE_PRIOR,
@@ -153,6 +155,8 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.loss = {'train': {'epoch': [], 'elbo': []},
                      'test': {'epoch': [], 'elbo': []}}
         self.empty_UMI_threshold = empty_UMI_threshold
+        self.counts_crossover = np.exp(log_counts_crossover)
+        self.visium = visium
 
         # Determine whether we are working on a GPU.
         if use_cuda:
@@ -397,6 +401,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # since we know these droplets by their UMI counts.
                 counts = x.sum(dim=-1, keepdim=False)
                 surely_empty_mask = (counts < self.empty_UMI_threshold).bool().to(self.device)
+                surely_cell_mask = (counts >= self.d_cell_loc_prior.exp()).bool().to(self.device)
 
                 with poutine.mask(mask=surely_empty_mask):
 
@@ -407,7 +412,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                         else:
                             r = None
 
-                        # Semi-supervision of ambient expression.
+                        # Semi-supervision of ambient expression using all empties.
                         lam = self._calculate_lambda(epsilon=epsilon.detach(),
                                                      chi_ambient=chi_ambient,
                                                      d_empty=d_empty,
@@ -419,30 +424,70 @@ class RemoveBackgroundPyroModel(nn.Module):
                                     dist.Poisson(rate=lam + consts.POISSON_EPS_SAFEGAURD).to_event(1),
                                     obs=x.reshape(-1, self.n_genes))
 
+                # Grab our posterior for the logit cell probability (this is a workaround).
+                p_logit_posterior = pyro.sample("p_passback",
+                                                NullDist(torch.zeros(1).to(self.device))
+                                                .expand_by([x.size(0)]))
+
+                # empties_inferred_cells_mask = (torch.where(p_logit_posterior >= 0,
+                #                                            torch.ones_like(counts),
+                #                                            torch.zeros_like(counts))
+                #                                .bool().to(self.device) & surely_empty_mask)
+                #
+                # cells_inferred_empties_mask = (torch.where(((counts >= self.d_cell_loc_prior.exp())
+                #                                             & (p_logit_posterior <= 0)),
+                #                                            torch.ones_like(counts),
+                #                                            torch.zeros_like(counts))
+                #                                .bool().to(self.device))
+                empties_inferred_cells_mask = (surely_empty_mask & (p_logit_posterior >= 0)).bool().to(self.device)
+                cells_inferred_empties_mask = (surely_cell_mask & (p_logit_posterior <= 0)).bool().to(self.device)
+
+                # For empties where our inference is currently wrong, impose a big penalty.
+                with poutine.mask(mask=empties_inferred_cells_mask):
+
                     # Semi-supervision of cell probabilities.
                     with poutine.scale(scale=consts.REG_SCALE_EMPTY_PROB):
 
-                        p_logit_posterior = pyro.sample("p_passback",
-                                                        NullDist(torch.zeros(1).to(self.device))
-                                                        .expand_by([x.size(0)]))
+                        pyro.sample("obs_empty_incorrect_y",
+                                    dist.Normal(loc=p_logit_posterior, scale=consts.REG_LOGIT_SCALE),
+                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
 
-                        pyro.sample("obs_empty_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=1.),
-                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_SCALE)
+                # For cells where our inference is currently wrong, impose a big penalty.
+                with poutine.mask(mask=cells_inferred_empties_mask):
 
-                # Additionally use some high-count droplets for cell prob regularization.
-                surely_cell_mask = (torch.where(counts >= self.d_cell_loc_prior.exp(),
-                                                torch.ones_like(counts),
-                                                torch.zeros_like(counts))
-                                    .bool().to(self.device))
-
-                with poutine.mask(mask=surely_cell_mask):
+                    # Semi-supervision of cell probabilities.
                     with poutine.scale(scale=consts.REG_SCALE_CELL_PROB):
-                        pyro.sample("obs_cell_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=1.),
-                                    obs=torch.ones_like(y) * consts.REG_LOGIT_SCALE)
 
-        # TODO: this kind of regularizer messes up the actual reported ELBO values
+                        pyro.sample("obs_cell_incorrect_y",
+                                    dist.Normal(loc=p_logit_posterior, scale=consts.REG_LOGIT_SCALE),
+                                    obs=torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+
+                # Softer semi-supervision to encourage cell probabilities to do the right thing.
+                probably_empty_mask = (counts < self.counts_crossover).bool().to(self.device)
+                probably_cell_mask = (counts >= self.counts_crossover).bool().to(self.device)
+
+                with poutine.mask(mask=probably_empty_mask):
+                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
+                        pyro.sample("obs_probably_empty_y",
+                                    dist.Normal(loc=p_logit_posterior,
+                                                scale=(consts.REG_LOGIT_SCALE if self.visium
+                                                       else consts.REG_LOGIT_SOFT_SCALE)),
+                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+
+                with poutine.mask(mask=surely_empty_mask):
+                    with poutine.scale(scale=consts.REG_SCALE_EMPTY_PROB):
+                        pyro.sample("obs_empty_y",
+                                    dist.Normal(loc=p_logit_posterior, scale=1.0),
+                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+
+                with poutine.mask(mask=probably_cell_mask):
+                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
+                        pyro.sample("obs_probably_cell_y",
+                                    dist.Normal(loc=p_logit_posterior,
+                                                scale=(consts.REG_LOGIT_SCALE if self.visium
+                                                       else consts.REG_LOGIT_SOFT_SCALE)),
+                                    obs=torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+
         # Regularization of epsilon.mean()
         # Do it in two batches to reduce the likelihood of compensatory effects in different cell types.
         if surely_cell_mask.sum() >= 2:
@@ -546,7 +591,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                                       .expand_by([x.size(0)]))
 
                 enc = self.encoder(x=x,
-                                   chi_ambient=chi_ambient,
+                                   chi_ambient=chi_ambient.detach(),  # TODO added 20220512
                                    cell_prior_log=self.d_cell_loc_prior)
 
             else:
