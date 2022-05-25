@@ -12,6 +12,7 @@ from typing import Dict, Union, List, Optional
 import logging
 import os
 import gzip
+import traceback
 
 
 logger = logging.getLogger('cellbender')
@@ -782,7 +783,13 @@ def get_matrix_from_anndata(filename: str) \
              in the out['matrix'].
     """
     logger.info(f"AnnData format")
-    adata = anndata.read_h5ad(filename)
+    try:
+        adata = anndata.read_h5ad(filename)
+    except anndata._io.utils.AnnDataReadError as e:
+        logger.error(f'A call to anndata.read_h5ad() with anndata {anndata.__version__} '
+                     f'threw AnnDataReadError: ')
+        logger.error(traceback.format_exc())
+        raise e
     return _dict_from_anndata(adata)
 
 
@@ -821,7 +828,13 @@ def get_matrix_from_loom(filename: str) \
              in the out['matrix'].
     """
     logger.info(f"Loom format, expecting Optimus pipeline conventions")
-    adata = anndata.read_loom(filename, sparse=True, X_name='')
+    try:
+        adata = anndata.read_loom(filename, sparse=True, X_name='')
+    except anndata._io.utils.AnnDataReadError as e:
+        logger.error(f'A call to anndata.read_loom() with anndata {anndata.__version__} '
+                     f'threw AnnDataReadError: ')
+        logger.error(traceback.format_exc())
+        raise e
     return _dict_from_anndata(adata)
 
 
