@@ -43,12 +43,16 @@ A GPU-enabled docker image is available from the Google Container Registry (GCR)
 
 Older versions are available at the same location, for example as
 
-``us.gcr.io/broad-dsde-methods/cellbender:0.1.0``
+``us.gcr.io/broad-dsde-methods/cellbender:0.2.0``
 
 
 Terra Workflow
 --------------
 
-For `Terra <https://app.terra.bio>`_ users, the following workflow is publicly available:
+For `Terra <https://app.terra.bio>`_ users (or any other users of WDL workflows),
+the following WDL workflow is publicly available:
 
 * `cellbender/remove-background <https://portal.firecloud.org/#methods/cellbender/remove-background/>`_
+
+Some documentation for the WDL is available at the above link, and some is visible
+`on github <https://github.com/broadinstitute/CellBender/tree/master/wdl>`_.

@@ -21,6 +21,8 @@ analysis using Seurat, scanpy, your own custom analysis, etc.
 The output of ``remove-background`` includes a new .h5 count matrix, with background RNA removed,
 that can directly be used in downstream analysis in Seurat or scanpy as if it were the raw dataset.
 
+.. _proposed-pipeline:
+
 Proposed pipeline
 ~~~~~~~~~~~~~~~~~
 
@@ -108,7 +110,7 @@ Quality control checks
     * Check the middle plot to see which droplets have been called as cells.  A converged
       inference procedure should result in the vast majority of cell probabilities
       being very close to either zero or one.  If the cell calls look problematic, check
-      the :ref:`help documentation <remove background reference troubleshooting>`.
+      the :ref:`help documentation <remove background troubleshooting>`.
       Keep in mind that
       ``remove-background`` will output a high cell probability for any droplet that is
       unlikely to be drawn from the ambient background.  This can result in a large number
@@ -127,13 +129,15 @@ Quality control checks
 * Create some validation plots of various analyses with and without
   ``cellbender remove-background``.  One convenient way to do this is in ``scanpy``
   and storing the raw count matrix and the background-removed count matrix as
-  separate `"layers" <https://anndata.readthedocs.io/en/latest/anndata.AnnData.layers.html>`_.
+  separate `"layers" <https://anndata.readthedocs.io/en/latest/generated/anndata.AnnData.layers.html>`_.
 
     * UMAPs with and without (on the same set of cell barcodes)
     * Marker gene dotplots and violin plots (you should see less background)
 
 * Directly subtract the output count matrix from the input count matrix and take a close
   look at what was removed.
+
+.. _best-practices:
 
 Recommended best practices
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

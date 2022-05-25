@@ -12,6 +12,9 @@
 #
 import os
 import sys
+from cellbender.base_cli import get_version
+
+
 dir_, _ = os.path.split(__file__)
 root_dir = os.path.abspath(os.path.join(dir_, '..', '..'))
 sys.path.insert(0, root_dir)
@@ -23,8 +26,8 @@ copyright = '2019, Data Sciences Platform (DSP), Broad Institute'
 author = 'Stephen Fleming, Mehrtash Babadi'
 
 # The full version, including alpha/beta/rc tags
-version = ''
-release = ''
+version = get_version()
+release = get_version()
 
 # -- General configuration ---------------------------------------------------
 
