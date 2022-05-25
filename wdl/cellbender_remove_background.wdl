@@ -51,7 +51,7 @@ task run_cellbender_remove_background_gpu {
     Int? hardware_boot_disk_size_GB = 20
     Int? hardware_preemptible_tries = 2
     Int? hardware_cpu_count = 4
-    Int? hardware_memory_GB = 15
+    Int? hardware_memory_GB = 32
     String? hardware_gpu_type = "nvidia-tesla-t4"
     String? nvidia_driver_version = "470.82.01"  # need >=465.19.01 for CUDA 11.3
 
@@ -163,8 +163,8 @@ workflow cellbender_remove_background {
     File summary_pdf = run_cellbender_remove_background_gpu.pdf
     File raw_umi_histogram_pdf = run_cellbender_remove_background_gpu.umi_pdf
     File cell_barcodes_csv = run_cellbender_remove_background_gpu.cell_csv
-    Array[File] metrics_csv = run_cellbender_remove_background_gpu.metrics_csv
-    Array[File] report = run_cellbender_remove_background_gpu.report
+    Array[File] metrics_csv_array = run_cellbender_remove_background_gpu.metrics_csv
+    Array[File] html_report_array = run_cellbender_remove_background_gpu.report
     Array[File] h5_array = run_cellbender_remove_background_gpu.h5_array
     String output_directory = run_cellbender_remove_background_gpu.output_dir
     File checkpoint_file = run_cellbender_remove_background_gpu.ckpt_file
