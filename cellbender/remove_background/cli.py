@@ -96,9 +96,18 @@ class CLI(AbstractCLI):
         args.use_jit = False
 
         # Ensure false positive rate is between zero and one.
+        fpr_list_correct_dtypes = []  # for a mix of floats and strings later on
         for fpr in args.fpr:
-            assert (fpr > 0.) and (fpr < 1.), \
-                "False positive rate --fpr must be between 0 and 1."
+            try:
+                fpr = float(fpr)
+                assert (fpr > 0.) and (fpr < 1.), \
+                    "False positive rate --fpr must be between 0 and 1."
+            except ValueError:
+                # the input is not a float
+                assert fpr == 'cohort', \
+                    "The only allowed non-float value for FPR is the word 'cohort'."
+            fpr_list_correct_dtypes.append(fpr)
+        args.fpr = fpr_list_correct_dtypes
 
         # Ensure that "exclude_features" specifies allowed features.
         # As of CellRanger 6.0, the possible features are:
@@ -113,6 +122,11 @@ class CLI(AbstractCLI):
                 f"Specified '{feature}' using --exclude-features, but this is " \
                 f"not one of the allowed CellRanger feature designations: " \
                 f"{allowed_features}"
+        if 'Gene Expression' in args.exclude_features:
+            print("Warning: Excluding 'Gene Expression' features from the analysis "
+                  "is not recommended, since other features alone are typically "
+                  "too sparse to form a good prior on cell type, and CellBender "
+                  "relies on being able to construct this sort of prior")
 
         # Automatic training failures and restarts.
         assert args.num_training_tries > 0, "--num-training-tries must be > 0"

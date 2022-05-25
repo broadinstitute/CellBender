@@ -485,41 +485,48 @@ class ProbPosterior(Posterior):
 
         logger.debug(f'Re-calculating a posterior count matrix: FPR = {self.fpr}')
 
-        # Get a dataset of solid cells.
-        cell_inds = np.where(self.latents['p'] > 0.9)[0]
-        if len(cell_inds) == 0:
-            logger.warning('No cells detected (no droplets with posterior '
-                           'cell probability > 0.9)!')
-            logger.info('Relaxing the stringency for "cells" in FPR computation... '
-                        'realize that the FPR here may be inaccurate.')
-            cell_inds = np.argsort(self.latents['p'])[::-1][:200]
-        lambda_mults = np.zeros(5)
+        chi_ambient = pyro.param('chi_ambient')
 
-        logger.debug('Finding optimal posterior regularization factor')
+        if self.fpr == 'cohort':
+            optimal_lambda_mult = 1.
 
-        for i in range(lambda_mults.size):
+        else:
 
-            n_cells = min(self.posterior_batch_size, cell_inds.size)
-            if n_cells == 0:
-                raise ValueError('No cells found!  Cannot compute expected FPR.')
-            cell_ind_subset = self.random.choice(cell_inds, size=n_cells, replace=False)
-            cell_data = (torch.tensor(np.array(self.dataset_obj.get_count_matrix()
-                                               [cell_ind_subset, :].todense()).squeeze())
-                         .float().to(self.vi_model.device))
+            # Get a dataset of solid cells.
+            cell_inds = np.where(self.latents['p'] > 0.9)[0]
+            if len(cell_inds) == 0:
+                logger.warning('No cells detected (no droplets with posterior '
+                               'cell probability > 0.9)!')
+                logger.info('Relaxing the stringency for "cells" in FPR computation... '
+                            'realize that the FPR here may be inaccurate.')
+                cell_inds = np.argsort(self.latents['p'])[::-1][:200]
+            lambda_mults = np.zeros(5)
 
-            # Get the latents mu, alpha, and lambda for those cells.
-            chi_ambient = pyro.param('chi_ambient')
-            map_est = self._param_map_estimates(data=cell_data, chi_ambient=chi_ambient)
+            logger.debug('Finding optimal posterior regularization factor')
 
-            # Find the optimal lambda_multiplier value using those cells and target FPR.
-            lambda_mult = self._lambda_binary_search_given_fpr(cell_data=cell_data,
-                                                               fpr=self.fpr,
-                                                               mu_est=map_est['mu'],
-                                                               lambda_est=map_est['lam'],
-                                                               alpha_est=map_est['alpha'])
-            lambda_mults[i] = lambda_mult
+            for i in range(lambda_mults.size):
 
-        optimal_lambda_mult = np.mean(lambda_mults)
+                n_cells = min(self.posterior_batch_size, cell_inds.size)
+                if n_cells == 0:
+                    raise ValueError('No cells found!  Cannot compute expected FPR.')
+                cell_ind_subset = self.random.choice(cell_inds, size=n_cells, replace=False)
+                cell_data = (torch.tensor(np.array(self.dataset_obj.get_count_matrix()
+                                                   [cell_ind_subset, :].todense()).squeeze())
+                             .float().to(self.vi_model.device))
+
+                # Get the latents mu, alpha, and lambda for those cells.
+                map_est = self._param_map_estimates(data=cell_data, chi_ambient=chi_ambient)
+
+                # Find the optimal lambda_multiplier value using those cells and target FPR.
+                lambda_mult = self._lambda_binary_search_given_fpr(cell_data=cell_data,
+                                                                   fpr=self.fpr,
+                                                                   mu_est=map_est['mu'],
+                                                                   lambda_est=map_est['lam'],
+                                                                   alpha_est=map_est['alpha'])
+                lambda_mults[i] = lambda_mult
+
+            optimal_lambda_mult = np.mean(lambda_mults)
+
         self.lambda_multiplier = optimal_lambda_mult
         logger.info(f'Optimal posterior regularization factor = {optimal_lambda_mult:.3f}')
 

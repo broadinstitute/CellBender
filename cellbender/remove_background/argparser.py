@@ -122,9 +122,13 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "entirely.  In the output count matrix, the "
                                 "counts for these features will be unchanged.")
     subparser.add_argument("--fpr", nargs="+",
-                           type=float, default=[0.01],
+                           default=[0.01],
                            dest="fpr",
-                           help="Target false positive rate in (0, 1).  A false "
+                           help="Target false positive rate in (0, 1), or the "
+                                "word 'cohort', for using a conservative noise "
+                                "removal approach appropriate for a many-sample "
+                                "study involving differential expression.  For "
+                                "numeric FPR values, a false "
                                 "positive is a true signal count that is "
                                 "erroneously removed.  More background removal "
                                 "is accompanied by more signal removal "
