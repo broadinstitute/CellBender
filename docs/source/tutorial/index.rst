@@ -1,7 +1,7 @@
-.. _getting started:
+.. _quick start tutorial:
 
-Getting Started
-===============
+Quick-start tutorial
+====================
 
 This section contains quick start tutorials for different CellBender modules.
 
