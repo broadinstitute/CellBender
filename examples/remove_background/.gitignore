@@ -1,2 +1,7 @@
 *.h5
 *.h5ad
+ckpt.tar.gz
+*.log
+*.csv
+*.pdf
+*.html
