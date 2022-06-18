@@ -123,10 +123,11 @@ class CLI(AbstractCLI):
                 f"not one of the allowed CellRanger feature designations: " \
                 f"{allowed_features}"
         if 'Gene Expression' in args.exclude_features:
-            print("Warning: Excluding 'Gene Expression' features from the analysis "
-                  "is not recommended, since other features alone are typically "
-                  "too sparse to form a good prior on cell type, and CellBender "
-                  "relies on being able to construct this sort of prior")
+            sys.stdout.write("Warning: Excluding 'Gene Expression' features from the analysis "
+                             "is not recommended, since other features alone are typically "
+                             "too sparse to form a good prior on cell type, and CellBender "
+                             "relies on being able to construct this sort of prior")
+            sys.stdout.flush()  # Write immediately
 
         # Automatic training failures and restarts.
         assert args.num_training_tries > 0, "--num-training-tries must be > 0"
@@ -155,7 +156,7 @@ class CLI(AbstractCLI):
         main(args)
 
 
-def main(args):
+def setup_and_logging(args):
     """Take command-line input, parse arguments, and run tests or tool."""
 
     # Send logging messages to stdout as well as a log file.
@@ -186,6 +187,13 @@ def main(args):
         args=args)[:10]
     args.checkpoint_filename = hashcode  # store this in args
     logger.info(f'(Workflow hash {hashcode})')
+    return args, file_handler
+
+
+def main(args):
+    """Take command-line input, parse arguments, and run tests or tool."""
+
+    args, file_handler = setup_and_logging(args)
 
     # Run the tool.
     run_remove_background(args)

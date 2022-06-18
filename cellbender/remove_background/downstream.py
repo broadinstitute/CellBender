@@ -84,6 +84,13 @@ def anndata_from_h5(file: str,
     if 'id' in d.keys():
         d['gene_id'] = d.pop('id')
 
+    # If genomes are empty, try to guess them based on gene_id
+    if 'genome' in d.keys():
+        if np.array([s.decode() == '' for s in d['genome']]).all():
+            if '_' in d['gene_id'][0].decode():
+                print('Genome field blank, so attempting to guess genomes based on gene_id prefixes')
+                d['genome'] = np.array([s.decode().split('_')[0] for s in d['gene_id']], dtype=str)
+
     # Add other information to the anndata object in the appropriate slot.
     _fill_adata_slots_automatically(adata, d)
 

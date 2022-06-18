@@ -74,7 +74,8 @@ def run_remove_background(args):
 
     # Generate posterior.
     dataset_obj.calculate_posterior(inferred_model=inferred_model,
-                                    posterior_batch_size=args.posterior_batch_size)
+                                    posterior_batch_size=args.posterior_batch_size,
+                                    debug=args.debug)
 
     # Write outputs to file.
     try:

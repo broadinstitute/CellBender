@@ -21,6 +21,12 @@ def sparse_matrix_equal(mat1: sp.csc_matrix,
     return (mat1 != mat2).sum() == 0
 
 
+def tensors_equal(a: torch.Tensor,
+                  b: torch.Tensor):
+    """Assertion that torch tensors are equal for each element"""
+    return (a == b).all()
+
+
 def string_ndarray_equality(a: np.ndarray, b: np.ndarray) -> bool:
     return (a.astype(str) == b.astype(str)).all()
 

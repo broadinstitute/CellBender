@@ -100,7 +100,7 @@ def test_gmm(cuda):
     gmm = GMM(torch.tensor(counts).float().to('cuda' if cuda else 'cpu'),
               n_components=consts.GMM_COMPONENTS,
               alpha_prior=consts.GMM_ALPHA_PRIOR,
-              use_cuda=torch.cuda.is_available(),
+              use_cuda=cuda,
               verbose=False)
     gmm.train(epochs=consts.GMM_EPOCHS)
     map_est = gmm.map_estimate()

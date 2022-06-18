@@ -96,7 +96,7 @@ CELLS_POSTERIOR_REG_CALC = 100
 # Posterior regularization constant's upper and lower bounds.
 POSTERIOR_REG_MIN = 0.01
 POSTERIOR_REG_MAX = 500
-POSTERIOR_REG_SEARCH_MAX_ITER = 20
+POSTERIOR_REG_SEARCH_MAX_ITER = 50
 
 # For AnnData h5ad files, fewer than this many barcodes will trigger a warning,
 # since it indicates that the file might be "filtered" to cells only.

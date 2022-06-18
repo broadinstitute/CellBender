@@ -742,7 +742,8 @@ class SingleCellRNACountsDataset:
 
     def calculate_posterior(self,
                             inferred_model: Optional['RemoveBackgroundPyroModel'],
-                            posterior_batch_size: int):
+                            posterior_batch_size: int,
+                            debug: bool = False):
         """Generate posterior for count matrix.
 
         Args:
@@ -761,7 +762,8 @@ class SingleCellRNACountsDataset:
             self.posterior = ProbPosterior(dataset_obj=self,
                                            vi_model=inferred_model,
                                            fpr=self.fpr[0],  # first FPR
-                                           posterior_batch_size=posterior_batch_size)
+                                           posterior_batch_size=posterior_batch_size,
+                                           debug=debug)
 
             # Encoded values of latent variables.
             enc = self.posterior.latents
@@ -866,7 +868,7 @@ class SingleCellRNACountsDataset:
                 summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
 
                 # UMI count prior GMM plot.
-                fig = self.gmm.plot_summary(visium=self.visium)
+                fig = self.gmm.plot_summary()
                 fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
                 logger.info(f"Saved UMI count plot as {gmm_fig_name}")
 
@@ -939,7 +941,7 @@ class SingleCellRNACountsDataset:
                 genomes=self.data['genomes'],
                 barcodes=self.data['barcodes'][barcode_inds],
                 count_matrix=inferred_count_matrix[barcode_inds, :],
-                local_latents={'barcode_indices_for_latents': cell_barcode_inds,
+                local_latents={'barcode_indices_for_latents': self.analyzed_barcode_inds,
                                'gene_expression_encoding': z_subset,
                                'cell_size': d_subset,
                                'cell_probability': p_subset,

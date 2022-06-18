@@ -127,7 +127,6 @@ class RemoveBackgroundPyroModel(nn.Module):
                  analyzed_gene_names: np.ndarray,
                  empty_UMI_threshold: int,
                  log_counts_crossover: float,
-                 visium: bool,
                  use_cuda: bool,
                  phi_loc_prior: float = consts.PHI_LOC_PRIOR,
                  phi_scale_prior: float = consts.PHI_SCALE_PRIOR,
@@ -156,7 +155,6 @@ class RemoveBackgroundPyroModel(nn.Module):
                      'test': {'epoch': [], 'elbo': []}}
         self.empty_UMI_threshold = empty_UMI_threshold
         self.counts_crossover = np.exp(log_counts_crossover)
-        self.visium = visium
 
         # Determine whether we are working on a GPU.
         if use_cuda:
@@ -470,8 +468,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_empty_y",
                                     dist.Normal(loc=p_logit_posterior,
-                                                scale=(consts.REG_LOGIT_SCALE if self.visium
-                                                       else consts.REG_LOGIT_SOFT_SCALE)),
+                                                scale=consts.REG_LOGIT_SOFT_SCALE),
                                     obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
 
                 with poutine.mask(mask=surely_empty_mask):
@@ -484,8 +481,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_cell_y",
                                     dist.Normal(loc=p_logit_posterior,
-                                                scale=(consts.REG_LOGIT_SCALE if self.visium
-                                                       else consts.REG_LOGIT_SOFT_SCALE)),
+                                                scale=consts.REG_LOGIT_SOFT_SCALE),
                                     obs=torch.ones_like(y) * consts.REG_LOGIT_MEAN)
 
         # Regularization of epsilon.mean()
@@ -631,10 +627,10 @@ class RemoveBackgroundPyroModel(nn.Module):
                     # Gate epsilon and sample.
                     epsilon_gated = (prob * enc['epsilon'] + (1 - prob) * 1.)
 
-                    # epsilon = pyro.sample("epsilon", dist.Gamma(epsilon_gated * self.epsilon_prior,
-                    #                                             self.epsilon_prior))
+                    epsilon = pyro.sample("epsilon", dist.Gamma(epsilon_gated * self.epsilon_prior,
+                                                                self.epsilon_prior))
                     # TODO: mod =======
-                    epsilon = pyro.sample("epsilon", dist.Delta(enc['epsilon']))
+                    # epsilon = pyro.sample("epsilon", dist.Delta(enc['epsilon']))
 
             else:
 

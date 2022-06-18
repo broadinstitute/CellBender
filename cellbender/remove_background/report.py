@@ -197,7 +197,7 @@ def generate_summary_plots(input_file: str,
     # "mixed species" plots
     mixed_species_plots(adata, input_layer_key=input_layer_key, output_layer_key=out_key)
 
-    if dev_mode or (truth_file is not None):
+    if dev_mode and (truth_file is not None):
 
         # accuracy plots ==========================================
 
@@ -454,6 +454,8 @@ def assess_learning_curve(adata,
     global warnings
     display(Markdown('## Assessing convergence of the algorithm'))
     plot_learning_curve(adata)
+    if 'train_elbo' not in adata.uns.keys():
+        return
     display(Markdown(
         '*<span style="color:gray">The learning curve tells us about the progress of the algorithm in '
         'inferring all the latent variables in our model.  We want to see '
@@ -1453,8 +1455,11 @@ def mixed_species_plots(adata, input_layer_key='raw', output_layer_key='cellbend
                      'come only from certain celltypes.'))
 
     for genome in genomes:
-        var_subset = adata.var[(adata.var["genome"] == genome)
-                               & (adata.var["feature_type"] == "Gene Expression")]
+        if 'feature_type' in adata.var.keys():
+            var_subset = adata.var[(adata.var["genome"] == genome)
+                                   & (adata.var["feature_type"] == "Gene Expression")]
+        else:
+            var_subset = adata.var[(adata.var["genome"] == genome)]
         print(f'Genome "{genome}" has {len(var_subset)} genes: '
               f'{", ".join(var_subset.index.values[:3])} ...')
 
