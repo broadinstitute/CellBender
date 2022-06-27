@@ -151,6 +151,7 @@ def generate_sample_inferred_model_dataset(
     epsilon = np.zeros(n_droplets)
     rho = np.zeros(n_droplets)
     d_cell = np.zeros(n_droplets)
+    d_empty = np.zeros(n_droplets)
     chi = np.zeros((n_cell_types, n_genes))
     d_cell_type = np.zeros(n_cell_types)
 
@@ -168,6 +169,7 @@ def generate_sample_inferred_model_dataset(
         epsilon[i:(i + num_cells)] = sim['epsilon']
         rho[i:(i + num_cells)] = sim['rho']
         d_cell[i:(i + num_cells)] = sim['cell_counts']
+        d_empty[i:(i + num_cells)] = sim['empty_counts']
         labels[i:(i + num_cells)] = t + 1  # label cell types with integers > 0
         chi[t, :] = sim['chi'].sum(axis=0) / sim['chi'].sum()
         d_cell_type[t] = sim['cell_counts'].mean()
@@ -196,6 +198,7 @@ def generate_sample_inferred_model_dataset(
             'chi_ambient': chi_ambient.detach().cpu().numpy(),
             'droplet_labels': labels.astype(int),
             'd_cell': d_cell,
+            'd_empty': d_empty,
             'epsilon': epsilon,
             'rho': rho,
             'cell_mean_umi': {i + 1: u for i, u in enumerate(d_cell_type)},
@@ -578,6 +581,7 @@ def sample_from_inferred_model(num: int,
     return {'counts_real': c_real.detach().cpu().numpy(),
             'counts_bkg': c_bkg.detach().cpu().numpy(),
             'cell_counts': (d * y).detach().cpu().numpy(),
+            'empty_counts': d_empty.detach().cpu().numpy(),
             'epsilon': epsilon.detach().cpu().numpy(),
             'rho': rho.detach().cpu().numpy(),
             'chi': chi.detach().cpu().numpy()}
