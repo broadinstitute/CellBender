@@ -884,7 +884,7 @@ class ProbPosterior(Posterior):
             noise_count_offset_NG = noise_count_offset_NG
 
         # Compute noise counts by solving the multiple choice knapsack problem.
-        noise_counts_NG, unmet_budget_G = self._mckp_noise_given_log_prob_tensor_fast(
+        noise_counts_NG, unmet_budget_G = self._mckp_noise_given_log_prob_tensor(
             log_prob_noise_counts_NGC=log_prob_noise_counts_NGC,
             offset_noise_counts_NG=noise_count_offset_NG,
             data_NG=data,
@@ -1295,7 +1295,7 @@ class ProbPosterior(Posterior):
             batch_size=self.posterior_batch_size,
             fraction_empties=0.,
             shuffle=False,
-            sort_by=None,
+            sort_by=lambda x: self.random.rand(x.shape[0]),  # a simulated dataset can be ordered
             use_cuda=self.use_cuda,
         )
 
@@ -1327,6 +1327,9 @@ class ProbPosterior(Posterior):
 
             # Barcode index in the dataloader.
             bcs_i = bcs_i_chunk + ind
+
+            # Obtain the real barcode index after unsorting the dataloader.
+            bcs_i = cell_data_loader.unsort_inds(bcs_i)
 
             # Obtain the real barcode index since we only use cells.
             bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i.cpu().numpy()]
