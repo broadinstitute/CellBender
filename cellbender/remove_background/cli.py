@@ -100,8 +100,8 @@ class CLI(AbstractCLI):
         for fpr in args.fpr:
             try:
                 fpr = float(fpr)
-                assert (fpr > 0.) and (fpr < 1.), \
-                    "False positive rate --fpr must be between 0 and 1."
+                assert (fpr >= 0.) and (fpr < 1.), \
+                    "False positive rate --fpr must be in [0, 1)"
             except ValueError:
                 # the input is not a float
                 assert fpr == 'cohort', \

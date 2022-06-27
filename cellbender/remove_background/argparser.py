@@ -124,12 +124,10 @@ def add_subparser_args(subparsers: argparse) -> argparse:
     subparser.add_argument("--fpr", nargs="+",
                            default=[0.01],
                            dest="fpr",
-                           help="Target false positive rate in (0, 1), or the "
-                                "word 'cohort', for using a conservative noise "
-                                "removal approach appropriate for a many-sample "
-                                "study involving differential expression.  For "
-                                "numeric FPR values, a false "
-                                "positive is a true signal count that is "
+                           help="Target 'delta' false positive rate in [0, 1). "
+                                "Use 0 for a cohort of samples which will be "
+                                "jointly analyzed for differential expression. "
+                                "A false positive is a true signal count that is "
                                 "erroneously removed.  More background removal "
                                 "is accompanied by more signal removal "
                                 "at high values of FPR.  You can specify "
