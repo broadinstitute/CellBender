@@ -3,7 +3,7 @@
 import numpy as np
 import scipy.sparse as sp
 import pandas as pd
-from scipy.stats import mode
+from scipy.stats import gaussian_kde
 import torch
 
 import cellbender.remove_background.model
@@ -450,35 +450,40 @@ class SingleCellRNACountsDataset:
             logger.debug(f'Low count threshold is {self.low_count_threshold}')
             counts = counts[counts > self.low_count_threshold]
 
-            # TODO: rethink this "mode" approach, which can fail (especially on simulations)
+            # log transform
+            log_counts = np.log(counts)
+            # calculate range of data, rounding out to make sure we cover everything
+            x = np.arange(
+                np.floor(log_counts.min()), np.ceil(log_counts.max()) + 0.01, 0.1
+            )
 
-            log_counts = torch.tensor(counts).float().log()
-            log_counts = torch.round(log_counts / 5.) * 5.
-            log_mode = log_counts.mode()[0].item()
-            logger.debug(f'Mode of log counts, rounded to nearest multiple of five: {log_mode}')
+            # fit a KDE to estimate density
+            k = gaussian_kde(log_counts)
+            density = k.evaluate(x)
 
-            if log_mode == 0:
+            # the density peak is almost surely the empty droplets
+            log_peak_ind = np.argmax(density)
+            log_peak = x[log_peak_ind]
+            logger.debug(f"Estimated peak of log count distribution: {log_peak}")
+
+            # log_peak is unlikely to be zero because we had a cutoff, but if the
+            # max density is the first index that's probably bad
+            if log_peak_ind == 0:
                 logger.warning('The empty droplet plateau is being identified as '
                                'having approximately zero counts. Unless there really '
                                'is almost no noise in the dataset, this is likely '
                                'an error. Have you set --low-count-threshold too low?')
 
             # Gaussian PDF is about 60% peak height at 1 stdev away.
-            x = np.linspace(log_counts.min().item(), log_counts.max().item(), num=100)
-            hist, _ = np.histogram(np.log(counts), bins=x, density=True)
-            hist = hist[x[:-1] >= log_mode]  # cut off the low count tail
-            x = x[x >= log_mode]
-            top_density_ind = np.argmax(hist)
-            top_density = hist[top_density_ind].item()
-            std_above_ind = (top_density_ind
-                             + np.where(hist[top_density_ind:] < top_density * 0.6)[0][0])
-            stdev = x[std_above_ind] - x[top_density_ind]
-            self.priors['surely_empty_count_estimate'] = np.exp(log_mode + 2 * stdev)
-            self.priors['total_droplet_barcodes'] = \
+            std_above_ind = log_peak_ind + np.abs(density[log_peak_ind:] - log_peak * 0.6).argmin()
+            stdev = x[std_above_ind] - x[log_peak_ind]
+            self.priors['surely_empty_count_estimate'] = np.exp(log_peak + 2 * stdev)
+            self.priors['total_droplet_barcodes'] = (
                 np.sum(counts > self.priors['surely_empty_count_estimate']).item() + 5000
+            )
             logger.debug(f'surely_empty_count_estimate = {self.priors["surely_empty_count_estimate"]}')
             logger.debug(f'total_droplet_barcodes = {self.priors["total_droplet_barcodes"]}')
-            cutoff = np.exp(log_mode - 3 * stdev)
+            cutoff = np.exp(log_peak - 3 * stdev)
             logger.debug(f'Cutting off counts below {cutoff} for the purposes '
                          f'of GMM fitting: assuming they represent barcode errors')
             counts = counts[counts > cutoff]
