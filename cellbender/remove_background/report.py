@@ -397,7 +397,7 @@ def assess_overall_count_removal(adata, raw_full_adata, input_layer_key='raw', o
     plt.xlabel('UMI counts per droplet')
     plt.show()
 
-    estimated_ambient_per_droplet = np.exp(adata.uns['empty_droplet_size_lognormal_loc'])
+    estimated_ambient_per_droplet = np.exp(adata.uns['empty_droplet_size_lognormal_loc']).item()
     expected_fraction_removed_from_cells = estimated_ambient_per_droplet * cells.sum() / initial_counts
 
     fpr = adata.uns['target_false_positive_rate'].item()  # this is an np.ndarray with one element

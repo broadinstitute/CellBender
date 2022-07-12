@@ -252,11 +252,14 @@ def detect_input_data_type(input_file: str) -> str:
     elif input_file.endswith('.csv.gz') or input_file.endswith('.csv'):
         return 'bd_rhapsody'
 
-    elif input_file.endswith('.h5ad'):
+    elif file_ext == '.h5ad':
         return 'anndata'
 
-    elif input_file.endswith('.loom'):
+    elif file_ext == '.loom':
         return 'loom'
+
+    elif file_ext == '.npz':
+        return 'npz'
 
     else:
         raise ValueError('Failed to determine input file type for '
@@ -265,8 +268,9 @@ def detect_input_data_type(input_file: str) -> str:
                            'CellRanger-format MTX outputs; a single CellRanger '
                            '".h5" file; a DropSeq-format DGE ".txt.gz" file; '
                            'a BD-Rhapsody-format ".csv" file; a ".h5ad" file '
-                           'produced by anndata (include all barcodes); or a '
-                           '".loom" file (include all barcodes)')
+                           'produced by anndata (include all barcodes); a '
+                           '".loom" file (include all barcodes); or a ".npz" '
+                           'sparse matrix file')
 
 
 def detect_cellranger_version_mtx(filedir: str) -> int:
@@ -396,8 +400,8 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
 
         # Read in the count matrix using scipy.
         matrix_file = os.path.join(filedir, 'matrix.mtx')
-        gene_file = os.path.join(filedir, "genes.tsv")
-        barcode_file = os.path.join(filedir, "barcodes.tsv")
+        gene_file = os.path.join(filedir, 'genes.tsv')
+        barcode_file = os.path.join(filedir, 'barcodes.tsv')
 
         # Read in gene names.
         gene_data = np.genfromtxt(fname=gene_file,
@@ -747,6 +751,58 @@ def get_matrix_from_bd_rhapsody(filename: str) \
             'genomes': None,
             'feature_types': None,
             'barcodes': np.array(barcodes)}
+
+
+def get_matrix_from_npz(filename: str) \
+        -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+    """Load a count matrix from a sparse NPZ file, accompanied by barcode and
+    gene NPY files.
+    NOTE: This format is one output of the Optimus pipeline. It loads much
+    faster than a Loom file. The NPZ file requires two accompanying files:
+    'col_index.npy' and 'row_index.npy', named exactly as shown, and in the
+    same directory as the NPZ file.
+    Args:
+        filename: string path to .h5ad file that contains the raw gene
+            barcode matrices
+    Returns:
+        out['matrix']: scipy.sparse.csr.csr_matrix of unique UMI counts, with
+            barcodes as rows and genes as columns
+        out['barcodes']: numpy array of strings which are the nucleotide
+            sequences of the barcodes that correspond to the rows in
+            the out['matrix']
+        out['gene_names']: List of numpy arrays, where the number of elements
+            in the list is the number of genomes in the dataset.  Each numpy
+            array contains the string names of genes in the genome, which
+            correspond to the columns in the out['matrix'].
+        out['gene_ids']: List of numpy arrays, where the number of elements
+             in the list is the number of genomes in the dataset.  Each numpy
+             array contains the string Ensembl ID of genes in the genome, which
+             also correspond to the columns in the out['matrix'].
+        out['feature_types']: List of numpy arrays, where the number of elements
+             in the list is the number of genomes in the dataset.  Each numpy
+             array contains the string feature types of genes (or possibly
+             antibody capture reads), which also correspond to the columns
+             in the out['matrix'].
+    """
+    logger.info(f"Optimus sparse NPZ format")
+    try:
+        count_matrix = sp.load_npz(file=filename)
+        file_dir, _ = os.path.split(filename)
+        gene_ids = np.load(os.path.join(file_dir, 'col_index.npy'))
+        barcodes = np.load(os.path.join(file_dir, 'row_index.npy'))
+    except IOError as e:
+        logger.error('Loading an NPZ file requires two additional files in the '
+                     f'same directory ({file_dir}): '
+                     'one called "col_index.npy" that contains genes, and one '
+                     'called "row_index.npy" that contains barcodes.')
+        logger.error(traceback.format_exc())
+        raise e
+    return {'matrix': count_matrix,
+            'gene_names': gene_ids,  # that's all we have access to, so we'll use it
+            'gene_ids': gene_ids,
+            'genomes': None,
+            'feature_types': None,
+            'barcodes': barcodes}
 
 
 def get_matrix_from_anndata(filename: str) \

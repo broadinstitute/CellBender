@@ -19,6 +19,7 @@ from cellbender.remove_background.report import run_notebook_make_html
 from typing import Dict, List, Union, Tuple, Optional, Iterable, Callable
 import logging
 import os
+import traceback
 
 import matplotlib
 matplotlib.use('Agg')
@@ -452,14 +453,22 @@ class SingleCellRNACountsDataset:
             # TODO: rethink this "mode" approach, which can fail (especially on simulations)
 
             log_counts = torch.tensor(counts).float().log()
-            log_counts = torch.round(log_counts * 5.) / 5.
+            log_counts = torch.round(log_counts / 5.) * 5.
             log_mode = log_counts.mode()[0].item()
             logger.debug(f'Mode of log counts, rounded to nearest multiple of five: {log_mode}')
+
+            if log_mode == 0:
+                logger.warning('The empty droplet plateau is being identified as '
+                               'having approximately zero counts. Unless there really '
+                               'is almost no noise in the dataset, this is likely '
+                               'an error. Have you set --low-count-threshold too low?')
 
             # Gaussian PDF is about 60% peak height at 1 stdev away.
             x = np.linspace(log_counts.min().item(), log_counts.max().item(), num=100)
             hist, _ = np.histogram(np.log(counts), bins=x, density=True)
-            top_density_ind = np.where(x >= log_mode)[0][0]
+            hist = hist[x[:-1] >= log_mode]  # cut off the low count tail
+            x = x[x >= log_mode]
+            top_density_ind = np.argmax(hist)
             top_density = hist[top_density_ind].item()
             std_above_ind = (top_density_ind
                              + np.where(hist[top_density_ind:] < top_density * 0.6)[0][0])
@@ -484,7 +493,7 @@ class SingleCellRNACountsDataset:
             gmm.train(epochs=consts.GMM_EPOCHS)
             self.gmm = gmm  # save this for later plotting
 
-            map_est = gmm.map_estimate(sort_by='weight')
+            map_est = gmm.map_estimate(sort_by='loc', ascending=True)
 
             # TODO: temp plotting upfront
             # UMI count prior GMM plot.
@@ -494,7 +503,7 @@ class SingleCellRNACountsDataset:
 
             # TODO ======
 
-            # Smallest mode is always empties.
+            # The first entry is empties since we sort by count.
             self.priors['empty_counts'] = np.exp(map_est['loc'][0]).item()
             logger.debug('MAP estimates from GMM fit to counts')
             logger.debug(map_est)
@@ -534,9 +543,9 @@ class SingleCellRNACountsDataset:
             # TODO ===============^^
 
             self.priors['d_std'] = \
-                np.std(np.log(counts)[np.log(counts) > self.priors['log_counts_crossover']]).item()
+                np.std(np.log(counts)[np.log(counts) > self.priors['log_counts_crossover']]).item() / 5.
             self.priors['d_empty_std'] = \
-                np.std(np.log(counts)[np.log(counts) < self.priors['log_counts_crossover']]).item()
+                np.std(np.log(counts)[np.log(counts) < self.priors['log_counts_crossover']]).item() / 5.
 
             # Estimate the ambient gene expression profile.
             count_matrix = self.data['matrix'][:, self.analyzed_gene_inds]
@@ -549,8 +558,8 @@ class SingleCellRNACountsDataset:
             logger.info(f"Prior on counts for cells is {int(self.priors['cell_counts'])}")
             logger.info(f"Prior on counts for empty droplets is {int(self.priors['empty_counts'])}")
 
-            logger.debug(f"Prior on cell count std is {int(self.priors['d_std'])}")
-            logger.debug(f"Prior on empty counts std is {int(self.priors['d_empty_std'])}")
+            logger.debug(f"Prior on cell count std is {self.priors['d_std']}")
+            logger.debug(f"Prior on empty counts std is {self.priors['d_empty_std']}")
 
         # # Estimate the log UMI count turning point between cells and 'empties'.
         # self.priors['log_counts_crossover'] = \
@@ -948,18 +957,18 @@ class SingleCellRNACountsDataset:
                                'droplet_efficiency': epsilon_subset,
                                'background_fraction': background_fraction},
                 global_latents={'ambient_expression': ambient_expression,
-                                'empty_droplet_size_lognormal_loc': get_param_store_key('d_empty_loc'),
-                                'empty_droplet_size_lognormal_scale': get_param_store_key('d_empty_scale'),
-                                'cell_size_lognormal_std': get_param_store_key('d_cell_scale'),
+                                'empty_droplet_size_lognormal_loc': [get_param_store_key('d_empty_loc')],
+                                'empty_droplet_size_lognormal_scale': [get_param_store_key('d_empty_scale')],
+                                'cell_size_lognormal_std': [get_param_store_key('d_cell_scale')],
                                 'swapping_fraction_dist_params':
                                     cellbender.remove_background.model.get_rho(),
-                                'target_false_positive_rate': fpr,
-                                'posterior_regularization_lambda': self.posterior.lambda_multiplier},
+                                'target_false_positive_rate': [fpr],
+                                'posterior_type': [self.posterior.name]},
                 metadata={'learning_curve': None if inferred_model is None else inferred_model.loss,
                           'barcodes_analyzed': self.data['barcodes'][self.analyzed_barcode_inds],
                           'barcodes_analyzed_inds': self.analyzed_barcode_inds,
                           'features_analyzed_inds': self.analyzed_gene_inds,
-                          'fraction_data_used_for_testing': 1. - consts.TRAINING_FRACTION},
+                          'fraction_data_used_for_testing': [1. - consts.TRAINING_FRACTION]},
             )
 
             return write_succeeded
@@ -1015,20 +1024,21 @@ class SingleCellRNACountsDataset:
 
             # Create report, if called for.
             if create_report:
-                try:
-                    os.environ['INPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), self.input_file))
-                    os.environ['OUTPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), fpr_output_filename))
-                    if truth_file is not None:
-                        os.environ['TRUTH_FILE'] = os.path.abspath(os.path.join(os.getcwd(), truth_file))
-                    html_report_file = os.path.join(file_dir, file_name + name_suffix + '_report.html')
-                    run_notebook_make_html(
-                        file=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'report.ipynb')),
-                        output=html_report_file,
-                    )
-                    logger.info(f'Succeeded in writing report to {html_report_file}')
+                # try:
+                os.environ['INPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), self.input_file))
+                os.environ['OUTPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), fpr_output_filename))
+                if truth_file is not None:
+                    os.environ['TRUTH_FILE'] = os.path.abspath(os.path.join(os.getcwd(), truth_file))
+                html_report_file = os.path.join(file_dir, file_name + name_suffix + '_report.html')
+                run_notebook_make_html(
+                    file=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'report.ipynb')),
+                    output=html_report_file,
+                )
+                logger.info(f'Succeeded in writing report to {html_report_file}')
 
-                except Exception:
-                    logger.warning("Unable to create report.")
+                # except Exception:
+                #     logger.warning("Unable to create report.")
+                #     logger.warning(traceback.format_exc())
 
             # Write output metrics file.
             try:

@@ -137,7 +137,15 @@ class GMM(nn.Module):
 
         # empty_loc = map_est['loc'][0]
         # empty_scale = map_est['scale'][0]
-        empty_component_ind = np.argmin(map_est['loc'])
+
+        # the major empty peak is the one that's in the bottom of the
+        # counts and that has the largest weight among those
+        bottom_half_in_counts = map_est['loc'] < np.log(2 * np.exp(self.mode))
+        tmp_weights = map_est['weight'].copy()
+        tmp_weights[np.logical_not(bottom_half_in_counts)] = 0.
+        highest_weight_low_peak_ind = np.argmax(tmp_weights)
+
+        empty_component_ind = highest_weight_low_peak_ind  # np.argmin(map_est['loc'])
         empty_loc = map_est['loc'][empty_component_ind]
         empty_scale = map_est['scale'][empty_component_ind]
 
