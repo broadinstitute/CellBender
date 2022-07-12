@@ -13,8 +13,10 @@ task run_cellbender_remove_background_gpu {
     # File-related inputs
     String sample_name
     File input_file_unfiltered  # all barcodes, raw data
-    File? checkpoint_file
-    File? truth_file
+    File? barcodes_file  # for MTX and NPZ formats, the bacode information is in a separate file
+    File? genes_file  # for MTX and NPZ formats, the gene information is in a separate file
+    File? checkpoint_file  # start from a saved checkpoint
+    File? truth_file  # only for developers using simulated data
 
     # Outputs
     String? output_bucket_base_directory  # Google bucket path
@@ -65,6 +67,20 @@ task run_cellbender_remove_background_gpu {
   command {
 
     set -e  # fail the workflow if there is an error
+
+    if [[ ! -z "~{barcodes_file}" ]]; then
+        dir=$(dirname ~{input_file_unfiltered})
+        echo "Moving barcodes file to "$dir"/row_index.npy"
+        echo "mv ~{barcodes_file} "$dir"/row_index.npy"
+        [ -f $dir/row_index.npy ] || mv ~{barcodes_file} $dir/row_index.npy
+    fi
+
+    if [[ ! -z "~{genes_file}" ]]; then
+        dir=$(dirname ~{input_file_unfiltered})
+        echo "Moving genes file to "$dir"/col_index.npy"
+        echo "mv ~{genes_file} "$dir"/col_index.npy"
+        [ -f $dir/col_index.npy ] || mv ~{genes_file} $dir/col_index.npy
+    fi
 
     cellbender remove-background \
       --input "~{input_file_unfiltered}" \
@@ -134,6 +150,10 @@ task run_cellbender_remove_background_gpu {
       {help: "Name which will be prepended to output files and which will be used to construct the output google bucket file path, if output_bucket_base_directory is supplied, as output_bucket_base_directory/sample_name/"}
     input_file_unfiltered :
       {help: "Input file. This must be raw data that includes all barcodes. See http://cellbender.readthedocs.io for more information on file formats, but importantly, this must be one file, and cannot be a pointer to a directory that contains MTX and TSV files."}
+    barcodes_file :
+      {help: "Supply this only if your input_file_unfiltered is a sparse NPZ matrix from Optimus lacking metadata."}
+    genes_file :
+      {help: "Supply this only if your input_file_unfiltered is a sparse NPZ matrix from Optimus lacking metadata."}
     output_bucket_base_directory :
       {help: "Optional google bucket gsURL. If provided, the workflow will create a subfolder called sample_name in this directory and copy outputs there. (Note that the output data would then exist in two places.) Helpful for organization."}
     docker_image :
