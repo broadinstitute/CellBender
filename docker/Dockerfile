@@ -20,4 +20,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && conda install -y pytorch==1.11.0 cudatoolkit=10.2 -c pytorch \
  && yes | pip install -e /software/cellbender \
  && sudo rm -rf ~/.cache/pip \
- && conda clean -ya
+ && conda clean -ya \
+ && mkdir -p /root/.cache/torch/kernels
