@@ -463,8 +463,8 @@ class SingleCellRNACountsDataset:
 
             # the density peak is almost surely the empty droplets
             log_peak_ind = np.argmax(density)
-            log_peak = density[log_peak_ind]
-            logger.debug(f"Estimated peak of log count distribution: {x[log_peak_ind]}")
+            log_peak = x[log_peak_ind]
+            logger.debug(f"Estimated peak of log count distribution: {log_peak}")
 
             # log_peak is unlikely to be zero because we had a cutoff, but if the
             # max density is the first index that's probably bad
@@ -475,7 +475,9 @@ class SingleCellRNACountsDataset:
                                'an error. Have you set --low-count-threshold too low?')
 
             # Gaussian PDF is about 60% peak height at 1 stdev away.
-            std_above_ind = log_peak_ind + np.abs(density[log_peak_ind:] - log_peak * 0.6).argmin()
+            std_above_ind = log_peak_ind + np.abs(
+                density[log_peak_ind:] - density[log_peak_ind] * 0.6
+            ).argmin()
             stdev = x[std_above_ind] - x[log_peak_ind]
             self.priors['surely_empty_count_estimate'] = np.exp(log_peak + 2 * stdev)
             self.priors['total_droplet_barcodes'] = (
