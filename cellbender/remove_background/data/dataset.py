@@ -463,8 +463,8 @@ class SingleCellRNACountsDataset:
 
             # the density peak is almost surely the empty droplets
             log_peak_ind = np.argmax(density)
-            log_peak = x[log_peak_ind]
-            logger.debug(f"Estimated peak of log count distribution: {log_peak}")
+            log_peak = density[log_peak_ind]
+            logger.debug(f"Estimated peak of log count distribution: {x[log_peak_ind]}")
 
             # log_peak is unlikely to be zero because we had a cutoff, but if the
             # max density is the first index that's probably bad
