@@ -58,13 +58,19 @@ The computation will finish within a minute or two (after 150 epochs). The tool 
   scatter plot of the latent embedding of the expressions in cell-containing droplets. Notice the rapid drop in
   the cell probability after UMI rank ~ 500.
 
-* ``tiny_output_umi_counts.pdf``:
+* ``tiny_output_umi_counts.pdf``: A PDF showing the UMI counts per droplet as a histogram, annotated
+  with what CellBender thinks is empty versus cells. This describes CellBender's prior. This is mainly
+  a diagnostic if something seems to be going wrong with CellBender's automatic prior determination.
 
-* ``tiny_output.log``:
+* ``tiny_output.log``: Log file.
 
-* ``tiny_output_metrics.csv``:
+* ``tiny_output_metrics.csv``: Output metrics, most of which have very descriptive names. This file is not
+  used by most users, but the idea is that it can be incorporated into automated pipelines which could re-run
+  CellBender automatically (with different parameters) if something goes wrong.
 
-* ``tiny_output_report.html``:
+* ``tiny_output_report.html``: An HTML report which points out a few things about the run and
+  highlights differences between the output and the input. Issues warnings if there are any
+  aspects of the run that look anomalous, and makes suggestions.
 
 Finally, try running the tool with ``--expected-cells 100`` and ``--expected-cells 1000``. You should find that
 the output remains virtually the same.

@@ -17,7 +17,8 @@ tips on quality control, read the :ref:`Usage <usage>` section.
 For a step-by-step tutorial on a simplified example dataset, see the
 :ref:`Quick start tutorial <quick start tutorial>` section.
 
-For details on input arguments, see the :ref:`Reference <reference>` section.
+For details on input arguments and the output file format,
+see the :ref:`Reference <reference>` section.
 
 For troubleshooting and an FAQ, see the :ref:`Troubleshooting <troubleshooting>` section.
 

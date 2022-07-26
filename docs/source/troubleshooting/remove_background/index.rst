@@ -42,6 +42,8 @@ FAQ
 
 * :ref:`It seems like CellBender called too few cells <a12>`
 
+* :ref:`The PCA plot of latent gene expression shows no clusters or structure <a25>`
+
 * :ref:`The learning curve looks weird. / What is the learning curve supposed to look like? <a13>`
 
 * :ref:`What is the "metrics.csv" output for, and how do I interpret the metrics? <a14>`
@@ -52,7 +54,7 @@ FAQ
 
 * :ref:`I ran the WDL in Terra and the job "Failed" with PAPI error code 9 <a17>`
 
-* :ref:`How much does it cost, per sample, to run WDL in Terra? <a18>`
+* :ref:`How much does it cost, per sample, to run the WDL in Terra? <a18>`
 
 * :ref:`I am getting a GPU-out-of-memory error (process "Killed") <a19>`
 
@@ -156,7 +158,8 @@ Answers / Troubleshooting Tips
 * Does CellBender work with CITE-seq data?  Or other non-``Gene Expression`` features?
 
   * Absolutely, `as shown here <https://github.com/broadinstitute/CellBender/issues/114>`_
-    and in our paper.  The results for ``Antibody Capture`` data look even better than
+    and `in our paper <https://www.biorxiv.org/content/10.1101/791699v2>`_.
+    The results for ``Antibody Capture`` data look even better than
     for gene expression, due to the higher ambient background for that modality.
 
 .. _a8:
@@ -180,91 +183,40 @@ Answers / Troubleshooting Tips
 
 * Where can I find the ambient RNA profile inferred by CellBender?
 
+  * This is present in the output h5 file as the field called
+    ``/global_latents/ambient_expression`` (:ref:`see here <h5-file-format>`).
+    If you use the dataloader from ``cellbender.remove_background.downstream``
+    (:ref:`see here <a22>`), then the ambient expression profile will be loaded
+    into the AnnData object as ``adata.var['ambient_expression']``
+  * (Though it is referred to here as "ambient RNA", all features are included,
+    not just Gene Expression.)
+
 .. _a10:
 
 * The code completed, but how do I know if it "worked"?  / How do I know when I
   need to re-run with different parameters?
 
+  * The vast majority of runs using a nice dataset will work just fine. If your
+    dataset might not be so "nice", then we recommend taking a look at the output
+    ``_report.html``, which will have a few diagnostics and will issue warnings
+    and recommendations as appropirate.
+  * In general, if the learning curve (ELBO versus epoch) has huge spikes, or if
+    if does not converge near the end but rather dips back down, then you may
+    need to consider re-running with a lower ``--learning-rate``. The solution
+    is typically to reduce the ``--learning-rate`` by a factor of two.
+  * In certain cases, it may be obvious that CellBender has failed to call cells
+    accurately. In these cases, it may be necessary to do a bit of experimentation
+    with ``--expected-cells`` and ``--total-droplets-included`` to try to guide
+    CellBender toward a more reasonable solution.  It has been our observation
+    that such cases are relatively rare. Try looking at the UMI curve and picking
+    a value for ``--expected-cells`` where you know that all the droplets
+    preceding that number are surely cells.
+
 .. _a11:
 
 * It seems like CellBender called too many cells
 
-.. _a12:
-
-* It seems like CellBender called too few cells
-
-.. _a13:
-
-* The learning curve looks weird. / What is the learning curve supposed to
-  look like?
-
-.. _a14:
-
-* What is the ``metrics.csv`` output for, and how do I interpret the metrics?
-
-.. _a15:
-
-* My HTML report summary (at the bottom) said there were some warnings.  What
-  should I do about that?
-
-.. _a16:
-
-* The tool failed to produce an HTML report
-
-.. _a17:
-
-* I ran the WDL in Terra and the job ``Failed`` with PAPI error code 9
-
-.. _a18:
-
-* How much does it cost, per sample, to run WDL in Terra?
-
-.. _a19:
-
-* I am getting a GPU-out-of-memory error (process ``Killed``)
-
-.. _a20:
-
-* I got a ``nan`` error and the tool crashed
-
-.. _a21:
-
-* There was an error!
-
-
-
-
-
-
-
-(Most of these points are answers which are linked to from the FAQ above.)
-
-* The ambient RNA profile lives at ``/global_latents/ambient_profile`` in the
-  output h5 file tree.  Don't want to dig around in h5 files?  Don't worry...
-  just use the AnnData loader function ``cellbender.remove_background.downstream.anndata_from_h5()``
-  to load an AnnData object which will have the ambient RNA profile accessible
-  as ``adata.var['ambient_expression']``
-
-* The learning curve in the output PDF has large downward spikes, or looks super wobbly.
-
-  * This could indicate instabilities during training that should be addressed. The solution
-    is typically to reduce the ``--learning-rate`` by a factor of two.
-
-* The following warning is emitted in the log file: "Warning: few empty droplets identified.
-  Low UMI cutoff may be too high. Check the UMI decay curve, and decrease the
-  ``--low-count-threshold`` parameter if necessary."
-
-  * This warning indicates that no "surely empty" droplets were identified in the analysis.
-    This means that the "empty droplet plateau" could not be identified.  The most likely
-    explanation is that the level of background RNA is extremely low, and that the value
-    of ``--low-count-threshold`` exceeds this level.  This would result in the empty
-    droplet plateau being excluded from the analysis, which is not advisable.  This can be
-    corrected by decreasing ``--low-count-threshold`` from its default of 15 to a value like 5.
-
-
-* There are too many cells called.
-
-  * Are there?  ``remove-background`` equates "cell probability" with "the probability that
+  * Did it?  ``remove-background`` equates "cell probability" with "the probability that
     a given droplet is not empty."  These non-empty droplets might not all contain healthy
     cells with high counts.  Nevertheless, the posterior probability that they are not empty
     is greater than 0.5.  The recommended procedure
@@ -275,15 +227,18 @@ Answers / Troubleshooting Tips
   * Experiment with increasing or decreasing ``--empty-drop-training-fraction``.
   * As a last resort, try decreasing ``--expected-cells`` by quite a bit.
 
+.. _a12:
 
-* There are too few cells called.
+* It seems like CellBender called too few cells
 
-  * Try estimating ``--expected-cells`` from the UMI curve rather than a priori, and
-    increase the number if necessary.
-  * Experiment with increasing or decreasing ``--total-droplets-included``.
+  * If CellBender seems to have missed cells, or if you get a "No cells found!"
+    error, then try increasing ``--expected-cells``, and also ensure that your value
+    for ``--total-droplets-included`` is large enough that all droplets after
+    this value on the UMI curve are "surely empty".
 
+.. _a25:
 
-* The PCA plot of latent gene expression shows no clusters or structure.
+* The PCA plot of latent gene expression shows no clusters or structure
 
   * Has training converged?  Training should proceed for at least 150 epochs.  Check to
     make sure that the ELBO has nearly reached a plateau, indicating that training is
@@ -293,3 +248,161 @@ Answers / Troubleshooting Tips
     known to be false, some sort of QC failure with the experiment would be suspected.
     Perform a downstream clustering analysis with and without ``cellbender remove-background``
     and compare the two.
+
+.. _a13:
+
+* The learning curve looks weird. / What is the learning curve supposed to
+  look like?
+
+  * The "learning curve", a.k.a. the plot of ELBO (evidence lower bound) verus
+    training epoch, is a record of the progress of inferring all the latent
+    variables in the CellBender model, based on data.  This learning happens via
+    gradient descent.  Typically, the ELBO changes gradually, increasing and
+    approaching some rather stable value by the end of training.  Ideally, the
+    ELBO increases monotonically.
+
+  * If the learning curve either starts decreasing, or has a large downward bump
+    or a downward spike or spikes, then something may have gone a bit "off the
+    rails" during training. We would be concerned that, for example, the inference
+    procedure got thrown off into some local minimum that is sub-optimal. If you
+    see a learning curve that looks strange, then try to re-run with half the
+    ``--learning-rate`` and see if it results in a more "canonical" learning curve.
+    If it does, use that output.
+
+  * Examples: 2 fine learning curves (panels on right are zoomed-in y-axis)
+
+  * .. image:: /_static/remove_background/PCL_rat_A_LA6_learning_curve.png
+       :width: 600 px
+
+
+  * .. image:: /_static/remove_background/simulated_s6_learning_curve.png
+       :width: 600 px
+
+  * Examples: 2 bad learning curves
+
+  * .. image:: /_static/remove_background/bad_learning_curves.png
+       :width: 700 px
+
+.. _a14:
+
+* What is the ``metrics.csv`` output for, and how do I interpret the metrics?
+
+  * This is a bit of a niche output, and most people can ignore it if they want
+    to. The idea here is to enable automated analysis pipelines to make decisions
+    about whether to re-run CellBender with different parameters. Several of the
+    output metrics contained here are also contained in the HTML report (though
+    not all). But, importantly, this CSV file is easy to parse programmatically,
+    so that a pipeline can make automatic decisions.  All metrics are scalar
+    quantities, and the intent was to name them so they are self-explanatory.
+    The contents are:
+
+    1. ``total_raw_counts``: Sum of all input count matrix entries
+    2. ``total_output_counts``: Sum of all output count matrix entries
+    3. ``total_counts_removed``: 1 minus 2
+    4. ``fraction_counts_removed``: 3 divided by 1
+    5. ``total_raw_counts_in_cells``: Same as 1, but calculated only in CellBender-
+       determined non-empty droplets
+    6. ``total_counts_removed_from_cells``: 5 minus 2 (since only cells have
+       nonzero counts in the output)
+    7. ``fraction_counts_removed_from_cells``: 6 divided by 5
+    8. ``average_counts_removed_per_cell``: 6 divided by the number of CellBender-
+       determined non-empty droplets
+    9. ``target_fpr``: The input ``--fpr`` value
+    10. ``expected_cells``: The input ``--expected-cells`` value, blank if not
+        provided.
+    11. ``found_cells``: The number of CellBender-
+        determined non-empty droplets
+    12. ``output_average_counts_per_cell``: 2 divided by 11
+    13. ``ratio_of_found_cells_to_expected_cells``: 11 divided by 10
+    14. ``found_empties``: The number of empty droplets, as determined by
+        CellBender. This number plus 11 equals the input
+        ``--total-droplets-included`` (or the value used by default)
+    15. ``fraction_of_analyzed_droplets_that_are_nonempty``: 11 divided by the
+        input ``--total-droplets-included``
+    16. ``convergence_indicator``: The mean absolute difference between successive
+        values of the train ELBO for the last 3 epochs, divided by the standard
+        deviation of the train ELBO over the last 20 epochs. A smaller number
+        indicates better convergence. It's typical to see values of 0.25 or 0.35.
+        Large values might indicate a failure to converge. (Not many people have
+        yet used this in practice, so we might learn more about recommendations
+        in future.)
+    17. ``overall_change_in_train_elbo``: The change in ELBO from first to last
+        epoch.
+
+  * The most useful values for automated decision-making are probably 13, 15,
+    and 16.
+
+.. _a15:
+
+* My HTML report summary (at the bottom) said there were some warnings.  What
+  should I do about that?
+
+  * If the warning comes with a recommendation to re-run with different settings,
+    then that is worth a try.
+  * Some warnings do not need further action, and simply reflect peculiarities
+    of the specific dataset.
+
+.. _a16:
+
+* The tool failed to produce an HTML report
+
+  * Please report the error as a github issue. The report-making process, since
+    it makes use of Jupyter notebooks, is a bit of a fragile process. These
+    reports are new in v0.3.0, and there has been less testing.
+
+.. _a17:
+
+* I ran the WDL in Terra and the job ``Failed`` with PAPI error code 9
+
+  * Typically this is a so-called "transient" error, meaning that it was a random
+    occurrance, and the job may succeed if run again without any changes.
+    However, it is worth checking the log and checking "Job Manager" to see if
+    there was a more specific error message.
+
+.. _a18:
+
+* How much does it cost, per sample, to run the WDL in Terra?
+
+  * It depends on the size of the dataset, but $0.30 is pretty typical, as of
+    the pricing used by Google Cloud in July 2022.
+
+.. _a19:
+
+* I am getting a GPU-out-of-memory error (process ``Killed``)
+
+  * Please report the issue on github, but there are a few things you can try
+    to reduce memory usage. Typically memory usage is highest during posterior
+    sampling. Try setting ``--posterior-batch-size`` to 64, instead of its
+    default value of 128. (Make sure to restart from the checkpoint file to
+    avoid re-running inference.  This will happen automatically if you re-run
+    in the same folder as the ``ckpt.tar.gz`` file.)
+  * If you can, try running on an Nvidia Tesla T4 GPU, which has more RAM than
+    some other options.
+  * Currently, CellBender only makes use of 1 GPU, so extra GPUs will not help.
+
+.. _a20:
+
+* I got a ``nan`` error and the tool crashed
+
+  * This is real bad. Definitely report this issue on github. You may be asked
+    to re-run the tool using the ``--debug`` flag, to get more error messages
+    for reporting.
+
+.. _a21:
+
+* There was an error!
+
+  * Please report the issue on github. You may be asked
+    to re-run the tool using the ``--debug`` flag, to get more error messages
+    for reporting.
+
+  * The following warning is emitted in the log file: "Warning: few empty droplets identified.
+    Low UMI cutoff may be too high. Check the UMI decay curve, and decrease the
+    ``--low-count-threshold`` parameter if necessary."
+
+    * This warning indicates that no "surely empty" droplets were identified in the analysis.
+      This means that the "empty droplet plateau" could not be identified.  The most likely
+      explanation is that the level of background RNA is extremely low, and that the value
+      of ``--low-count-threshold`` exceeds this level.  This would result in the empty
+      droplet plateau being excluded from the analysis, which is not advisable.  This can be
+      corrected by decreasing ``--low-count-threshold`` from its default of 15 to a value like 5.
