@@ -33,7 +33,7 @@ class RemoveBackgroundPyroModel(nn.Module):
         encoder: An instance of an encoder object.  Can be a CompositeEncoder.
         decoder: An instance of a decoder object.
         dataset_obj: Dataset object which contains relevant priors.
-        use_cuda: Will use GPU if True.
+        device: Specify backend: ['cuda', 'mps', 'cpu']
         phi_loc_prior: Mean of gamma distribution for global overdispersion.
         phi_scale_prior: Scale of gamma distribution for global overdispersion.
         rho_alpha_prior: Param of beta distribution for swapping fraction.
@@ -53,7 +53,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                  encoder: Union[nn.Module, encoder_module.CompositeEncoder],
                  decoder: nn.Module,
                  dataset_obj: 'SingleCellRNACountsDataset',
-                 use_cuda: bool,
+                 device: str,
                  phi_loc_prior: float = consts.PHI_LOC_PRIOR,
                  phi_scale_prior: float = consts.PHI_SCALE_PRIOR,
                  rho_alpha_prior: float = consts.RHO_ALPHA_PRIOR,
@@ -77,20 +77,15 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.loss = {'train': {'epoch': [], 'elbo': []},
                      'test': {'epoch': [], 'elbo': []}}
 
-        # Determine whether we are working on a GPU.
-        if use_cuda:
-            # Calling cuda() here will put all the parameters of
-            # the encoder and decoder networks into GPU memory.
-            self.cuda()
+        # Handle passing parameters to the correct backend.
+        if device != 'cpu':
+            self.to(device)
             try:
                 for key, value in self.encoder.items():
-                    value.cuda()
+                    value.to(device)
             except KeyError:
                 pass
-            self.device = 'cuda'
-        else:
-            self.device = 'cpu'
-        self.use_cuda = use_cuda
+        self.device = device
 
         # Priors
         assert dataset_obj.priors['d_std'] > 0, \
@@ -241,8 +236,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                                      self.phi_rate_prior))
 
         # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.size(0),
-                        use_cuda=self.use_cuda, device=self.device):
+        with pyro.plate("data", x.size(0), device=self.device):
 
             # Sample z from prior.
             z = pyro.sample("z",
@@ -466,8 +460,7 @@ class RemoveBackgroundPyroModel(nn.Module):
         pyro.sample("phi", dist.Gamma(phi_conc, phi_rate))
 
         # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.size(0),
-                        use_cuda=self.use_cuda, device=self.device):
+        with pyro.plate("data", x.size(0), device=self.device):
 
             # Sample swapping fraction rho.
             if self.include_rho:

@@ -37,7 +37,7 @@ class Posterior(ABC):
                  float_threshold: float = 0.5):
         self.dataset_obj = dataset_obj
         self.vi_model = vi_model
-        self.use_cuda = vi_model.use_cuda
+        self.device = vi_model.device
         self.analyzed_gene_inds = dataset_obj.analyzed_gene_inds
         self.count_matrix_shape = dataset_obj.data['matrix'].shape
         self.barcode_inds = np.arange(0, self.count_matrix_shape[0])
@@ -72,7 +72,7 @@ class Posterior(ABC):
     def _get_latents(self):
         """Calculate the encoded latent variables."""
 
-        data_loader = self.dataset_obj.get_dataloader(use_cuda=self.use_cuda,
+        data_loader = self.dataset_obj.get_dataloader(device=self.device,
                                                       analyzed_bcs_only=True,
                                                       batch_size=500,
                                                       shuffle=False)
@@ -241,7 +241,7 @@ class ImputedPosterior(Posterior):
                  counts_dtype: np.dtype = np.uint32,
                  float_threshold: float = 0.5):
         self.vi_model = vi_model
-        self.use_cuda = vi_model.use_cuda
+        self.device = vi_model.device
         self.guide = guide if guide is not None else vi_model.encoder
         self.encoder = encoder if encoder is not None else vi_model.encoder
         self._encodings = None
@@ -259,7 +259,7 @@ class ImputedPosterior(Posterior):
 
         """
 
-        data_loader = self.dataset_obj.get_dataloader(use_cuda=self.use_cuda,
+        data_loader = self.dataset_obj.get_dataloader(device=self.device,
                                                       analyzed_bcs_only=False,
                                                       batch_size=500,
                                                       shuffle=False)
@@ -325,7 +325,7 @@ class ProbPosterior(Posterior):
                  batch_size: int = consts.PROP_POSTERIOR_BATCH_SIZE,
                  cells_posterior_reg_calc: int = consts.CELLS_POSTERIOR_REG_CALC):
         self.vi_model = vi_model
-        self.use_cuda = vi_model.use_cuda
+        self.device = vi_model.device
         self.fpr = fpr
         self.lambda_multiplier = None
         self._encodings = None
@@ -378,7 +378,7 @@ class ProbPosterior(Posterior):
 
         # Compute posterior in mini-batches.
         analyzed_bcs_only = True
-        data_loader = self.dataset_obj.get_dataloader(use_cuda=self.use_cuda,
+        data_loader = self.dataset_obj.get_dataloader(device=self.device,
                                                       analyzed_bcs_only=analyzed_bcs_only,
                                                       batch_size=self.batch_size,
                                                       shuffle=False)

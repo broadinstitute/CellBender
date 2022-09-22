@@ -227,6 +227,14 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
     pyro.enable_validation(False)
     pyro.distributions.enable_validation(False)
 
+    # Decide on the backend.
+    device = 'cpu'
+    if args.use_cuda:
+        device = 'cuda'
+    else:
+        if args.use_mps:
+            device = 'mps'
+
     # Load the dataset into DataLoaders.
     frac = args.training_fraction  # Fraction of barcodes to use for training
     batch_size = int(min(300, frac * dataset_obj.analyzed_barcode_inds.size / 2))
@@ -264,7 +272,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                                           encoder=encoder,
                                           decoder=decoder,
                                           dataset_obj=dataset_obj,
-                                          use_cuda=args.use_cuda)
+                                          device=device)
 
         train_loader, test_loader = \
             prep_data_for_training(dataset=count_matrix,
@@ -275,7 +283,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                                    training_fraction=frac,
                                    fraction_empties=args.fraction_empties,
                                    shuffle=True,
-                                   use_cuda=args.use_cuda)
+                                   device=device)
 
         # Set up the optimizer.
         optimizer = pyro.optim.clipped_adam.ClippedAdam
