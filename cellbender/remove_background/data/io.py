@@ -387,8 +387,9 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
 
         # Read in feature names.
         features = np.genfromtxt(fname=gene_file,
-                                 delimiter="\t", skip_header=0,
-                                 dtype='<U100')
+                                 delimiter="\t",
+                                 skip_header=0,
+                                 dtype=str)
 
         # Read in gene expression and feature data.
         gene_ids = features[:, 0].squeeze()  # first column
@@ -405,8 +406,9 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
 
         # Read in gene names.
         gene_data = np.genfromtxt(fname=gene_file,
-                                  delimiter="\t", skip_header=0,
-                                  dtype='<U100')
+                                  delimiter="\t",
+                                  skip_header=0,
+                                  dtype=str)
         if len(gene_data.shape) == 1:  # custom file format with just gene names
             gene_names = gene_data.squeeze()
             gene_ids = None
@@ -426,17 +428,19 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
 
     # Read in barcode names.
     barcodes = np.genfromtxt(fname=barcode_file,
-                             delimiter="\t", skip_header=0, dtype='<U20')
+                             delimiter="\t",
+                             skip_header=0,
+                             dtype=str)
 
     # Issue warnings if necessary, based on dimensions matching.
     if count_matrix.shape[1] != len(gene_names):
         logger.warning(f"Number of gene names in {filedir}/genes.tsv "
-                        f"does not match the number expected from the "
-                        f"count matrix.")
+                       f"does not match the number expected from the "
+                       f"count matrix.")
     if count_matrix.shape[0] != len(barcodes):
         logger.warning(f"Number of barcodes in {filedir}/barcodes.tsv "
-                        f"does not match the number expected from the "
-                        f"count matrix.")
+                       f"does not match the number expected from the "
+                       f"count matrix.")
 
     return {'matrix': count_matrix,
             'gene_names': gene_names,
