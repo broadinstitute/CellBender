@@ -6,7 +6,8 @@ import numpy as np
 import torch
 
 from cellbender.remove_background.data.dataprep import DataLoader
-from cellbender.remove_background.infer import Posterior, ProbPosterior, binary_search
+from cellbender.remove_background.infer import BasePosterior, Posterior, \
+    binary_search, dense_to_sparse_op_torch, dense_to_sparse_op_numpy
 
 from .conftest import sparse_matrix_equal, simulated_dataset, tensors_equal
 
@@ -20,7 +21,7 @@ USE_CUDA = torch.cuda.is_available()
                                        reason='requires CUDA'))],
                          ids=lambda b: 'cuda' if b else 'cpu')
 def test_dense_to_sparse_op_numpy(simulated_dataset, cuda):
-    """test infer.py Posterior.dense_to_sparse_op_numpy()"""
+    """test infer.py BasePosterior.dense_to_sparse_op_numpy()"""
 
     d = simulated_dataset
     data_loader = DataLoader(
@@ -42,7 +43,7 @@ def test_dense_to_sparse_op_numpy(simulated_dataset, cuda):
 
         # Convert to sparse.
         bcs_i_chunk, genes_i, counts_i = \
-            Posterior.dense_to_sparse_op_numpy(dense_counts.detach().cpu().numpy())
+            dense_to_sparse_op_numpy(dense_counts.detach().cpu().numpy())
 
         # Barcode index in the dataloader.
         bcs_i = bcs_i_chunk + ind
@@ -76,7 +77,7 @@ def test_dense_to_sparse_op_numpy(simulated_dataset, cuda):
                                        reason='requires CUDA'))],
                          ids=lambda b: 'cuda' if b else 'cpu')
 def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
-    """test infer.py Posterior.dense_to_sparse_op_torch()"""
+    """test infer.py BasePosterior.dense_to_sparse_op_torch()"""
 
     d = simulated_dataset
     data_loader = DataLoader(
@@ -98,7 +99,7 @@ def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
 
         # Convert to sparse.
         bcs_i_chunk, genes_i, counts_i = \
-            Posterior.dense_to_sparse_op_torch(dense_counts)
+            dense_to_sparse_op_torch(dense_counts)
 
         # Barcode index in the dataloader.
         bcs_i = bcs_i_chunk + ind
@@ -115,9 +116,9 @@ def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
         ind += data.shape[0]  # Same as data_loader.batch_size
 
     # Convert the lists to numpy arrays.
-    counts = torch.cat(counts, dim=0).detach().cpu().numpy().astype(np.uint32)
-    barcodes = torch.cat(barcodes, dim=0).detach().cpu().numpy().astype(np.uint32)
-    genes = torch.cat(genes, dim=0).detach().cpu().numpy().astype(np.uint32)  # uint16 is too small!
+    counts = np.concatenate(counts).astype(np.uint32)
+    barcodes = np.concatenate(barcodes).astype(np.uint32)
+    genes = np.concatenate(genes).astype(np.uint32)  # uint16 is too small!
 
     # Put the counts into a sparse csc_matrix.
     out = sp.csc_matrix((counts, (barcodes, genes)),
@@ -166,8 +167,8 @@ def test_binary_search():
                                        reason='requires CUDA'))],
                          ids=lambda b: 'cuda' if b else 'cpu')
 @pytest.mark.parametrize('fun',
-                         [ProbPosterior._mckp_noise_given_log_prob_tensor,
-                          ProbPosterior._mckp_noise_given_log_prob_tensor_fast],
+                         [Posterior._mckp_noise_given_log_prob_tensor,
+                          Posterior._mckp_noise_given_log_prob_tensor_fast],
                          ids=['inchworm', 'sort'])
 def test_mckp_noise_given_log_prob_tensor(cuda, fun):
     """Test the bespoke inchworm algorithm for solving a discrete

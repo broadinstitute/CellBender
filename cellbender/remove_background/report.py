@@ -92,6 +92,7 @@ def generate_summary_plots(input_file: str,
     """
 
     global warnings
+    warnings = []
 
     display(Markdown(f'### CellBender version {get_version()}'))
     display(Markdown(str(datetime.datetime.now()).split('.')[0]))
@@ -321,10 +322,11 @@ def generate_summary_plots(input_file: str,
             cell_calls=(adata.obs['cell_probability'] > 0.5),
             truth_cell_labels=adata.obs['truth_cell_label'],
         )
-        if true_fpr > adata.uns['target_false_positive_rate']:
-            warnings.append('FPR exceeds target FPR.')
-            display(Markdown(f'WARNING: FPR of {true_fpr:.4f} exceeds target FPR of '
-                             f'{adata.uns["target_false_positive_rate"]}'))
+        if adata.uns['target_false_positive_rate'][0].decode() != 'NA':
+            if true_fpr > adata.uns['target_false_positive_rate'][0]:
+                warnings.append('FPR exceeds target FPR.')
+                display(Markdown(f'WARNING: FPR of {true_fpr:.4f} exceeds target FPR of '
+                                 f'{adata.uns["target_false_positive_rate"]}'))
 
     display(Markdown('# Summary of warnings:'))
     if len(warnings) == 0:

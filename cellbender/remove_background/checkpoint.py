@@ -407,7 +407,9 @@ def create_workflow_hashcode(module_path: str,
 
     hasher = hashlib.new(name=name)
 
-    files_safe_to_ignore = ['infer.py', 'simulate.py', 'report.py', 'downstream.py', 'monitor.py']
+    files_safe_to_ignore = ['infer.py', 'simulate.py', 'report.py',
+                            'downstream.py', 'monitor.py', 'fpr.py',
+                            'posterior.py', 'estimation.py', 'sparse_utils.py']
 
     if not os.path.exists(module_path):
         return ''

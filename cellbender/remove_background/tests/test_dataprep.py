@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from cellbender.remove_background.data.dataprep import DataLoader
-from cellbender.remove_background.infer import Posterior
+from cellbender.remove_background.infer import dense_to_sparse_op_torch
 
 from .conftest import sparse_matrix_equal, simulated_dataset
 
@@ -53,7 +53,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
             use_cuda=cuda,
         )
 
-    # this is copied from infer.Posterior._get_mean() which is not ideal
+    # this is copied from infer.BasePosterior._get_mean() which is not ideal
     out = []
     for loader in [data_loader, sorted_data_loader]:
 
@@ -66,8 +66,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
             dense_counts = data  # just make it the same!
 
             # Convert to sparse.
-            bcs_i_chunk, genes_i, counts_i = \
-                Posterior.dense_to_sparse_op_torch(dense_counts)
+            bcs_i_chunk, genes_i, counts_i = dense_to_sparse_op_torch(dense_counts)
 
             # Barcode index in the dataloader.
             bcs_i = bcs_i_chunk + ind
@@ -84,9 +83,9 @@ def test_dataloader_sorting(simulated_dataset, cuda):
             ind += data.shape[0]  # Same as data_loader.batch_size
 
         # Convert the lists to numpy arrays.
-        counts = torch.cat(counts, dim=0).detach().cpu().numpy().astype(np.uint32)
-        barcodes = torch.cat(barcodes, dim=0).detach().cpu().numpy().astype(np.uint32)
-        genes = torch.cat(genes, dim=0).detach().cpu().numpy().astype(np.uint32)  # uint16 is too small!
+        counts = np.concatenate(counts).astype(np.uint32)
+        barcodes = np.concatenate(barcodes).astype(np.uint32)
+        genes = np.concatenate(genes).astype(np.uint32)  # uint16 is too small!
 
         print('counts')
         print(counts)

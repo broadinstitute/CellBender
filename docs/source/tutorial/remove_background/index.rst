@@ -180,7 +180,9 @@ the command line:
 
 .. code-block:: console
 
-   $ ptrepack tiny_output_filtered.h5:/matrix tiny_output_filtered_seurat.h5:/matrix
+   $ ptrepack --complevel 5 tiny_output_filtered.h5:/matrix tiny_output_filtered_seurat.h5:/matrix
+
+(The flag ``--complevel 5`` ensures that the file size does not increase.)
 
 The file ``tiny_output_filtered_seurat.h5`` is now formatted *exactly* like
 a CellRanger v3 h5 file, so Seurat can load it:

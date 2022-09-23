@@ -9,6 +9,17 @@ ENV DOCKER='true' \
 # Add the local copy of cellbender to the docker image in /software
 ADD . /software/cellbender
 
+# TODO: consider installing gsutil like this to shrink image
+## gsutil with compiled crcmod
+#ENV GOOGLE_CLOUD_CLI_VERSION="397.0.0" \
+#    PATH="${HOME}/google-cloud-sdk/bin:/software:${PATH}"
+#RUN curl -so $HOME/google-cloud-cli.tar.gz https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${GOOGLE_CLOUD_CLI_VERSION}-linux-x86_64.tar.gz \
+# && tar -xzf $HOME/google-cloud-cli.tar.gz -C $HOME \
+# && pip install --no-cache-dir -U crcmod==1.7 \
+# && .$HOME/google-cloud-sdk/install.sh \
+# && rm $HOME/google-cloud-cli.tar.gz \
+# && rm -rf ~/.cache/pip
+
 # Install miniconda and google cloud SDK and pytorch and cellbender
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates sudo \
  && apt-get clean \
@@ -21,5 +32,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && conda install -y pytorch==1.11.0 cudatoolkit=10.2 -c pytorch \
  && yes | pip install -e /software/cellbender \
  && sudo rm -rf ~/.cache/pip \
- && conda clean -ya \
+ && conda clean -yaf \
  && mkdir -p /root/.cache/torch/kernels

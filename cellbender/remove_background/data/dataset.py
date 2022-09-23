@@ -8,7 +8,7 @@ import torch
 
 import cellbender.remove_background.model
 import cellbender.remove_background.consts as consts
-from cellbender.remove_background.infer import ProbPosterior, NaivePosterior
+from cellbender.remove_background.infer import Posterior, NaivePosterior
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.io import \
     load_data, write_matrix_to_cellranger_h5
@@ -61,7 +61,7 @@ class SingleCellRNACountsDataset:
             trim_dataset_for_analysis().
         model_name: Name of model being run.
         priors: Priors estimated from the data useful for modelling.
-        posterior: Posterior estimated after inference.
+        posterior: BasePosterior estimated after inference.
         empty_UMI_threshold: This UMI count is the maximum UMI count in the
             user-defined surely empty droplets.
 
@@ -495,13 +495,16 @@ class SingleCellRNACountsDataset:
 
             map_est = gmm.map_estimate(sort_by='loc', ascending=True)
 
-            # TODO: temp plotting upfront
-            # UMI count prior GMM plot.
-            fig = self.gmm.plot_summary()
-            fig.savefig('umi_hist.pdf', bbox_inches='tight', format='pdf')
-            logger.info("TEMP: Saved UMI count plot as umi_hist.pdf")
-
-            # TODO ======
+            # # TODO: temp plotting upfront
+            # TODO: even if this is kept, this is not the place
+            # TODO: tests will produce a plot, for example
+            # TODO: tests will produce a plot, for example
+            # # UMI count prior GMM plot.
+            # fig = self.gmm.plot_summary()
+            # fig.savefig('umi_hist.pdf', bbox_inches='tight', format='pdf')
+            # logger.info("TEMP: Saved UMI count plot as umi_hist.pdf")
+            #
+            # # TODO ======
 
             # The first entry is empties since we sort by count.
             self.priors['empty_counts'] = np.exp(map_est['loc'][0]).item()
@@ -768,14 +771,14 @@ class SingleCellRNACountsDataset:
 
         # Create posterior.
         if inferred_model is not None:
-            self.posterior = ProbPosterior(dataset_obj=self,
-                                           vi_model=inferred_model,
-                                           fpr=self.fpr[0],  # first FPR
-                                           posterior_batch_size=posterior_batch_size,
-                                           debug=debug)
+            self.posterior = Posterior(dataset_obj=self,
+                                       vi_model=inferred_model,
+                                       fpr=self.fpr[0],  # first FPR
+                                       posterior_batch_size=posterior_batch_size,
+                                       debug=debug)
 
             # Encoded values of latent variables.
-            enc = self.posterior.latents
+            enc = self.posterior.latents_map
             z = enc['z']
             d = enc['d']
             p = enc['p']
@@ -828,9 +831,9 @@ class SingleCellRNACountsDataset:
         file_name = os.path.splitext(os.path.basename(file_base))[0]
 
         # Obtain latents from posterior.
-        if self.posterior.name != 'naive':  # TODO: handle 'naive' as a Posterior too, and eliminate if-else
+        if self.posterior.name != 'naive':  # TODO: handle 'naive' as a BasePosterior too, and eliminate if-else
             # Encoded values of latent variables.
-            enc = self.posterior.latents
+            enc = self.posterior.latents_map
             z = enc['z']
             d = enc['d']
             p = enc['p']
@@ -888,6 +891,7 @@ class SingleCellRNACountsDataset:
 
             except Exception:
                 logger.warning("Unable to save all plots.")
+                logger.warning(traceback.format_exc())
 
         # Estimate the ambient-background-subtracted UMI count matrix.
         if self.model_name == 'simple':
@@ -895,7 +899,7 @@ class SingleCellRNACountsDataset:
             inferred_count_matrix = self.data['matrix'].tocsc()
             logger.info("Simple model: outputting un-altered count matrix.")
         else:
-            inferred_count_matrix = self.posterior.mean
+            inferred_count_matrix = self.posterior.denoised_counts
 
         # TODO: there seems to be some kind of a huge gap between the above
         # TODO: computation and the below file writing.  HUGE gap in time!
@@ -988,8 +992,8 @@ class SingleCellRNACountsDataset:
             # Re-compute posterior counts for each new lambda.
             if i > 0:  # no need to re-compute for the first FPR: this is already done.
                 self.posterior.fpr = fpr  # reach in and change the FPR
-                self.posterior._get_mean()  # force re-computation of posterior
-            inferred_count_matrix = self.posterior.mean
+                self.posterior._get_denoised_counts()  # force re-computation of posterior
+            inferred_count_matrix = self.posterior.denoised_counts
 
             # TODO: put the trimmed features back in!  (make sure this works)
             import time
@@ -997,7 +1001,7 @@ class SingleCellRNACountsDataset:
             logger.debug('Restoring eliminated features in cells')
             inferred_count_matrix = self._restore_eliminated_features_in_cells(
                 inferred_count_matrix,
-                self.posterior.latents['p'])
+                self.posterior.latents_map['p'])
             logger.debug(f'Took {time.time() - t:.3f} sec')
 
             # TODO: correct posterior cell probabilities so that no zero-count
@@ -1051,6 +1055,7 @@ class SingleCellRNACountsDataset:
                 logger.info(f'Saved output metrics as {metrics_file_name}')
             except Exception:
                 logger.warning("Unable to collect output metrics.")
+                logger.warning(traceback.format_exc())
 
         return write_succeeded
 
