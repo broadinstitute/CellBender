@@ -7,9 +7,10 @@ import torch
 
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.posterior import Posterior, torch_binary_search, \
-    PRmu, PRq
+    PRmu, PRq, IndexConverter
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
     log_prob_sparse_to_dense, todense_fill
+from cellbender.remove_background.estimation import Mean
 
 from typing import Dict, Union
 
@@ -111,7 +112,7 @@ def test_PRq(log_prob_coo, alpha, n_chunks, cuda):
     print('targets are correct\n\n')
 
     print('means after regularization')
-    regularized_coo = PRq().regularize(
+    regularized_coo = PRq.regularize(
         noise_count_posterior_coo=log_prob_coo['coo'],
         noise_offsets=log_prob_coo['offsets'],
         alpha=alpha,
@@ -134,14 +135,133 @@ def test_PRq(log_prob_coo, alpha, n_chunks, cuda):
     )
 
 
+@pytest.mark.parametrize('fpr', [0., 0.1, 1], ids=lambda a: f'fpr{a}')
+@pytest.mark.parametrize('n_chunks', [1, 2], ids=lambda n: f'{n}chunks')
+# @pytest.mark.parametrize('per_gene', [False, True], ids=lambda n: 'per_gene' if n else 'overall')
+@pytest.mark.parametrize('per_gene', [False], ids=lambda n: 'per_gene' if n else 'overall')
+@pytest.mark.parametrize('cuda',
+                         [False,
+                          pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA,
+                                       reason='requires CUDA'))],
+                         ids=lambda b: 'cuda' if b else 'cpu')
+def test_PRmu(log_prob_coo, fpr, per_gene, n_chunks, cuda):
+
+    target_tolerance = 0.5
+
+    index_converter = IndexConverter(total_n_cells=log_prob_coo['coo'].shape[0], total_n_genes=1)
+    print(index_converter)
+
+    print('raw count matrix')
+    count_matrix = sp.csr_matrix(np.expand_dims(np.array([0, 0, 1, 2, 5]), axis=-1))  # reflecting filled in log_prob values
+    print(count_matrix)
+
+    print('input log_prob matrix, densified')
+    dense_input_log_prob = torch.tensor(log_prob_sparse_to_dense(log_prob_coo['coo'])).float()
+    print(dense_input_log_prob)
+    print('probability sums per row')
+    print(torch.logsumexp(dense_input_log_prob, dim=-1).exp())
+    print('(row 0 is a missing row)')
+
+    estimator = Mean(index_converter=index_converter)
+    mean_noise_csr = estimator.estimate_noise(
+        noise_log_prob_coo=log_prob_coo['coo'],
+        noise_offsets=log_prob_coo['offsets'],
+        device='cuda' if cuda else 'cpu',
+    )
+    print(f'Mean estimator removes {mean_noise_csr.sum()} counts total')
+
+    print('testing compute_target_removal()')
+    targets = PRmu._compute_target_removal(noise_count_posterior_coo=log_prob_coo['coo'],
+                                           noise_offsets=log_prob_coo['offsets'],
+                                           raw_count_csr_for_cells=count_matrix,
+                                           fpr=fpr,
+                                           index_converter=index_converter,
+                                           device='cuda' if cuda else 'cpu',
+                                           per_gene=per_gene)
+    print(f'aiming to remove {targets} overall counts per cell')
+    n_cells = 4  # hard coded from the log_prob_coo
+    print(f'so about {targets * n_cells} counts total')
+
+    print('means after regularization')
+    regularized_coo = PRmu.regularize(
+        noise_count_posterior_coo=log_prob_coo['coo'],
+        noise_offsets=log_prob_coo['offsets'],
+        index_converter=index_converter,
+        raw_count_matrix=count_matrix,
+        fpr=fpr,
+        per_gene=per_gene,
+        device='cuda' if cuda else 'cpu',
+        target_tolerance=target_tolerance,
+        n_chunks=n_chunks,
+    )
+    print('regularized posterior:')
+    dense_regularized_log_prob = torch.tensor(log_prob_sparse_to_dense(regularized_coo)).float()
+    print(dense_regularized_log_prob)
+
+    print('MAP noise:')
+    map_noise = torch.argmax(dense_regularized_log_prob, dim=-1)
+    print(map_noise)
+
+    if fpr == 0.:
+        torch.testing.assert_close(
+            actual=map_noise.sum().float(),
+            expected=torch.tensor(mean_noise_csr.sum()).float(),
+            rtol=1,
+            atol=1,
+        )
+    elif fpr == 1.:
+        torch.testing.assert_close(
+            actual=map_noise.sum().float(),
+            expected=torch.tensor(count_matrix.sum()).float(),
+            rtol=1,
+            atol=1,
+        )
+    else:
+        assert torch.tensor(mean_noise_csr.sum()).float() - 1 <= map_noise.sum().float(), \
+            'Noise estimate is less than Mean estimator'
+        assert torch.tensor(count_matrix.sum()).float() >= map_noise.sum().float(), \
+            'Noise estimate is greater than sum of counts... this should never happen'
+
+    # TODO: this test is very weak... it's just hard to test it exactly...
+    # TODO: passing should mean the code will run, but not that it's quantitatively accurate
+
+
 @pytest.mark.skip
-def test_PRmu():
+def test_create_posterior():
     pass
 
 
-@pytest.mark.skip
 def test_index_converter():
-    pass
+    index_converter = IndexConverter(total_n_cells=10, total_n_genes=5)
+    print(index_converter)
+
+    # check basic conversion
+    n = np.array([0, 1, 2, 3])
+    g = n.copy()
+    m = index_converter.get_m_indices(cell_inds=n, gene_inds=g)
+    print(f'm inds are {m}')
+    truth = 5 * n + g
+    print(f'expected {truth}')
+    np.testing.assert_equal(m, truth)
+
+    # back and forth
+    n_star, g_star = index_converter.get_ng_indices(m_inds=m)
+    np.testing.assert_equal(n, n_star)
+    np.testing.assert_equal(g, g_star)
+
+    # check on input validity checking
+    with pytest.raises(ValueError):
+        index_converter.get_m_indices(cell_inds=np.array([-1]), gene_inds=g)
+    with pytest.raises(ValueError):
+        index_converter.get_m_indices(cell_inds=np.array([10]), gene_inds=g)
+    with pytest.raises(ValueError):
+        index_converter.get_m_indices(cell_inds=n, gene_inds=np.array([-1]))
+    with pytest.raises(ValueError):
+        index_converter.get_m_indices(cell_inds=n, gene_inds=np.array([5]))
+    with pytest.raises(ValueError):
+        index_converter.get_ng_indices(m_inds=np.array([-1]))
+    with pytest.raises(ValueError):
+        index_converter.get_ng_indices(m_inds=np.array([10 * 5]))
 
 
 @pytest.mark.skip

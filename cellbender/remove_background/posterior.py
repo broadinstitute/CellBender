@@ -13,7 +13,7 @@ from cellbender.remove_background.model import calculate_mu, calculate_lambda
 from cellbender.monitor import get_hardware_usage
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.estimation import EstimationMethod, \
-    MultipleChoiceKnapsack, pandas_grouped_apply, numba_logsumexp
+    MultipleChoiceKnapsack, pandas_grouped_apply, numba_logsumexp, Mean, MAP
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
     log_prob_sparse_to_dense, zero_out_csr_rows
 
@@ -143,7 +143,7 @@ class Posterior:
             **kwargs: These end up in noise_log_pdf()
 
         Returns:
-            self._noise_count_posterior_coo: This sparse CSR object contains all
+            self._noise_count_posterior_coo: This sparse COO object contains all
                 the information about the posterior noise count distribution,
                 but it is a bit complicated. The data per entry (m, c) are
                 stored in COO format. The rows "m" represent a combined
@@ -253,10 +253,6 @@ class Posterior:
                 noise_log_pdf_NGC,
                 tensor_for_nonzeros=tensor_for_nonzeros,
             )
-
-            # Add the noise count offsets back in.
-            # TODO: this doesn't really work: will error if any c > n_counts_max
-            # c_i = c_i + noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu().numpy()
 
             # Get the original gene index from gene index in the trimmed dataset.
             genes_i = self.analyzed_gene_inds[genes_i_analyzed]
@@ -714,16 +710,99 @@ class PosteriorRegularization(ABC):
     def __init__(self):
         super(PosteriorRegularization, self).__init__()
 
+    @staticmethod
     @abstractmethod
-    def regularize(self,
-                   noise_count_posterior_coo: sp.coo_matrix,
+    def regularize(noise_count_posterior_coo: sp.coo_matrix,
                    noise_offsets: Dict[int, int],
                    **kwargs) -> sp.coo_matrix:
         """Perform posterior regularization"""
         pass
 
+
+class PRq(PosteriorRegularization):
+    """Approximate noise CDF quantile targeting:
+
+    E_reg[noise_counts] >= E[noise_counts] + \alpha * Std[noise_counts]
+
+    """
+
+    @staticmethod
+    @numba.njit(fastmath=True)
+    def _log_mean_plus_alpha_std(c: np.ndarray, log_prob: np.ndarray, alpha: float):
+        prob = np.exp(log_prob)
+        mean = (c * prob).sum()
+        std = np.sqrt((np.square(c - mean) * prob).sum())
+        return np.log(mean + alpha * std)
+
+    @staticmethod
+    def _target_fun(df: pd.DataFrame, alpha: float) -> int:
+        return PRq._log_mean_plus_alpha_std(c=df['c'].to_numpy(),
+                                            log_prob=df['log_prob'].to_numpy(),
+                                            alpha=alpha)
+
+    @staticmethod
+    def _compute_log_target_dict(noise_count_posterior_coo: sp.coo_matrix,
+                                 alpha: float,
+                                 sort_first: bool = True) -> Dict[int, float]:
+        """Given the noise count posterior, return log(mean + alpha * std)
+        for each 'm' index
+
+        NOTE: noise_log_pdf_BC should be normalized
+
+        Args:
+            noise_count_posterior_coo: The noise count posterior data structure
+            alpha: The tunable parameter of mean-targeting posterior
+                regularization. The output distribution has a mean which is
+                input_mean + alpha * input_std (if possible)
+            sort_first: Sort by m-index.
+
+        Returns:
+            log_mean_plus_alpha_std: Dict keyed by 'm', where values are
+                log(mean + alpha * std)
+
+        """
+        log_mean_plus_alpha_std = pandas_grouped_apply(coo=noise_count_posterior_coo,
+                                                       sort_first=sort_first,
+                                                       fun=partial(PRq._target_fun, alpha=alpha))
+        return dict(zip(log_mean_plus_alpha_std['m'], log_mean_plus_alpha_std['result']))
+
+    @staticmethod
+    def _get_alpha_log_constraint_violation_given_beta(
+            beta_B: torch.Tensor,
+            log_pdf_noise_counts_BC: torch.Tensor,
+            noise_count_BC: torch.Tensor,
+            log_mu_plus_alpha_sigma_B: torch.Tensor) -> torch.Tensor:
+        """Returns log constraint violation for the regularized posterior of p(x), which
+        here is p(\omega) = p(x) e^{\beta x}, and we want
+        E[\omega] = E[x] + \alpha * Std[x] = log_mu_plus_alpha_sigma_B.exp()
+
+        NOTE: Binary search to find the root of this function can yield a value for beta_B.
+
+        Args:
+            beta_B: The parameter of the regularized posterior, with batch dimension
+            log_pdf_noise_counts_BC: The probability density of noise counts, with batch
+                and count dimensions
+            noise_count_BC: Noise counts, with batch and count dimensions
+            log_mu_plus_alpha_sigma_B: The constraint value to be satisfied, with batch dimension
+
+        Returns:
+            The amount by which the desired equality with log_mu_plus_alpha_sigma_B is violated,
+                with batch dimension
+
+        """
+
+        log_numerator_B = torch.logsumexp(
+            noise_count_BC.log() + log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC,
+            dim=-1,
+        )
+        log_denominator_B = torch.logsumexp(
+            log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC,
+            dim=-1,
+        )
+        return log_numerator_B - log_denominator_B - log_mu_plus_alpha_sigma_B
+
+    @staticmethod
     def _chunked_compute_regularized_posterior(
-            self,
             noise_count_posterior_coo: sp.coo_matrix,
             noise_offsets: Dict[int, int],
             log_constraint_violation_fcn: Callable[[torch.Tensor, torch.Tensor,
@@ -825,105 +904,22 @@ class PosteriorRegularization(ABC):
                                                       shape=noise_count_posterior_coo.shape)
         return reg_noise_count_posterior_coo
 
-
-class PRq(PosteriorRegularization):
-    """Approximate noise CDF quantile targeting:
-
-    E_reg[noise_counts] >= E[noise_counts] + \alpha * Std[noise_counts]
-
-    """
-
     @staticmethod
-    @numba.njit(fastmath=True)
-    def _log_mean_plus_alpha_std(c: np.ndarray, log_prob: np.ndarray, alpha: float):
-        prob = np.exp(log_prob)
-        mean = (c * prob).sum()
-        std = np.sqrt((np.square(c - mean) * prob).sum())
-        return np.log(mean + alpha * std)
-
-    @staticmethod
-    def _target_fun(df: pd.DataFrame, alpha: float) -> int:
-        return PRq._log_mean_plus_alpha_std(c=df['c'].to_numpy(),
-                                            log_prob=df['log_prob'].to_numpy(),
-                                            alpha=alpha)
-
-    @staticmethod
-    def _compute_log_target_dict(noise_count_posterior_coo: sp.coo_matrix,
-                                 alpha: float,
-                                 sort_first: bool = True) -> Dict[int, float]:
-        """Given the noise count posterior, return log(mean + alpha * std)
-        for each 'm' index
-
-        NOTE: noise_log_pdf_BC should be normalized
-
-        Args:
-            noise_count_posterior_coo: The noise count posterior data structure
-            alpha: The tunable parameter of mean-targeting posterior
-                regularization. The output distribution has a mean which is
-                input_mean + alpha * input_std (if possible)
-            sort_first: Sort by m-index.
-
-        Returns:
-            log_mean_plus_alpha_std: Dict keyed by 'm', where values are
-                log(mean + alpha * std)
-
-        """
-        log_mean_plus_alpha_std = pandas_grouped_apply(coo=noise_count_posterior_coo,
-                                                       sort_first=sort_first,
-                                                       fun=partial(PRq._target_fun, alpha=alpha))
-        return dict(zip(log_mean_plus_alpha_std['m'], log_mean_plus_alpha_std['result']))
-
-    @staticmethod
-    def _get_alpha_log_constraint_violation_given_beta(
-            beta_B: torch.Tensor,
-            log_pdf_noise_counts_BC: torch.Tensor,
-            noise_count_BC: torch.Tensor,
-            log_mu_plus_alpha_sigma_B: torch.Tensor) -> torch.Tensor:
-        """Returns log constraint violation for the regularized posterior of p(x), which
-        here is p(\omega) = p(x) e^{\beta x}, and we want
-        E[\omega] = E[x] + \alpha * Std[x] = log_mu_plus_alpha_sigma_B.exp()
-
-        NOTE: Binary search to find the root of this function can yield a value for beta_B.
-
-        Args:
-            beta_B: The parameter of the regularized posterior, with batch dimension
-            log_pdf_noise_counts_BC: The probability density of noise counts, with batch
-                and count dimensions
-            noise_count_BC: Noise counts, with batch and count dimensions
-            log_mu_plus_alpha_sigma_B: The constraint value to be satisfied, with batch dimension
-
-        Returns:
-            The amount by which the desired equality with log_mu_plus_alpha_sigma_B is violated,
-                with batch dimension
-
-        """
-
-        log_numerator_B = torch.logsumexp(
-            noise_count_BC.log() + log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC,
-            dim=-1,
-        )
-        log_denominator_B = torch.logsumexp(
-            log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC,
-            dim=-1,
-        )
-        return log_numerator_B - log_denominator_B - log_mu_plus_alpha_sigma_B
-
     @torch.no_grad()
-    def regularize(self,
-                   noise_count_posterior_coo: sp.coo_matrix,
+    def regularize(noise_count_posterior_coo: sp.coo_matrix,
                    noise_offsets: Dict[int, int],
                    alpha: float,
                    device: str = 'cuda',
                    target_tolerance: float = 0.001,
                    n_chunks: Optional[int] = None,
                    **kwargs) -> sp.coo_matrix:
-        """Perform posterior regularization using mean-targeting.
+        """Perform posterior regularization using approximate quantile-targeting.
 
         Args:
             noise_count_posterior_coo: The noise count posterior data structure
             noise_offsets: The noise count value at which each 'm' starts. A
                 dict keyed by 'm'.
-            alpha: The tunable parameter of mean-targeting posterior
+            alpha: The tunable parameter of quantile-targeting posterior
                 regularization. The output distribution has a mean which is
                 input_mean + alpha * input_std (if possible)
             device: Where to perform tensor operations: ['cuda', 'cpu']
@@ -936,21 +932,21 @@ class PRq(PosteriorRegularization):
                 posterior data structure
 
         """
-        logger.debug('Regularizing noise count posterior using mean-targeting')
+        logger.info('Regularizing noise count posterior using approximate quantile-targeting')
 
         # Compute the expectation for the mean post-regularization.
-        log_target_dict = self._compute_log_target_dict(
+        log_target_dict = PRq._compute_log_target_dict(
             noise_count_posterior_coo=noise_count_posterior_coo,
             alpha=alpha,
             sort_first=True,  # sort by m-index
         )
         log_target_M = torch.tensor(list(log_target_dict.values()))
 
-        reg_noise_count_posterior_coo = self._chunked_compute_regularized_posterior(
+        reg_noise_count_posterior_coo = PRq._chunked_compute_regularized_posterior(
             noise_count_posterior_coo=noise_count_posterior_coo,
             noise_offsets=noise_offsets,
             log_target_M=log_target_M,
-            log_constraint_violation_fcn=self._get_alpha_log_constraint_violation_given_beta,
+            log_constraint_violation_fcn=PRq._get_alpha_log_constraint_violation_given_beta,
             device=device,
             target_tolerance=target_tolerance,
             n_chunks=n_chunks,
@@ -962,16 +958,355 @@ class PRq(PosteriorRegularization):
 class PRmu(PosteriorRegularization):
     """Approximate noise mean targeting:
 
-    E_reg[noise_counts] >= E[noise_counts] + \alpha * Std[noise_counts]
+    Overall (default):
+        E_reg[\sum_{n} \sum_{g} noise_counts_{ng}] =
+            E[\sum_{n} \sum_{g} noise_counts_{ng}] + nFPR * \sum_{n} \sum_{g} raw_counts_{ng}
+
+    Per-gene:
+        E_reg[\sum_{n} noise_counts_{ng}] =
+            E[\sum_{n} noise_counts_{ng}] + nFPR * \sum_{n} raw_counts_{ng}
 
     """
 
-    def regularize(self,
-                   noise_count_posterior_coo: sp.coo_matrix,
+    @staticmethod
+    def _binary_search_for_posterior_regularization_factor(
+            noise_count_posterior_coo: sp.coo_matrix,
+            noise_offsets: Dict[int, int],
+            index_converter: 'IndexConverter',
+            target_removal: torch.Tensor,
+            shape: int,
+            target_tolerance: float = 100,
+            device: str = 'cpu',
+    ) -> torch.Tensor:
+        """Go through posterior and compute regularization factor(s),
+        using the defined targets"""
+
+        def summarize_map_noise_counts(x: torch.Tensor,
+                                       per_gene: bool) -> torch.Tensor:
+            """Given a (subset of the) noise posterior, compute the MAP estimate
+            and summarize it either as the overall sum or per-gene.
+            """
+
+            # Regularize posterior.
+            regularized_noise_posterior_coo = PRmu._chunked_compute_regularized_posterior(
+                noise_count_posterior_coo=noise_count_posterior_coo,
+                noise_offsets=noise_offsets,
+                index_converter=index_converter,
+                beta=x,
+                device=device,
+            )
+
+            # Compute MAP.
+            estimator = MAP(index_converter=index_converter)
+            map_noise_csr = estimator.estimate_noise(
+                noise_log_prob_coo=regularized_noise_posterior_coo,
+                noise_offsets=noise_offsets,
+                device=device,
+            )
+
+            # Summarize removal.
+            if per_gene:
+                noise_counts = np.array(map_noise_csr.sum(axis=0)).squeeze()
+            else:
+                noise_counts = map_noise_csr.sum()
+
+            return torch.tensor(noise_counts).to(device)
+
+        # Parallel binary search for beta for each entry of count matrix
+        per_gene = False
+        if target_removal.dim() > 0:
+            if len(target_removal) > 1:
+                per_gene = True
+
+        beta = torch_binary_search(
+            evaluate_outcome_given_value=lambda x:
+            summarize_map_noise_counts(x=x, per_gene=per_gene),
+            target_outcome=target_removal,
+            init_range=(torch.tensor([0., 100.])
+                        .to(device)
+                        .unsqueeze(0)
+                        .expand((shape,) + (2,))),
+            target_tolerance=target_tolerance,
+            max_iterations=100,
+            debug=True,
+        )
+        return beta
+
+    @staticmethod
+    def _chunked_compute_regularized_posterior(
+            noise_count_posterior_coo: sp.coo_matrix,
+            noise_offsets: Dict[int, int],
+            index_converter: 'IndexConverter',
+            beta: torch.Tensor,
+            device: str = 'cpu',
+            n_chunks: Optional[int] = None,
+    ) -> sp.coo_matrix:
+        """Go through posterior in chunks and compute regularized posterior,
+        using the defined targets"""
+
+        # Compute using dense chunks, chunked on m-index.
+        if n_chunks is None:
+            dense_size_gb = (len(np.unique(noise_count_posterior_coo.row))
+                             * (noise_count_posterior_coo.shape[1]
+                                + np.array(list(noise_offsets.values())).max())) * 4 / 1e9  # GB
+            n_chunks = max(1, int(dense_size_gb // 1))  # approx 1 GB each
+
+        # Make the sparse matrix compact in the sense that it should use contiguous row values.
+        unique_rows, densifiable_coo_rows = np.unique(noise_count_posterior_coo.row, return_inverse=True)
+        densifiable_csr = sp.csr_matrix((noise_count_posterior_coo.data,
+                                         (densifiable_coo_rows, noise_count_posterior_coo.col)),
+                                        shape=[len(unique_rows), noise_count_posterior_coo.shape[1]])
+        chunk_size = int(np.ceil(densifiable_csr.shape[0] / n_chunks))
+
+        m = []
+        c = []
+        log_prob_reg = []
+
+        for i in range(n_chunks):
+            # B index here represents a batch: the re-defined m-index
+            log_pdf_noise_counts_BC = torch.tensor(
+                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size):((i + 1) * chunk_size)])
+            ).to(device)
+            noise_count_BC = (torch.arange(log_pdf_noise_counts_BC.shape[1])
+                              .to(log_pdf_noise_counts_BC.device)
+                              .unsqueeze(0)
+                              .expand(log_pdf_noise_counts_BC.shape))
+            m_indices_for_chunk = unique_rows[(i * chunk_size):((i + 1) * chunk_size)]
+            # print(f'unique_rows is {unique_rows}')
+            # print(f'log_pdf_noise_counts_BC is {log_pdf_noise_counts_BC}')
+            # print(f'noise_count_BC is {noise_count_BC}')
+            # print(f'noise_offsets is {noise_offsets}')
+            # print(f'm_indices_for_chunk is {m_indices_for_chunk}')
+            noise_count_BC = noise_count_BC + torch.tensor([noise_offsets[m]
+                                                            for m in m_indices_for_chunk]).unsqueeze(-1)
+
+            # Get beta for this chunk.
+            if len(beta) == 1:
+                # posterior regularization factor is a single scalar
+                beta_B = beta
+            else:
+                # per-gene mode
+                n, g = index_converter.get_ng_indices(m_inds=m_indices_for_chunk)
+                beta_B = torch.tensor([beta[gene] for gene in g])
+
+            # TODO: is this functional form of q(c) ~ p(c) * exp(\lambda * c) really universal?
+            # Generate regularized posteriors.
+            log_pdf_reg_BC = log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC
+            log_pdf_reg_BC = log_pdf_reg_BC - torch.logsumexp(log_pdf_reg_BC, -1, keepdims=True)
+            # print('regularized posterior chunk:')
+            # print(log_pdf_reg_BC)
+
+            # Store sparse COO values in lists.
+            tensor_for_nonzeros = log_pdf_reg_BC.clone().exp()  # probability
+            # tensor_for_nonzeros.data[data == 0, :] = 0.  # remove data = 0
+            m_i, c_i, log_prob_reg_i = dense_to_sparse_op_torch(
+                log_pdf_reg_BC,
+                tensor_for_nonzeros=tensor_for_nonzeros,
+            )
+            m_i = np.array([m_indices_for_chunk[j] for j in m_i])  # chunk m to actual m
+            # Add sparse matrix values to lists.
+            try:
+                m.extend(m_i.tolist())
+                c.extend(c_i.tolist())
+                log_prob_reg.extend(log_prob_reg_i.tolist())
+            except TypeError as e:
+                # edge case of a single value
+                m.append(m_i)
+                c.append(c_i)
+                log_prob_reg.append(log_prob_reg_i)
+
+        # print(log_prob_reg)
+        # print(m)
+        # print(c)
+
+        reg_noise_count_posterior_coo = sp.coo_matrix((log_prob_reg, (m, c)),
+                                                      shape=noise_count_posterior_coo.shape)
+        return reg_noise_count_posterior_coo
+
+    @staticmethod
+    def _subset_posterior_by_cells(noise_count_posterior_coo: sp.coo_matrix,
+                                   index_converter: 'IndexConverter',
+                                   n_cells: int) -> sp.coo_matrix:
+        """Return a random slice of the full posterior with a specified number
+        of cells.
+
+        NOTE: Assumes that all the entries in noise_count_posterior_coo are for
+        cell-containing droplets, and not empty droplets.
+
+        Args:
+            noise_count_posterior_coo: The noise count posterior data structure
+            n_cells: The number of cells in the output subset
+
+        Returns:
+            subset_coo: Posterior for a random subset of cells, in COO format
+        """
+
+        # Choose cells that will be included.
+        m = noise_count_posterior_coo.row
+        n, g = index_converter.get_ng_indices(m_inds=m)
+        unique_cell_inds = np.unique(n)
+        if n_cells > len(unique_cell_inds):
+            logger.debug(f'Limiting n_cells during PRmu regularizer binary search to {unique_cell_inds}')
+            n_cells = len(unique_cell_inds)
+        chosen_n_values = set(np.random.choice(unique_cell_inds, size=n_cells, replace=False))
+        element_logic = [val in chosen_n_values for val in n]
+
+        # Subset the posterior.
+        data_subset = noise_count_posterior_coo.data[element_logic]
+        row_subset = noise_count_posterior_coo.row[element_logic]
+        col_subset = noise_count_posterior_coo.col[element_logic]
+        return sp.coo_matrix((data_subset, (row_subset, col_subset)),
+                             shape=noise_count_posterior_coo.shape)
+
+    @staticmethod
+    def _compute_target_removal(noise_count_posterior_coo: sp.coo_matrix,
+                                noise_offsets: Dict[int, int],
+                                raw_count_csr_for_cells: sp.csr_matrix,
+                                fpr: float,
+                                index_converter: 'IndexConverter',
+                                device: str,
+                                per_gene: bool) -> torch.Tensor:
+        """Given the noise count posterior, return a target removal, either
+        overall or per-gene.  NOTE: computes the value "per cell", i.e. dividing
+        by the number of cells, so that total removal can be computed by
+        multiplying this by the number of cells in question.
+
+        Args:
+            noise_count_posterior_coo: The noise count posterior data structure
+            noise_offsets: The noise count value at which each 'm' starts. A
+                dict keyed by 'm'.
+            raw_count_csr_for_cells: The input count matrix for only the cells
+                included in the posterior
+            fpr: The nominal FPR value used to compute the noise target
+            index_converter: The IndexConverter that gives information about
+                which m-index corresponds to which cell and gene.
+            device: 'cpu' or 'cuda'
+            per_gene: True to come up with one target per gene
+
+        Returns:
+            target_removal_scaled_per_cell: Noise count removal target
+
+        """
+
+        # Compute the expected noise using mean summarization.
+        estimator = Mean(index_converter=index_converter)
+        mean_noise_csr = estimator.estimate_noise(
+            noise_log_prob_coo=noise_count_posterior_coo,
+            noise_offsets=noise_offsets,
+            device=device,
+        )
+
+        # Compute the target removal.
+        approx_signal_csr = raw_count_csr_for_cells - mean_noise_csr
+        if per_gene:
+            target = np.array(mean_noise_csr.sum(axis=0)).squeeze()
+            target = target + fpr * np.array(approx_signal_csr.sum(axis=0)).squeeze()
+        else:
+            target = mean_noise_csr.sum()
+            target = target + fpr * approx_signal_csr.sum()
+
+        # Return target scaled to be per-cell.
+        n_cells = len(np.unique(noise_count_posterior_coo.row))
+        return torch.tensor(target / n_cells).to(device)
+
+    @staticmethod
+    @torch.no_grad()
+    def regularize(noise_count_posterior_coo: sp.coo_matrix,
                    noise_offsets: Dict[int, int],
+                   index_converter: 'IndexConverter',
+                   raw_count_matrix: sp.csr_matrix,
+                   fpr: float,
+                   per_gene: bool = False,
+                   device: str = 'cuda',
+                   target_tolerance: float = 0.5,
+                   n_chunks: Optional[int] = None,
                    **kwargs) -> sp.coo_matrix:
-        """Perform posterior regularization"""
-        raise NotImplementedError
+        """Perform posterior regularization using mean-targeting.
+
+        Args:
+            noise_count_posterior_coo: The noise count posterior data structure
+            noise_offsets: The noise count value at which each 'm' starts. A
+                dict keyed by 'm'.
+            index_converter: The IndexConverter that gives information about
+                which m-index corresponds to which cell and gene.
+            raw_count_matrix: The input raw count matrix
+            fpr: The tunable parameter of mean-targeting posterior
+                regularization. The output, summed over cells, has a removed
+                gene count distribution similar to what would be expected from
+                the noise model, plus this nominal false positive rate.
+            per_gene: True to find one posterior regularization factor for each
+                gene, False to find one overall scalar (behavior of v0.2.0)
+            device: Where to perform tensor operations: ['cuda', 'cpu']
+            target_tolerance: Tolerance when searching using binary search.
+                In units of counts, so this really should not be less than 0.5
+            n_chunks: For testing only - the number of chunks used to
+                compute the result when iterating over the posterior
+
+        Results:
+            reg_noise_count_posterior_coo: The regularized noise count
+                posterior data structure
+
+        """
+
+        logger.info('Regularizing noise count posterior using mean-targeting')
+
+        # Use a subset of the data to find regularization factors, to reduce time.
+        posterior_subset_coo = PRmu._subset_posterior_by_cells(
+            noise_count_posterior_coo=noise_count_posterior_coo,
+            index_converter=index_converter,
+            n_cells=1000,
+        )
+
+        # Compute target removal for MAP estimate using regularized posterior.
+        n, g = index_converter.get_ng_indices(m_inds=posterior_subset_coo.row)
+        included_cells = set(np.unique(n))
+        zero_out_logic = np.array([i not in included_cells
+                                   for i in range(raw_count_matrix.shape[0])])
+        print(zero_out_logic)
+        raw_count_csr_for_cells = zero_out_csr_rows(csr=raw_count_matrix,
+                                                    row_logic=zero_out_logic)
+        print(raw_count_csr_for_cells)
+        target_removal = PRmu._compute_target_removal(
+            noise_count_posterior_coo=posterior_subset_coo,
+            noise_offsets=noise_offsets,
+            index_converter=index_converter,
+            raw_count_csr_for_cells=raw_count_csr_for_cells,
+            fpr=fpr,
+            device=device,
+            per_gene=per_gene,
+        ) * len(included_cells)
+        print(included_cells)
+        print(len(included_cells))
+        print(target_removal)
+
+        # Find the posterior regularization factor(s).
+        if per_gene:
+            shape = index_converter.total_n_genes
+        else:
+            shape = 1
+        beta = PRmu._binary_search_for_posterior_regularization_factor(
+            noise_count_posterior_coo=posterior_subset_coo,
+            noise_offsets=noise_offsets,
+            index_converter=index_converter,
+            target_removal=target_removal,
+            device=device,
+            target_tolerance=target_tolerance,
+            shape=shape,
+        )
+
+        print('beta')
+        print(beta)
+
+        # Compute the posterior using the regularization factor(s).
+        regularized_noise_posterior_coo = PRmu._chunked_compute_regularized_posterior(
+            noise_count_posterior_coo=noise_count_posterior_coo,
+            noise_offsets=noise_offsets,
+            index_converter=index_converter,
+            beta=beta,
+            device=device,
+        )
+
+        return regularized_noise_posterior_coo
 
 
 class IndexConverter:
@@ -988,18 +1323,31 @@ class IndexConverter:
         self.total_n_genes = total_n_genes
         self.matrix_shape = (total_n_cells, total_n_genes)
 
+    def __repr__(self):
+        return (f'IndexConverter with'
+                f'\n\ttotal_n_cells: {self.total_n_cells}'
+                f'\n\ttotal_n_genes: {self.total_n_genes}'
+                f'\n\tmatrix_shape: {self.matrix_shape}')
+
     def get_m_indices(self, cell_inds: np.ndarray, gene_inds: np.ndarray) -> np.ndarray:
         """Given arrays of cell indices and gene indices, suitable for a sparse matrix,
         convert them to 'm' index values.
         """
-        assert (cell_inds >= 0).all()
-        assert (gene_inds >= 0).all()
+        if not ((cell_inds >= 0) & (cell_inds < self.total_n_cells)).all():
+            raise ValueError(f'Requested cell_inds out of range: '
+                             f'{cell_inds[(cell_inds < 0) | (cell_inds >= self.total_n_cells)]}')
+        if not ((gene_inds >= 0) & (gene_inds < self.total_n_genes)).all():
+            raise ValueError(f'Requested gene_inds out of range: '
+                             f'{gene_inds[(gene_inds < 0) | (gene_inds >= self.total_n_genes)]}')
         return cell_inds * self.total_n_genes + gene_inds
 
     def get_ng_indices(self, m_inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Given a list of 'm' index values, return two arrays: cell index values
         and gene index values, suitable for a sparse matrix.
         """
+        if not ((m_inds >= 0) & (m_inds < self.total_n_cells * self.total_n_genes)).all():
+            raise ValueError(f'Requested m_inds out of range: '
+                             f'{m_inds[(m_inds < 0) | (m_inds >= self.total_n_cells * self.total_n_genes)]}')
         return np.divmod(m_inds, self.total_n_genes)
 
 
@@ -1227,6 +1575,7 @@ def torch_binary_search(
     assert init_range.shape[-1] == 2, 'Last dimension of init_range should be 2: low and high'
 
     value_bracket = init_range.clone()
+    print(value_bracket)
 
     # Binary search algorithm.
     for i in range(max_iterations):
@@ -1239,11 +1588,14 @@ def torch_binary_search(
 
         # Calculate an expected false positive rate for this lam_mult value.
         outcome = evaluate_outcome_given_value(value)
+        print(f'outcome for {value} = {outcome}')
         residual = target_outcome - outcome
+        print(f'residual {residual}')
 
         # Check on residual and update our bracket values.
         stop_condition = (residual.abs() < target_tolerance).all()
         if stop_condition:
+            print(f'residual {residual.abs()} less than tol {target_tolerance}')
             break
         else:
             value_bracket[..., 0] = torch.where(outcome < target_outcome - target_tolerance,
@@ -1252,6 +1604,8 @@ def torch_binary_search(
             value_bracket[..., 1] = torch.where(outcome > target_outcome + target_tolerance,
                                                 value,
                                                 value_bracket[..., 1])
+
+        print(value_bracket)
 
     # If we stopped due to iteration limit, take the average value.
     if i == max_iterations:
