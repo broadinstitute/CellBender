@@ -77,6 +77,8 @@ class Posterior:
         self._noise_count_posterior_coo = None
         self._noise_count_posterior_kwargs = None
         self._noise_count_posterior_coo_offsets = None
+        self._noise_count_regularized_posterior_coo = None
+        self._noise_count_regularized_posterior_kwargs = None
         self._latents = None
         self.index_converter = IndexConverter(
             total_n_cells=dataset_obj.data['matrix'].shape[0],
@@ -101,9 +103,14 @@ class Posterior:
         """
 
         # Only compute using defaults if the cache is empty.
-        posterior_coo = (self._noise_count_posterior_coo
-                         if (self._noise_count_posterior_coo is not None)
-                         else self.cell_noise_count_posterior_coo())
+        if self._noise_count_regularized_posterior_coo is not None:
+            logger.debug('Using regularized posterior to compute denoised counts')
+            logger.debug(self._noise_count_regularized_posterior_kwargs)
+            posterior_coo = self._noise_count_regularized_posterior_coo
+        else:
+            posterior_coo = (self._noise_count_posterior_coo
+                             if (self._noise_count_posterior_coo is not None)
+                             else self.cell_noise_count_posterior_coo())
 
         # Instantiate Estimator object.
         estimator = estimator_constructor(index_converter=self.index_converter)
@@ -125,12 +132,33 @@ class Posterior:
 
         return denoised_counts.tocsc()
 
-    def regularize_posterior(self, regularization: 'PosteriorRegularization', **kwargs):
-        """Do posterior regularization. This should modify self._noise_count_posterior_coo"""
-        self._noise_count_posterior_coo = regularization.regularize(
+    def regularize_posterior(self,
+                             regularization: 'PosteriorRegularization',
+                             **kwargs) -> sp.coo_matrix:
+        """Do posterior regularization. This modifies self._noise_count_regularized_posterior_coo
+        in place, and returns it.
+
+        Args:
+            regularization: A particular PosteriorRegularization ['PRmu', 'PRq']
+            **kwargs: Arguments passed to the PosteriorRegularization's
+                .regularize() method
+
+        Returns:
+            Returns the regularized posterior, which is also stored in
+                self._noise_count_regularized_posterior_coo
+
+        """
+        self._noise_count_regularized_posterior_coo = regularization.regularize(
             noise_count_posterior_coo=self._noise_count_posterior_coo,
+            noise_offsets=self._noise_count_posterior_coo_offsets,
+            index_converter=self.index_converter,
             **kwargs,
         )
+        kwargs.update({'method': regularization.name()})
+        kwargs.pop('raw_count_matrix', None)  # do not store a copy here
+        self._noise_count_regularized_posterior_kwargs = kwargs
+        logger.debug('Updated posterior after performing regularization')
+        return self._noise_count_regularized_posterior_coo
 
     def cell_noise_count_posterior_coo(self, **kwargs) -> sp.coo_matrix:
         """Compute the full-blown posterior on noise counts for all cells,
@@ -156,7 +184,7 @@ class Posterior:
 
         if ((self._noise_count_posterior_coo is None)
                 or (kwargs != self._noise_count_posterior_kwargs)):
-            logger.debug('Running full_noise_count_posterior_csr() with default parameters')
+            logger.debug('Running _get_cell_noise_count_posterior_coo() to compute posterior')
             self._get_cell_noise_count_posterior_coo(**kwargs)
             self._noise_count_posterior_kwargs = kwargs
 
@@ -712,6 +740,12 @@ class PosteriorRegularization(ABC):
 
     @staticmethod
     @abstractmethod
+    def name():
+        """Short name of this regularization method"""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def regularize(noise_count_posterior_coo: sp.coo_matrix,
                    noise_offsets: Dict[int, int],
                    **kwargs) -> sp.coo_matrix:
@@ -725,6 +759,10 @@ class PRq(PosteriorRegularization):
     E_reg[noise_counts] >= E[noise_counts] + \alpha * Std[noise_counts]
 
     """
+
+    @staticmethod
+    def name():
+        return 'PRq'
 
     @staticmethod
     @numba.njit(fastmath=True)
@@ -742,8 +780,7 @@ class PRq(PosteriorRegularization):
 
     @staticmethod
     def _compute_log_target_dict(noise_count_posterior_coo: sp.coo_matrix,
-                                 alpha: float,
-                                 sort_first: bool = True) -> Dict[int, float]:
+                                 alpha: float) -> Dict[int, float]:
         """Given the noise count posterior, return log(mean + alpha * std)
         for each 'm' index
 
@@ -754,15 +791,16 @@ class PRq(PosteriorRegularization):
             alpha: The tunable parameter of mean-targeting posterior
                 regularization. The output distribution has a mean which is
                 input_mean + alpha * input_std (if possible)
-            sort_first: Sort by m-index.
 
         Returns:
             log_mean_plus_alpha_std: Dict keyed by 'm', where values are
                 log(mean + alpha * std)
 
         """
+        # Do not sort m indices, since the output is only supposed to change
+        # the COO and not the noise count offsets.
         log_mean_plus_alpha_std = pandas_grouped_apply(coo=noise_count_posterior_coo,
-                                                       sort_first=sort_first,
+                                                       sort_first=False,
                                                        fun=partial(PRq._target_fun, alpha=alpha))
         return dict(zip(log_mean_plus_alpha_std['m'], log_mean_plus_alpha_std['result']))
 
@@ -848,8 +886,11 @@ class PRq(PosteriorRegularization):
             # print(f'noise_count_BC is {noise_count_BC}')
             # print(f'noise_offsets is {noise_offsets}')
             # print(f'm_indices_for_chunk is {m_indices_for_chunk}')
-            noise_count_BC = noise_count_BC + torch.tensor([noise_offsets[m]
-                                                            for m in m_indices_for_chunk]).unsqueeze(-1)
+            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets[m]
+                                                             for m in m_indices_for_chunk],
+                                                            dtype=torch.float)
+                                               .unsqueeze(-1)
+                                               .to(device))
 
             # Parallel binary search for beta for each entry of count matrix
             beta_B = torch_binary_search(
@@ -938,9 +979,8 @@ class PRq(PosteriorRegularization):
         log_target_dict = PRq._compute_log_target_dict(
             noise_count_posterior_coo=noise_count_posterior_coo,
             alpha=alpha,
-            sort_first=True,  # sort by m-index
         )
-        log_target_M = torch.tensor(list(log_target_dict.values()))
+        log_target_M = torch.tensor(list(log_target_dict.values())).to(device)
 
         reg_noise_count_posterior_coo = PRq._chunked_compute_regularized_posterior(
             noise_count_posterior_coo=noise_count_posterior_coo,
@@ -969,6 +1009,10 @@ class PRmu(PosteriorRegularization):
     """
 
     @staticmethod
+    def name():
+        return 'PRmu'
+
+    @staticmethod
     def _binary_search_for_posterior_regularization_factor(
             noise_count_posterior_coo: sp.coo_matrix,
             noise_offsets: Dict[int, int],
@@ -976,6 +1020,7 @@ class PRmu(PosteriorRegularization):
             target_removal: torch.Tensor,
             shape: int,
             target_tolerance: float = 100,
+            max_iterations: int = 20,
             device: str = 'cpu',
     ) -> torch.Tensor:
         """Go through posterior and compute regularization factor(s),
@@ -1012,7 +1057,7 @@ class PRmu(PosteriorRegularization):
 
             return torch.tensor(noise_counts).to(device)
 
-        # Parallel binary search for beta for each entry of count matrix
+        # Perform binary search for beta.
         per_gene = False
         if target_removal.dim() > 0:
             if len(target_removal) > 1:
@@ -1022,12 +1067,12 @@ class PRmu(PosteriorRegularization):
             evaluate_outcome_given_value=lambda x:
             summarize_map_noise_counts(x=x, per_gene=per_gene),
             target_outcome=target_removal,
-            init_range=(torch.tensor([0., 100.])
+            init_range=(torch.tensor([-100., 200.])
                         .to(device)
                         .unsqueeze(0)
                         .expand((shape,) + (2,))),
             target_tolerance=target_tolerance,
-            max_iterations=100,
+            max_iterations=max_iterations,
             debug=True,
         )
         return beta
@@ -1077,8 +1122,11 @@ class PRmu(PosteriorRegularization):
             # print(f'noise_count_BC is {noise_count_BC}')
             # print(f'noise_offsets is {noise_offsets}')
             # print(f'm_indices_for_chunk is {m_indices_for_chunk}')
-            noise_count_BC = noise_count_BC + torch.tensor([noise_offsets[m]
-                                                            for m in m_indices_for_chunk]).unsqueeze(-1)
+            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets[m]
+                                                             for m in m_indices_for_chunk],
+                                                            dtype=torch.float)
+                                               .unsqueeze(-1)
+                                               .to(device))
 
             # Get beta for this chunk.
             if len(beta) == 1:
@@ -1162,6 +1210,7 @@ class PRmu(PosteriorRegularization):
     def _compute_target_removal(noise_count_posterior_coo: sp.coo_matrix,
                                 noise_offsets: Dict[int, int],
                                 raw_count_csr_for_cells: sp.csr_matrix,
+                                n_cells: int,
                                 fpr: float,
                                 index_converter: 'IndexConverter',
                                 device: str,
@@ -1195,9 +1244,13 @@ class PRmu(PosteriorRegularization):
             noise_offsets=noise_offsets,
             device=device,
         )
+        logger.debug(f'Total counts in raw matrix for cells = {raw_count_csr_for_cells.sum()}')
+        logger.debug(f'Total noise counts from mean noise estimator = {mean_noise_csr.sum()}')
 
         # Compute the target removal.
         approx_signal_csr = raw_count_csr_for_cells - mean_noise_csr
+        logger.debug(f'Approximate signal has total counts = {approx_signal_csr.sum()}')
+        logger.debug(f'nFPR is {fpr}')
         if per_gene:
             target = np.array(mean_noise_csr.sum(axis=0)).squeeze()
             target = target + fpr * np.array(approx_signal_csr.sum(axis=0)).squeeze()
@@ -1205,8 +1258,11 @@ class PRmu(PosteriorRegularization):
             target = mean_noise_csr.sum()
             target = target + fpr * approx_signal_csr.sum()
 
+        logger.debug(f'Noise removal target = {target}')
+
         # Return target scaled to be per-cell.
-        n_cells = len(np.unique(noise_count_posterior_coo.row))
+        logger.debug(f'Number of cells = {n_cells}')
+        logger.debug(f'Final noise target per cell = {target / n_cells}')
         return torch.tensor(target / n_cells).to(device)
 
     @staticmethod
@@ -1219,6 +1275,7 @@ class PRmu(PosteriorRegularization):
                    per_gene: bool = False,
                    device: str = 'cuda',
                    target_tolerance: float = 0.5,
+                   n_cells: int = 1000,
                    n_chunks: Optional[int] = None,
                    **kwargs) -> sp.coo_matrix:
         """Perform posterior regularization using mean-targeting.
@@ -1239,6 +1296,7 @@ class PRmu(PosteriorRegularization):
             device: Where to perform tensor operations: ['cuda', 'cpu']
             target_tolerance: Tolerance when searching using binary search.
                 In units of counts, so this really should not be less than 0.5
+            n_cells: To save time, use only this many cells to estimate removal
             n_chunks: For testing only - the number of chunks used to
                 compute the result when iterating over the posterior
 
@@ -1251,10 +1309,11 @@ class PRmu(PosteriorRegularization):
         logger.info('Regularizing noise count posterior using mean-targeting')
 
         # Use a subset of the data to find regularization factors, to reduce time.
+        logger.debug(f'Subsetting posterior to {n_cells} cells for this computation')
         posterior_subset_coo = PRmu._subset_posterior_by_cells(
             noise_count_posterior_coo=noise_count_posterior_coo,
             index_converter=index_converter,
-            n_cells=1000,
+            n_cells=n_cells,
         )
 
         # Compute target removal for MAP estimate using regularized posterior.
@@ -1262,27 +1321,32 @@ class PRmu(PosteriorRegularization):
         included_cells = set(np.unique(n))
         zero_out_logic = np.array([i not in included_cells
                                    for i in range(raw_count_matrix.shape[0])])
-        print(zero_out_logic)
+        # print(zero_out_logic)
         raw_count_csr_for_cells = zero_out_csr_rows(csr=raw_count_matrix,
                                                     row_logic=zero_out_logic)
-        print(raw_count_csr_for_cells)
+        # print(raw_count_csr_for_cells)
+        logger.debug('Computing target removal')
         target_removal = PRmu._compute_target_removal(
             noise_count_posterior_coo=posterior_subset_coo,
             noise_offsets=noise_offsets,
             index_converter=index_converter,
             raw_count_csr_for_cells=raw_count_csr_for_cells,
+            n_cells=len(included_cells),
             fpr=fpr,
             device=device,
             per_gene=per_gene,
         ) * len(included_cells)
-        print(included_cells)
-        print(len(included_cells))
-        print(target_removal)
+        logger.debug(f'Target removal is {target_removal}')
+        # print(included_cells)
+        # print(len(included_cells))
+        # print(target_removal)
 
         # Find the posterior regularization factor(s).
         if per_gene:
+            logger.debug('Computing optimal posterior regularization factors for each gene')
             shape = index_converter.total_n_genes
         else:
+            logger.debug('Computing optimal posterior regularization factor')
             shape = 1
         beta = PRmu._binary_search_for_posterior_regularization_factor(
             noise_count_posterior_coo=posterior_subset_coo,
@@ -1293,11 +1357,13 @@ class PRmu(PosteriorRegularization):
             target_tolerance=target_tolerance,
             shape=shape,
         )
+        logger.debug(f'Optimal posterior regularization factor\n{beta}')
 
-        print('beta')
-        print(beta)
+        # print('beta')
+        # print(beta)
 
         # Compute the posterior using the regularization factor(s).
+        logger.debug('Computing full regularized posterior')
         regularized_noise_posterior_coo = PRmu._chunked_compute_regularized_posterior(
             noise_count_posterior_coo=noise_count_posterior_coo,
             noise_offsets=noise_offsets,
@@ -1575,7 +1641,6 @@ def torch_binary_search(
     assert init_range.shape[-1] == 2, 'Last dimension of init_range should be 2: low and high'
 
     value_bracket = init_range.clone()
-    print(value_bracket)
 
     # Binary search algorithm.
     for i in range(max_iterations):
@@ -1588,14 +1653,11 @@ def torch_binary_search(
 
         # Calculate an expected false positive rate for this lam_mult value.
         outcome = evaluate_outcome_given_value(value)
-        print(f'outcome for {value} = {outcome}')
         residual = target_outcome - outcome
-        print(f'residual {residual}')
 
         # Check on residual and update our bracket values.
         stop_condition = (residual.abs() < target_tolerance).all()
         if stop_condition:
-            print(f'residual {residual.abs()} less than tol {target_tolerance}')
             break
         else:
             value_bracket[..., 0] = torch.where(outcome < target_outcome - target_tolerance,
@@ -1604,8 +1666,6 @@ def torch_binary_search(
             value_bracket[..., 1] = torch.where(outcome > target_outcome + target_tolerance,
                                                 value,
                                                 value_bracket[..., 1])
-
-        print(value_bracket)
 
     # If we stopped due to iteration limit, take the average value.
     if i == max_iterations:
