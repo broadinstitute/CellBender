@@ -6,14 +6,13 @@ import torch
 import numpy as np
 import scipy.sparse as sp
 import pandas as pd
-import numba
 
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.model import calculate_mu, calculate_lambda
 from cellbender.monitor import get_hardware_usage
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.estimation import EstimationMethod, \
-    MultipleChoiceKnapsack, pandas_grouped_apply, numba_logsumexp, Mean, MAP
+    MultipleChoiceKnapsack, Mean, MAP, apply_function_dense_chunks
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
     log_prob_sparse_to_dense, zero_out_csr_rows
 
@@ -765,18 +764,12 @@ class PRq(PosteriorRegularization):
         return 'PRq'
 
     @staticmethod
-    @numba.njit(fastmath=True)
-    def _log_mean_plus_alpha_std(c: np.ndarray, log_prob: np.ndarray, alpha: float):
-        prob = np.exp(log_prob)
-        mean = (c * prob).sum()
-        std = np.sqrt((np.square(c - mean) * prob).sum())
-        return np.log(mean + alpha * std)
-
-    @staticmethod
-    def _target_fun(df: pd.DataFrame, alpha: float) -> int:
-        return PRq._log_mean_plus_alpha_std(c=df['c'].to_numpy(),
-                                            log_prob=df['log_prob'].to_numpy(),
-                                            alpha=alpha)
+    def _log_mean_plus_alpha_std(log_prob: torch.Tensor, alpha: float):
+        c = torch.arange(log_prob.shape[1]).float().to(log_prob.device).unsqueeze(0)
+        prob = log_prob.exp()
+        mean = (c * prob).sum(dim=-1)
+        std = (((c - mean.unsqueeze(-1)).pow(2) * prob).sum(dim=-1)).sqrt()
+        return (mean + alpha * std).log()
 
     @staticmethod
     def _compute_log_target_dict(noise_count_posterior_coo: sp.coo_matrix,
@@ -797,12 +790,10 @@ class PRq(PosteriorRegularization):
                 log(mean + alpha * std)
 
         """
-        # Do not sort m indices, since the output is only supposed to change
-        # the COO and not the noise count offsets.
-        log_mean_plus_alpha_std = pandas_grouped_apply(coo=noise_count_posterior_coo,
-                                                       sort_first=False,
-                                                       fun=partial(PRq._target_fun, alpha=alpha))
-        return dict(zip(log_mean_plus_alpha_std['m'], log_mean_plus_alpha_std['result']))
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_count_posterior_coo,
+                                             fun=PRq._log_mean_plus_alpha_std,
+                                             alpha=alpha)
+        return dict(zip(result['m'], result['result']))
 
     @staticmethod
     def _get_alpha_log_constraint_violation_given_beta(
@@ -881,11 +872,6 @@ class PRq(PosteriorRegularization):
                               .unsqueeze(0)
                               .expand(log_pdf_noise_counts_BC.shape))
             m_indices_for_chunk = unique_rows[(i * chunk_size):((i + 1) * chunk_size)]
-            # print(f'unique_rows is {unique_rows}')
-            # print(f'log_pdf_noise_counts_BC is {log_pdf_noise_counts_BC}')
-            # print(f'noise_count_BC is {noise_count_BC}')
-            # print(f'noise_offsets is {noise_offsets}')
-            # print(f'm_indices_for_chunk is {m_indices_for_chunk}')
             noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets[m]
                                                              for m in m_indices_for_chunk],
                                                             dtype=torch.float)
@@ -909,23 +895,19 @@ class PRq(PosteriorRegularization):
                 target_tolerance=target_tolerance,
                 max_iterations=100,
             )
-            # print(beta_B)
 
-            # TODO: is this functional form of q(c) ~ p(c) * exp(\lambda * c) really universal?
             # Generate regularized posteriors.
             log_pdf_reg_BC = log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC
             log_pdf_reg_BC = log_pdf_reg_BC - torch.logsumexp(log_pdf_reg_BC, -1, keepdims=True)
-            # print('regularized posterior chunk:')
-            # print(log_pdf_reg_BC)
 
             # Store sparse COO values in lists.
             tensor_for_nonzeros = log_pdf_reg_BC.clone().exp()  # probability
-            # tensor_for_nonzeros.data[data == 0, :] = 0.  # remove data = 0
             m_i, c_i, log_prob_reg_i = dense_to_sparse_op_torch(
                 log_pdf_reg_BC,
                 tensor_for_nonzeros=tensor_for_nonzeros,
             )
             m_i = np.array([m_indices_for_chunk[j] for j in m_i])  # chunk m to actual m
+
             # Add sparse matrix values to lists.
             try:
                 m.extend(m_i.tolist())
@@ -936,10 +918,6 @@ class PRq(PosteriorRegularization):
                 m.append(m_i)
                 c.append(c_i)
                 log_prob_reg.append(log_prob_reg_i)
-
-        # print(log_prob_reg)
-        # print(m)
-        # print(c)
 
         reg_noise_count_posterior_coo = sp.coo_matrix((log_prob_reg, (m, c)),
                                                       shape=noise_count_posterior_coo.shape)
@@ -1117,11 +1095,6 @@ class PRmu(PosteriorRegularization):
                               .unsqueeze(0)
                               .expand(log_pdf_noise_counts_BC.shape))
             m_indices_for_chunk = unique_rows[(i * chunk_size):((i + 1) * chunk_size)]
-            # print(f'unique_rows is {unique_rows}')
-            # print(f'log_pdf_noise_counts_BC is {log_pdf_noise_counts_BC}')
-            # print(f'noise_count_BC is {noise_count_BC}')
-            # print(f'noise_offsets is {noise_offsets}')
-            # print(f'm_indices_for_chunk is {m_indices_for_chunk}')
             noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets[m]
                                                              for m in m_indices_for_chunk],
                                                             dtype=torch.float)
@@ -1137,12 +1110,9 @@ class PRmu(PosteriorRegularization):
                 n, g = index_converter.get_ng_indices(m_inds=m_indices_for_chunk)
                 beta_B = torch.tensor([beta[gene] for gene in g])
 
-            # TODO: is this functional form of q(c) ~ p(c) * exp(\lambda * c) really universal?
             # Generate regularized posteriors.
             log_pdf_reg_BC = log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC
             log_pdf_reg_BC = log_pdf_reg_BC - torch.logsumexp(log_pdf_reg_BC, -1, keepdims=True)
-            # print('regularized posterior chunk:')
-            # print(log_pdf_reg_BC)
 
             # Store sparse COO values in lists.
             tensor_for_nonzeros = log_pdf_reg_BC.clone().exp()  # probability
@@ -1152,6 +1122,7 @@ class PRmu(PosteriorRegularization):
                 tensor_for_nonzeros=tensor_for_nonzeros,
             )
             m_i = np.array([m_indices_for_chunk[j] for j in m_i])  # chunk m to actual m
+
             # Add sparse matrix values to lists.
             try:
                 m.extend(m_i.tolist())
@@ -1162,10 +1133,6 @@ class PRmu(PosteriorRegularization):
                 m.append(m_i)
                 c.append(c_i)
                 log_prob_reg.append(log_prob_reg_i)
-
-        # print(log_prob_reg)
-        # print(m)
-        # print(c)
 
         reg_noise_count_posterior_coo = sp.coo_matrix((log_prob_reg, (m, c)),
                                                       shape=noise_count_posterior_coo.shape)
@@ -1337,9 +1304,6 @@ class PRmu(PosteriorRegularization):
             per_gene=per_gene,
         ) * len(included_cells)
         logger.debug(f'Target removal is {target_removal}')
-        # print(included_cells)
-        # print(len(included_cells))
-        # print(target_removal)
 
         # Find the posterior regularization factor(s).
         if per_gene:
@@ -1358,9 +1322,6 @@ class PRmu(PosteriorRegularization):
             shape=shape,
         )
         logger.debug(f'Optimal posterior regularization factor\n{beta}')
-
-        # print('beta')
-        # print(beta)
 
         # Compute the posterior using the regularization factor(s).
         logger.debug('Computing full regularized posterior')

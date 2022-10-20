@@ -6,8 +6,7 @@ import numpy as np
 import torch
 
 from cellbender.remove_background.estimation import Mean, MAP, \
-    SingleSample, ThresholdCDF, MultipleChoiceKnapsack, numba_logsumexp, \
-    pandas_grouped_apply
+    SingleSample, ThresholdCDF, MultipleChoiceKnapsack, pandas_grouped_apply
 from cellbender.remove_background.posterior import IndexConverter, \
     dense_to_sparse_op_torch, log_prob_sparse_to_dense
 
@@ -311,28 +310,6 @@ def test_mckp(mckp_log_prob_coo, n_cells, target, truth, truth_mat):
     if truth_mat is not None:
         np.testing.assert_array_equal(out_mat, truth_mat)
     np.testing.assert_array_equal(out, truth)
-
-
-@torch.no_grad()
-@pytest.mark.parametrize('a, out',
-                         ([np.array([-np.inf, -np.inf, -np.inf]), -np.inf],
-                          [np.array([0, -np.inf, -np.inf]), 0.],
-                          [np.array([-1, -2., -3]), None],
-                          [np.array([-808, -809, -812.]), None]))
-def test_numba_logsumexp(a, out):
-    """Test custom logsumexp function that can be jitted with numba"""
-
-    if out is None:
-        out = torch.logsumexp(torch.tensor(a), dim=-1).numpy()
-    computed = numba_logsumexp(a)
-    print('custom function computed')
-    print(computed)
-    print('truth (from pytorch implementation)')
-    print(out)
-    print('brute force without log-sum-exp trick: np.log(np.sum(np.exp(a)))')
-    print(np.log(np.sum(np.exp(a))))  # just for a point of comparison: not used
-
-    np.testing.assert_equal(computed, out)
 
 
 def _firstval(df):

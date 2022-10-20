@@ -1,9 +1,7 @@
 """Classes and methods for estimation of noise counts, given a posterior."""
 
 import scipy.sparse as sp
-from scipy.special import logsumexp
 import numpy as np
-import numba
 import pandas as pd
 import torch
 from torch.distributions.categorical import Categorical
@@ -76,82 +74,6 @@ class EstimationMethod(ABC):
         coo.sum_duplicates()
         return coo.tocsr()
 
-    @staticmethod
-    def chunked_iterator(coo: sp.coo_matrix,
-                         max_dense_batch_size_GB: float = 1.) \
-            -> Generator[Tuple[sp.coo_matrix, np.ndarray], None, None]:
-        """Return an iterator which yields the full dataset in chunks.
-
-        NOTE: Idea is to prevent memory overflow. The use case is for worst-case
-        scenario algorithms that have to make things into dense matrix chunks in
-        order to do their compute.
-
-        Args:
-            coo: Sparse COO matrix with rows as generalized 'm'-indices and
-                columns as noise count values.
-            max_dense_batch_size_GB: Size of a batch on disk, in gigabytes.
-
-        Returns:
-            A generator that yields compact CSR sparse matrices until the whole dataset
-            has been yielded. "Compact" in the sense that if they are made dense, there
-            will be no all-zero rows.
-                Tuple[chunk csr, actual row values in the full matrix]
-
-        """
-        n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4  # torch float32 is 4 bytes
-        batch_size = int(np.floor(n_elements_in_batch / coo.shape[1]))
-
-        for i in range(0, coo.row.max(), batch_size):
-            logic = (coo.row >= i) & (coo.row < (i + batch_size))
-            # Map these row values to a compact set of unique integers
-            unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
-            chunk_coo = sp.coo_matrix(
-                (coo.data[logic], (rows, coo.col[logic])),
-                shape=(len(unique_row_values), coo.shape[1]),
-            )
-            yield (chunk_coo, unique_row_values)
-
-    def apply_function_dense_chunks(self,
-                                    noise_log_prob_coo: sp.coo_matrix,
-                                    fun: Callable[[torch.Tensor], torch.Tensor],
-                                    device: str = 'cpu') \
-            -> Dict[str, np.ndarray]:
-        """Uses chunked_iterator to densify chunked portions of a COO sparse
-        matrix and then applies a function to the dense chunks, keeping track
-        of the results per row.
-
-        NOTE: The function should produce one value per row of the dense matrix.
-              The COO should contain log probability in data.
-
-        Args:
-            noise_log_prob_coo: The posterior noise count log prob data structure,
-                indexed by 'm' as rows
-            fun: Pytorch function that operates on a dense tensor and produces
-                one value per row
-            device: ['cpu', 'cuda'] - whether to perform the pytorch sampling
-                operation on CPU or GPU. It's pretty fast on CPU already.
-
-        Returns:
-            Dict containing
-                'm': np.ndarray of indices
-                'result': the values computed by the function
-
-        """
-        array_length = len(np.unique(noise_log_prob_coo.row))
-
-        m = np.zeros(array_length)
-        out = np.zeros(array_length)
-        a = 0
-
-        for coo, row in self.chunked_iterator(coo=noise_log_prob_coo):
-            dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
-            s = fun(dense_tensor)
-            m[a:(a + len(s))] = row
-            out[a:(a + len(s))] = s.detach().cpu().numpy()
-            a = a + len(s)
-
-        return {'m': m, 'result': out}
-
 
 class SingleSample(EstimationMethod):
     """A single sample from the noise count posterior"""
@@ -178,25 +100,15 @@ class SingleSample(EstimationMethod):
         def _torch_sample(x):
             return Categorical(logits=x, validate_args=False).sample()
 
-        result = self.apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                                  fun=_torch_sample,
-                                                  device=device)
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
+                                             fun=_torch_sample,
+                                             device=device)
         return self._estimation_array_to_csr(data=result['result'], m=result['m'],
                                              noise_offsets=noise_offsets)
 
 
 class Mean(EstimationMethod):
     """Posterior mean"""
-
-    # @staticmethod
-    # @np.errstate(divide='ignore')  # allow log(0.) = -inf: that's what we want
-    # @numba.jit
-    # def _fun(c: np.ndarray, log_prob: np.ndarray) -> float:
-    #     # mean in log probability space, and then exponentiate
-    #     log_of_summed_probs = numba_logsumexp(np.log(c) + log_prob)
-    #     return np.exp(log_of_summed_probs).item()
-    #     # honestly this is probably fine, but time difference is negligible
-    #     # return (c * np.exp(log_prob)).sum().item()
 
     def estimate_noise(self,
                        noise_log_prob_coo: sp.coo_matrix,
@@ -214,23 +126,14 @@ class Mean(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-
-        # def mean_fun(df: pd.DataFrame) -> float:
-        #     return self._fun(df['c'].to_numpy(), df['log_prob'].to_numpy())
-        #
-        # result = pandas_grouped_apply(coo=noise_log_prob_coo, fun=mean_fun)
-        # return self._estimation_array_to_csr(data=result['result'],
-        #                                      m=result['m'],
-        #                                      noise_offsets=noise_offsets,
-        #                                      dtype=np.float32)
         c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
         def _torch_mean(x):
             return torch.matmul(x.exp(), c)
 
-        result = self.apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                                  fun=_torch_mean,
-                                                  device=device)
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
+                                             fun=_torch_mean,
+                                             device=device)
         return self._estimation_array_to_csr(data=result['result'], m=result['m'],
                                              noise_offsets=noise_offsets,
                                              dtype=np.float32)
@@ -238,15 +141,6 @@ class Mean(EstimationMethod):
 
 class MAP(EstimationMethod):
     """The canonical maximum a posteriori"""
-
-    # @staticmethod
-    # @numba.njit
-    # def _compute_map(c: np.ndarray, log_prob: np.ndarray) -> int:
-    #     return c[log_prob.argmax()]
-    #
-    # @staticmethod
-    # def map_fun(df: pd.DataFrame) -> int:
-    #     return MAP._compute_map(df['c'].values, df['log_prob'].values)
 
     @staticmethod
     def torch_argmax(x):
@@ -271,9 +165,9 @@ class MAP(EstimationMethod):
             noise_count_csr: Estimated noise count matrix.
         """
 
-        result = self.apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                                  fun=self.torch_argmax,
-                                                  device=device)
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
+                                             fun=self.torch_argmax,
+                                             device=device)
         return self._estimation_array_to_csr(data=result['result'], m=result['m'],
                                              noise_offsets=noise_offsets)
 
@@ -282,19 +176,14 @@ class ThresholdCDF(EstimationMethod):
     """Noise estimation via thresholding the noise count CDF"""
 
     @staticmethod
-    @numba.jit
-    def _compute_cdf(c: np.ndarray, log_prob: np.ndarray, q: float) -> int:
-        return (np.cumsum(np.exp(log_prob)) <= q).sum() + c[0]
-
-    @staticmethod
-    def cdf_fun(df: pd.DataFrame, q: float) -> int:
-        """NOTE: Log probs must be in sorted order by noise count"""
-        return ThresholdCDF._compute_cdf(df['c'].to_numpy(), df['log_prob'].to_numpy(), q)
+    def torch_cdf_fun(x: torch.Tensor, q: float):
+        return (x.exp().cumsum(dim=-1) <= q).sum(dim=-1)
 
     def estimate_noise(self,
                        noise_log_prob_coo: sp.coo_matrix,
                        noise_offsets: Dict[int, int],
                        q: float = 0.5,
+                       device: str = 'cpu',
                        **kwargs) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts
 
@@ -307,11 +196,11 @@ class ThresholdCDF(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-        result = pandas_grouped_apply(coo=noise_log_prob_coo,
-                                      fun=partial(self.cdf_fun, q=q),
-                                      sort_first=True)
-        return self._estimation_array_to_csr(data=result['result'],
-                                             m=result['m'],
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
+                                             fun=self.torch_cdf_fun,
+                                             device=device,
+                                             q=q)
+        return self._estimation_array_to_csr(data=result['result'], m=result['m'],
                                              noise_offsets=noise_offsets)
 
 
@@ -344,9 +233,9 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
         # First we need to compute the MAP to find out which direction to go.
         t = time.time()
-        map_dict = self.apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                                    fun=MAP.torch_argmax,
-                                                    device='cpu')
+        map_dict = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
+                                               fun=MAP.torch_argmax,
+                                               device='cpu')
         map_csr = self._estimation_array_to_csr(data=map_dict['result'],
                                                 m=map_dict['m'],
                                                 noise_offsets=noise_offsets)
@@ -445,6 +334,84 @@ class MultipleChoiceKnapsack(EstimationMethod):
         return map_csr + steps_csr
 
 
+def chunked_iterator(coo: sp.coo_matrix,
+                     max_dense_batch_size_GB: float = 1.) \
+        -> Generator[Tuple[sp.coo_matrix, np.ndarray], None, None]:
+    """Return an iterator which yields the full dataset in chunks.
+
+    NOTE: Idea is to prevent memory overflow. The use case is for worst-case
+    scenario algorithms that have to make things into dense matrix chunks in
+    order to do their compute.
+
+    Args:
+        coo: Sparse COO matrix with rows as generalized 'm'-indices and
+            columns as noise count values.
+        max_dense_batch_size_GB: Size of a batch on disk, in gigabytes.
+
+    Returns:
+        A generator that yields compact CSR sparse matrices until the whole dataset
+        has been yielded. "Compact" in the sense that if they are made dense, there
+        will be no all-zero rows.
+            Tuple[chunk csr, actual row values in the full matrix]
+
+    """
+    n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4  # torch float32 is 4 bytes
+    batch_size = int(np.floor(n_elements_in_batch / coo.shape[1]))
+
+    for i in range(0, coo.row.max(), batch_size):
+        logic = (coo.row >= i) & (coo.row < (i + batch_size))
+        # Map these row values to a compact set of unique integers
+        unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
+        chunk_coo = sp.coo_matrix(
+            (coo.data[logic], (rows, coo.col[logic])),
+            shape=(len(unique_row_values), coo.shape[1]),
+        )
+        yield (chunk_coo, unique_row_values)
+
+
+def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
+                                fun: Callable[[torch.Tensor], torch.Tensor],
+                                device: str = 'cpu',
+                                **kwargs) \
+        -> Dict[str, np.ndarray]:
+    """Uses chunked_iterator to densify chunked portions of a COO sparse
+    matrix and then applies a function to the dense chunks, keeping track
+    of the results per row.
+
+    NOTE: The function should produce one value per row of the dense matrix.
+          The COO should contain log probability in data.
+
+    Args:
+        noise_log_prob_coo: The posterior noise count log prob data structure,
+            indexed by 'm' as rows
+        fun: Pytorch function that operates on a dense tensor and produces
+            one value per row
+        device: ['cpu', 'cuda'] - whether to perform the pytorch sampling
+            operation on CPU or GPU. It's pretty fast on CPU already.
+        **kwargs: Passed to fun
+
+    Returns:
+        Dict containing
+            'm': np.ndarray of indices
+            'result': the values computed by the function
+
+    """
+    array_length = len(np.unique(noise_log_prob_coo.row))
+
+    m = np.zeros(array_length)
+    out = np.zeros(array_length)
+    a = 0
+
+    for coo, row in chunked_iterator(coo=noise_log_prob_coo):
+        dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
+        s = fun(dense_tensor, **kwargs)
+        m[a:(a + len(s))] = row
+        out[a:(a + len(s))] = s.detach().cpu().numpy()
+        a = a + len(s)
+
+    return {'m': m.astype(int), 'result': out}
+
+
 def pandas_grouped_apply(coo: sp.coo_matrix,
                          fun: Callable[[pd.DataFrame], Union[int, float]],
                          extra_data: Optional[Dict[str, np.ndarray]] = None,
@@ -505,22 +472,3 @@ def _parallel_pandas_apply(df_grouped: pd.core.groupby.DataFrameGroupBy,
     with mp.Pool(mp.cpu_count()) as p:
         output_list = p.map(fun, group_df_list)
     return np.array(groupby_val), np.array(output_list)
-
-
-@numba.njit(fastmath=True)
-def numba_logsumexp(p: np.ndarray) -> float:
-    """Apply logsumexp to a 1D array
-    Args:
-        p: The one-dimensional array to logsumexp
-    """
-    x = np.max(p)
-    m = len(p)
-    res = 0
-    for j in range(m):
-        res += np.exp(p[j] - x)
-    res = np.log(res)
-    if res == -np.inf:
-        # sum of -inf and anything gives a nan, but we want -inf
-        return -np.inf
-    else:
-        return x + res
