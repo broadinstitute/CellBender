@@ -11,7 +11,7 @@ The recommended installation is as follows. Create a conda environment and activ
 .. code-block:: console
 
   $ conda create -n CellBender python=3.7
-  $ source activate CellBender
+  $ conda activate CellBender
 
 Install the `pytables <https://www.pytables.org>`_ module:
 
