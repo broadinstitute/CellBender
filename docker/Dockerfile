@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH=/home/user/miniconda/bin:$PATH
 ENV CONDA_AUTO_UPDATE_CONDA=false
 
-RUN conda install -y pytorch torchvision cudatoolkit -c pytorch \
+RUN conda install -y "pytorch>=1.9.0" torchvision cudatoolkit -c pytorch \
  && conda install -y -c anaconda pytables \
  && conda clean -ya
 

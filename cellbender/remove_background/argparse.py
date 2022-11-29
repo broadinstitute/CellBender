@@ -139,11 +139,11 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "do not exceed 1e-3). (default: %(default)s)")
     subparser.add_argument("--final-elbo-fail-fraction", type=float,
                            help="Training is considered to have failed if "
-                                "final_training_ELBO >= best_training_ELBO*(1+FINAL_ELBO_FAIL_FRACTION). "
+                                "(best_test_ELBO - final_test_ELBO)/(best_test_DLBO - initial_train_ELBO) > FINAL_ELBO_FAIL_FRACTION."
                                 "(default: do not fail training based on final_training_ELBO)")
     subparser.add_argument("--epoch-elbo-fail-fraction", type=float,
                            help="Training is considered to have failed if "
-                                "current_epoch_training_ELBO >= previous_epoch_training_ELBO*(1+EPOCH_ELBO_FAIL_FRACTION). "
+                                "(previous_epoch_test_ELBO - current_epoch_test_ELBO)/(previous_epoch_test_ELBO - initial_train_ELBO) > EPOCH_ELBO_FAIL_FRACTION."
                                 "(default: do not fail training based on epoch_training_ELBO)")
     subparser.add_argument("--num-training-tries", type=int, default=1,
                            help="Number of times to attempt to train the model.  Each subsequent "
