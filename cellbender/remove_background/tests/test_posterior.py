@@ -7,7 +7,7 @@ import torch
 
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.posterior import Posterior, torch_binary_search, \
-    PRmu, PRq, IndexConverter
+    PRmu, PRq, IndexConverter, compute_mean_target_removal_as_function
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
     log_prob_sparse_to_dense, todense_fill
 from cellbender.remove_background.estimation import Mean
@@ -172,14 +172,16 @@ def test_PRmu(log_prob_coo, fpr, per_gene, n_chunks, cuda):
 
     print('testing compute_target_removal()')
     n_cells = 4  # hard coded from the log_prob_coo
-    targets = PRmu._compute_target_removal(noise_count_posterior_coo=log_prob_coo['coo'],
-                                           noise_offsets=log_prob_coo['offsets'],
-                                           raw_count_csr_for_cells=count_matrix,
-                                           n_cells=n_cells,
-                                           fpr=fpr,
-                                           index_converter=index_converter,
-                                           device='cuda' if cuda else 'cpu',
-                                           per_gene=per_gene)
+    target_fun = compute_mean_target_removal_as_function(
+        noise_count_posterior_coo=log_prob_coo['coo'],
+        noise_offsets=log_prob_coo['offsets'],
+        raw_count_csr_for_cells=count_matrix,
+        n_cells=n_cells,
+        index_converter=index_converter,
+        device='cuda' if cuda else 'cpu',
+        per_gene=per_gene,
+    )
+    targets = target_fun(fpr)
     print(f'aiming to remove {targets} overall counts per cell')
     print(f'so about {targets * n_cells} counts total')
 
@@ -308,3 +310,20 @@ def test_torch_binary_search():
     print(f'Output = {out}')
     assert ((out - torch.tensor([1., 2.])).abs() <= tol).all(), \
         'Two-argument input binary search failed'
+
+
+@pytest.mark.parametrize('fpr', [0., 0.1, 1], ids=lambda a: f'fpr{a}')
+@pytest.mark.parametrize('per_gene', [False], ids=lambda n: 'per_gene' if n else 'overall')
+@pytest.mark.parametrize('cuda',
+                         [False,
+                          pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA,
+                                       reason='requires CUDA'))],
+                         ids=lambda b: 'cuda' if b else 'cpu')
+def test_compute_mean_target_removal_as_function(log_prob_coo):
+    """The target removal computation, very important for the MCKP output"""
+
+    noise_count_posterior_coo = log_prob_coo['coo'],
+    noise_offsets = log_prob_coo['offsets'],
+    device = 'cuda' if cuda else 'cpu',
+
+

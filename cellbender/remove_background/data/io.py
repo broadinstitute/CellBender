@@ -207,7 +207,8 @@ def write_matrix_to_cellranger_h5(
                 for k, v in unravel(key, value).items():
                     d_out.update(v)
                 for k, v in d_out.items():
-                    f.create_array(metadata_group, k, v)
+                    if v is not None:
+                        f.create_array(metadata_group, k, v)
 
     logger.info(f"Succeeded in writing CellRanger v{cellranger_version} "
                 f"format output to file {output_file}")

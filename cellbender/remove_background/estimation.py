@@ -164,7 +164,6 @@ class MAP(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-
         result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
                                              fun=self.torch_argmax,
                                              device=device)
@@ -405,9 +404,14 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
     for coo, row in chunked_iterator(coo=noise_log_prob_coo):
         dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
         s = fun(dense_tensor, **kwargs)
-        m[a:(a + len(s))] = row
-        out[a:(a + len(s))] = s.detach().cpu().numpy()
-        a = a + len(s)
+        if s.ndim == 0:
+            # avoid "TypeError: len() of a 0-d tensor"
+            len_s = 1
+        else:
+            len_s = len(s)
+        m[a:(a + len_s)] = row
+        out[a:(a + len_s)] = s.detach().cpu().numpy()
+        a = a + len_s
 
     return {'m': m.astype(int), 'result': out}
 

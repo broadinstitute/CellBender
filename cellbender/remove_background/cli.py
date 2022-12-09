@@ -84,6 +84,10 @@ class CLI(AbstractCLI):
                                  "significant speed-ups.\n\n")
                 sys.stdout.flush()  # Write immediately
 
+        # Make sure n_threads makes sense.
+        if args.n_threads is not None:
+            assert args.n_threads > 0, "--cpu-threads must be an integer >= 1"
+
         # Ensure all network layer dimensions are positive.
         for n in args.z_hidden_dims:
             assert n > 0, "--z-layers must be all positive integers."
@@ -145,6 +149,22 @@ class CLI(AbstractCLI):
                              f"possibility of lost work upon preemption.")
             sys.stdout.flush()  # Write immediately
 
+        # Posterior regularization checking.
+        if args.cdf_threshold_q is not None:
+            assert (args.cdf_threshold_q >= 0.) and (args.cdf_threshold_q <= 1.), \
+                f"Argument --q must be in range [0, 1] since it is a CDF threshold."
+        if args.posterior_regularization == 'PRq':
+            # We need q for the CDF threshold estimator.
+            assert args.prq_alpha is not None, \
+                'Input argument --alpha must be specified when using ' \
+                '--posterior-regularization PRq'
+
+        # Estimator checking.
+        if args.estimator == 'cdf':
+            # We need q for the CDF threshold estimator.
+            assert args.cdf_threshold_q is not None, \
+                'Input argument --q must be specified when using --estimator cdf'
+
         self.args = args
 
         return args
@@ -182,7 +202,9 @@ def setup_and_logging(args):
     hashcode = create_workflow_hashcode(
         module_path=os.path.dirname(cellbender.__file__),
         args_to_remove=(['output_file', 'fpr', 'input_checkpoint_tarball', 'debug',
-                         'posterior_batch_size', 'checkpoint_min', 'truth_file']
+                         'posterior_batch_size', 'checkpoint_min', 'truth_file',
+                         'posterior_regularization', 'cdf_threshold_q', 'prq_alpha',
+                         'estimator']
                         + (['epochs'] if args.constant_learning_rate else [])),
         args=args)[:10]
     args.checkpoint_filename = hashcode  # store this in args

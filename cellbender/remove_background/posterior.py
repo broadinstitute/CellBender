@@ -15,14 +15,122 @@ from cellbender.remove_background.estimation import EstimationMethod, \
     MultipleChoiceKnapsack, Mean, MAP, apply_function_dense_chunks
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
     log_prob_sparse_to_dense, zero_out_csr_rows
+from cellbender.remove_background.checkpoint import load_from_checkpoint, \
+    unpack_tarball, make_tarball
 
 from typing import Tuple, List, Dict, Optional, Union, Callable
 from abc import ABC, abstractmethod
-from functools import partial
 import logging
+import argparse
+import tempfile
+import os
 
 
 logger = logging.getLogger('cellbender')
+
+
+def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset',
+                                       inferred_model: 'RemoveBackgroundPyroModel',
+                                       args: argparse.Namespace) -> 'Posterior':
+    """After inference, compute the full posterior noise count log probability
+    distribution. Save it and make it part of the checkpoint file.
+
+    NOTE: Loads posterior from checkpoint file if available.
+    NOTE: Saves posterior as args.output_file + '_posterior.npz' and adds this
+        file to the checkpoint tarball as well.
+
+    Args:
+        dataset_obj: Input data in the form of a SingleCellRNACountsDataset
+            object.
+        inferred_model: Model after inference is complete.
+        args: Input command line parsed arguments.
+
+    Returns:
+        posterior: Posterior object with noise count log prob computed, as well
+            as regularization if called for.
+
+    """
+
+    assert os.path.exists(args.input_checkpoint_tarball), \
+        f'Checkpoint file {args.input_checkpoint_tarball} does not exist, ' \
+        f'presumably because saving of the checkpoint file has been manually ' \
+        f'interrupted. load_or_compute_posterior_and_save() will not work ' \
+        f'properly without an existing checkpoint file. Please re-run and ' \
+        f'allow a checkpoint file to be saved.'
+
+    def _do_posterior_regularization(posterior: Posterior):
+
+        # Optional posterior regularization.
+        if args.posterior_regularization is not None:
+            if args.posterior_regularization == 'PRq':
+                posterior.regularize_posterior(
+                    regularization=PRq,
+                    alpha=args.prq_alpha,
+                    device='cuda',
+                )
+            elif args.posterior_regularization == 'PRmu':
+                posterior.regularize_posterior(
+                    regularization=PRmu,
+                    raw_count_matrix=dataset_obj.data['matrix'],
+                    fpr=args.fpr[0],
+                    per_gene=False,
+                    device='cuda',
+                )
+            elif args.posterior_regularization == 'PRmu_gene':
+                posterior.regularize_posterior(
+                    regularization=PRmu,
+                    raw_count_matrix=dataset_obj.data['matrix'],
+                    fpr=args.fpr[0],
+                    per_gene=True,
+                    device='cuda',
+                )
+            else:
+                raise ValueError(f'Got a posterior regularization input of '
+                                 f'"{args.posterior_regularization}", which is not '
+                                 f'allowed. Use ["PRq", "PRmu", "PRmu_gene"]')
+
+        else:
+            # Delete a pre-existing posterior regularization in case an old one was saved.
+            posterior.clear_regularized_posterior()
+
+    posterior = Posterior(
+        dataset_obj=dataset_obj,
+        vi_model=inferred_model,
+        posterior_batch_size=args.posterior_batch_size,
+        debug=args.debug,
+    )
+    ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
+                                          filebase=args.checkpoint_filename,
+                                          to_load='posterior')
+    if os.path.exists(ckpt_posterior.get('posterior_file', 'does_not_exist')):
+        # Load posterior if it was saved in the checkpoint.
+        posterior.load(file=ckpt_posterior['posterior_file'])
+        _do_posterior_regularization(posterior)
+    else:
+        # Compute posterior.
+        logger.info('Posterior not currently included in checkpoint.')
+        posterior.cell_noise_count_posterior_coo()
+        _do_posterior_regularization(posterior)
+
+        # Save posterior and add it to checkpoint tarball.
+        saved = posterior.save(file=args.output_file[:-3] + '_posterior.npz')
+        success = False
+        if saved:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball,
+                                          directory=tmp_dir)
+                if unpacked:
+                    posterior.save(file=os.path.join(tmp_dir, 'posterior.npz'), verbose=False)
+                    all_ckpt_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+                                      if os.path.isfile(os.path.join(tmp_dir, f))]
+                    success = make_tarball(files=all_ckpt_files,
+                                           tarball_name=args.input_checkpoint_tarball)
+        if success:
+            logger.info('Added posterior object to checkpoint file.')
+        else:
+            logger.warning('Failed to add posterior object to checkpoint file.')
+
+    return posterior
 
 
 class Posterior:
@@ -84,6 +192,45 @@ class Posterior:
             total_n_genes=dataset_obj.data['matrix'].shape[1],
         )
 
+    def save(self, file: str, verbose: bool = True) -> bool:
+        """Save the full posterior in compressed array .npz format."""
+
+        if self._noise_count_posterior_coo is None:
+            self.cell_noise_count_posterior_coo()
+
+        d = {'posterior_noise_count_log_prob_coo': self._noise_count_posterior_coo,
+             'posterior_noise_count_coo_offsets': self._noise_count_posterior_coo_offsets,
+             'posterior_kwargs': self._noise_count_posterior_kwargs,
+             'regularized_posterior_noise_count_log_prob_coo': self._noise_count_regularized_posterior_coo,
+             'regularized_posterior_kwargs': self._noise_count_regularized_posterior_kwargs,
+             'latents': self.latents_map}
+
+        # TODO: this can choke (out of memory) on very large datasets... not sure why
+        # TODO: is it the compression?  should I save uncompressed and then compress myself?
+        try:
+            np.savez_compressed(file=file, **d)
+            if verbose:
+                logger.info(f'Saved posterior as {file}')
+            return True
+        except MemoryError:
+            logger.warning('Attempting to save the posterior as a compressed NPZ file '
+                           'resulted in an out-of-memory error. This is a known issue '
+                           'but please report it as a github issue.')
+            return False
+
+    def load(self, file: str) -> bool:
+        """Load a saved posterior in compressed array .npz format."""
+
+        d = np.load(file=file, allow_pickle=True)
+        self._noise_count_posterior_coo = d['posterior_noise_count_log_prob_coo'].item()
+        self._noise_count_posterior_coo_offsets = d['posterior_noise_count_coo_offsets'].item()
+        self._noise_count_posterior_kwargs = d['posterior_kwargs'].item()
+        self._noise_count_regularized_posterior_coo = d['regularized_posterior_noise_count_log_prob_coo'].item()
+        self._noise_count_regularized_posterior_kwargs = d['regularized_posterior_kwargs'].item()
+        self._latents = d['latents'].item()
+        logger.info(f'Loaded pre-computed posterior from {file}')
+        return True
+
     def compute_denoised_counts(self,
                                 estimator_constructor: EstimationMethod,
                                 **kwargs) -> sp.csc_matrix:
@@ -103,10 +250,13 @@ class Posterior:
 
         # Only compute using defaults if the cache is empty.
         if self._noise_count_regularized_posterior_coo is not None:
+            # Priority is taken by a regularized posterior, since presumably
+            # the user computed it for a reason.
             logger.debug('Using regularized posterior to compute denoised counts')
             logger.debug(self._noise_count_regularized_posterior_kwargs)
             posterior_coo = self._noise_count_regularized_posterior_coo
         else:
+            # Use exact posterior if a regularized version is not computed.
             posterior_coo = (self._noise_count_posterior_coo
                              if (self._noise_count_posterior_coo is not None)
                              else self.cell_noise_count_posterior_coo())
@@ -147,6 +297,28 @@ class Posterior:
                 self._noise_count_regularized_posterior_coo
 
         """
+
+        # Check if this posterior regularization has already been computed.
+        currently_cached = False if self._noise_count_regularized_posterior_kwargs is None else True
+        if currently_cached:
+            # Check if it's the right thing.
+            for k, v in self._noise_count_regularized_posterior_kwargs.items():
+                if k == 'method':
+                    if v != regularization.name():
+                        currently_cached = False
+                        break
+                elif k not in kwargs.keys():
+                    currently_cached = False
+                    break
+                elif kwargs[k] != v:
+                    currently_cached = False
+                    break
+        if currently_cached:
+            # What's been requested is what's cached.
+            logger.debug('Regularized posterior is already cached')
+            return self._noise_count_regularized_posterior_coo
+
+        # Compute the regularized posterior.
         self._noise_count_regularized_posterior_coo = regularization.regularize(
             noise_count_posterior_coo=self._noise_count_posterior_coo,
             noise_offsets=self._noise_count_posterior_coo_offsets,
@@ -159,6 +331,13 @@ class Posterior:
         logger.debug('Updated posterior after performing regularization')
         return self._noise_count_regularized_posterior_coo
 
+    def clear_regularized_posterior(self):
+        """Remove the saved regularized posterior (so that compute_denoised_counts()
+        will not default to using it).
+        """
+        self._noise_count_regularized_posterior_coo = None
+        self._noise_count_regularized_posterior_kwargs = None
+
     def cell_noise_count_posterior_coo(self, **kwargs) -> sp.coo_matrix:
         """Compute the full-blown posterior on noise counts for all cells,
         and store it in COO sparse format on CPU, and cache in
@@ -167,14 +346,14 @@ class Posterior:
         NOTE: This is the main entrypoint for this class.
 
         Args:
-            **kwargs: These end up in noise_log_pdf()
+            **kwargs: Passed to _get_cell_noise_count_posterior_coo()
 
         Returns:
             self._noise_count_posterior_coo: This sparse COO object contains all
                 the information about the posterior noise count distribution,
                 but it is a bit complicated. The data per entry (m, c) are
                 stored in COO format. The rows "m" represent a combined
-                cell-and-gene index, which a one-to-one mapping from m to
+                cell-and-gene index, with a one-to-one mapping from m to
                 (n, g). The columns "c" represent noise count values. Values
                 are the log probabilities of a noise count value. A smaller
                 matrix can be constructed by increasing the threshold
@@ -935,9 +1114,8 @@ class PRq(PosteriorRegularization):
         """Perform posterior regularization using approximate quantile-targeting.
 
         Args:
-            noise_count_posterior_coo: The noise count posterior data structure
-            noise_offsets: The noise count value at which each 'm' starts. A
-                dict keyed by 'm'.
+            noise_count_posterior_coo: Noise count posterior log prob COO
+            noise_offsets: Offset noise counts per 'm' index
             alpha: The tunable parameter of quantile-targeting posterior
                 regularization. The output distribution has a mean which is
                 input_mean + alpha * input_std (if possible)
@@ -951,7 +1129,7 @@ class PRq(PosteriorRegularization):
                 posterior data structure
 
         """
-        logger.info('Regularizing noise count posterior using approximate quantile-targeting')
+        logger.info(f'Regularizing noise count posterior using approximate quantile-targeting with alpha={alpha}')
 
         # Compute the expectation for the mean post-regularization.
         log_target_dict = PRq._compute_log_target_dict(
@@ -1174,65 +1352,6 @@ class PRmu(PosteriorRegularization):
                              shape=noise_count_posterior_coo.shape)
 
     @staticmethod
-    def _compute_target_removal(noise_count_posterior_coo: sp.coo_matrix,
-                                noise_offsets: Dict[int, int],
-                                raw_count_csr_for_cells: sp.csr_matrix,
-                                n_cells: int,
-                                fpr: float,
-                                index_converter: 'IndexConverter',
-                                device: str,
-                                per_gene: bool) -> torch.Tensor:
-        """Given the noise count posterior, return a target removal, either
-        overall or per-gene.  NOTE: computes the value "per cell", i.e. dividing
-        by the number of cells, so that total removal can be computed by
-        multiplying this by the number of cells in question.
-
-        Args:
-            noise_count_posterior_coo: The noise count posterior data structure
-            noise_offsets: The noise count value at which each 'm' starts. A
-                dict keyed by 'm'.
-            raw_count_csr_for_cells: The input count matrix for only the cells
-                included in the posterior
-            fpr: The nominal FPR value used to compute the noise target
-            index_converter: The IndexConverter that gives information about
-                which m-index corresponds to which cell and gene.
-            device: 'cpu' or 'cuda'
-            per_gene: True to come up with one target per gene
-
-        Returns:
-            target_removal_scaled_per_cell: Noise count removal target
-
-        """
-
-        # Compute the expected noise using mean summarization.
-        estimator = Mean(index_converter=index_converter)
-        mean_noise_csr = estimator.estimate_noise(
-            noise_log_prob_coo=noise_count_posterior_coo,
-            noise_offsets=noise_offsets,
-            device=device,
-        )
-        logger.debug(f'Total counts in raw matrix for cells = {raw_count_csr_for_cells.sum()}')
-        logger.debug(f'Total noise counts from mean noise estimator = {mean_noise_csr.sum()}')
-
-        # Compute the target removal.
-        approx_signal_csr = raw_count_csr_for_cells - mean_noise_csr
-        logger.debug(f'Approximate signal has total counts = {approx_signal_csr.sum()}')
-        logger.debug(f'nFPR is {fpr}')
-        if per_gene:
-            target = np.array(mean_noise_csr.sum(axis=0)).squeeze()
-            target = target + fpr * np.array(approx_signal_csr.sum(axis=0)).squeeze()
-        else:
-            target = mean_noise_csr.sum()
-            target = target + fpr * approx_signal_csr.sum()
-
-        logger.debug(f'Noise removal target = {target}')
-
-        # Return target scaled to be per-cell.
-        logger.debug(f'Number of cells = {n_cells}')
-        logger.debug(f'Final noise target per cell = {target / n_cells}')
-        return torch.tensor(target / n_cells).to(device)
-
-    @staticmethod
     @torch.no_grad()
     def regularize(noise_count_posterior_coo: sp.coo_matrix,
                    noise_offsets: Dict[int, int],
@@ -1248,12 +1367,10 @@ class PRmu(PosteriorRegularization):
         """Perform posterior regularization using mean-targeting.
 
         Args:
-            noise_count_posterior_coo: The noise count posterior data structure
-            noise_offsets: The noise count value at which each 'm' starts. A
-                dict keyed by 'm'.
-            index_converter: The IndexConverter that gives information about
-                which m-index corresponds to which cell and gene.
-            raw_count_matrix: The input raw count matrix
+            noise_count_posterior_coo: Noise count posterior log prob COO
+            noise_offsets: Offset noise counts per 'm' index
+            index_converter: IndexConverter object from 'm' to (n, g) and back
+            raw_count_matrix: The raw count matrix
             fpr: The tunable parameter of mean-targeting posterior
                 regularization. The output, summed over cells, has a removed
                 gene count distribution similar to what would be expected from
@@ -1293,16 +1410,16 @@ class PRmu(PosteriorRegularization):
                                                     row_logic=zero_out_logic)
         # print(raw_count_csr_for_cells)
         logger.debug('Computing target removal')
-        target_removal = PRmu._compute_target_removal(
+        target_fun = compute_mean_target_removal_as_function(
             noise_count_posterior_coo=posterior_subset_coo,
             noise_offsets=noise_offsets,
             index_converter=index_converter,
             raw_count_csr_for_cells=raw_count_csr_for_cells,
             n_cells=len(included_cells),
-            fpr=fpr,
             device=device,
             per_gene=per_gene,
-        ) * len(included_cells)
+        )
+        target_removal = target_fun(fpr) * len(included_cells)
         logger.debug(f'Target removal is {target_removal}')
 
         # Find the posterior regularization factor(s).
@@ -1378,98 +1495,156 @@ class IndexConverter:
         return np.divmod(m_inds, self.total_n_genes)
 
 
-@torch.no_grad()
-def get_noise_budget_per_gene_as_function(
-        posterior: Posterior,
-        how: str = 'fpr') -> Callable[[float], np.ndarray]:
-    """Compute the noise budget on a per-gene basis, returned as a function
-    that takes a target value and returns counts per gene in one cell.
+# @torch.no_grad()
+# def get_noise_budget_per_gene_as_function(
+#         posterior: Posterior,
+#         how: str = 'fpr') -> Callable[[float], np.ndarray]:
+#     """Compute the noise budget on a per-gene basis, returned as a function
+#     that takes a target value and returns counts per gene in one cell.
+#
+#     Args:
+#         posterior: Posterior object
+#         how: For now this can only be 'fpr'
+#
+#     Returns:
+#         expected_noise_count_fcn_per_cell_G: Function that, when called with a
+#             certain nominal FPR value, returns an array of per-gene noise counts
+#             expected in each cell. Not just analyzed genes: all genes.
+#
+#     """
+#
+#     logger.debug('Computing per-gene noise targets')
+
+    # if 'chi_ambient' in pyro.get_param_store().keys():
+    #     chi_ambient_G = pyro.param('chi_ambient').detach()
+    # else:
+    #     chi_ambient_G = 0.
+    #
+    # chi_bar_G = posterior.vi_model.avg_gene_expression
+    #
+    # if how == 'fpr':
+    #
+    #     # Expectation for counts in empty droplets.
+    #     empty_droplet_mean_counts = dist.LogNormal(loc=pyro.param('d_empty_loc'),
+    #                                                scale=pyro.param('d_empty_scale')).mean
+    #     if posterior.vi_model.include_rho:
+    #         swapping_fraction = dist.Beta(pyro.param('rho_alpha'), pyro.param('rho_beta')).mean
+    #     else:
+    #         swapping_fraction = 0.
+    #     empty_droplet_mean_counts_G = empty_droplet_mean_counts * chi_ambient_G
+    #
+    #     data_loader = posterior.dataset_obj.get_dataloader(
+    #         use_cuda=posterior.use_cuda,
+    #         analyzed_bcs_only=True,
+    #         batch_size=512,
+    #         shuffle=False,
+    #     )
+    #
+    #     # Keep a running sum over expected noise counts as we minibatch.
+    #     expected_noise_counts_without_fpr_G = torch.zeros(len(posterior.dataset_obj.analyzed_gene_inds)).to(posterior.device)
+    #     expected_real_counts_G = torch.zeros(len(posterior.dataset_obj.analyzed_gene_inds)).to(posterior.device)
+    #     expected_cells = 0
+    #
+    #     for i, data in enumerate(data_loader):
+    #         enc = posterior.vi_model.encoder(x=data,
+    #                                          chi_ambient=chi_ambient_G,
+    #                                          cell_prior_log=posterior.vi_model.d_cell_loc_prior)
+    #         p_batch = enc['p_y'].sigmoid().detach()
+    #         epsilon_batch = dist.Gamma(enc['epsilon'] * posterior.vi_model.epsilon_prior,
+    #                                    posterior.vi_model.epsilon_prior).mean.detach()
+    #         expected_ambient_counts_in_cells_G = (empty_droplet_mean_counts_G
+    #                                               * epsilon_batch[p_batch > 0.5].sum())
+    #         expected_swapping_counts_in_cells_G = (swapping_fraction * chi_bar_G *
+    #                                                (data * epsilon_batch.unsqueeze(-1))[p_batch > 0.5].sum())
+    #         expected_noise_counts_without_fpr_G = (expected_noise_counts_without_fpr_G
+    #                                                + expected_ambient_counts_in_cells_G
+    #                                                + expected_swapping_counts_in_cells_G)
+    #         expected_real_counts_G = (expected_real_counts_G
+    #                                   + torch.clamp(data[p_batch > 0.5].sum(dim=0)
+    #                                                 - expected_noise_counts_without_fpr_G, min=0.))
+    #         expected_cells = expected_cells + (p_batch > 0.5).sum()
+    #
+    #     def expected_noise_count_fcn_per_cell_G(target_fpr: float) -> np.ndarray:
+    #         """The function which gets returned as the output"""
+    #         target_per_analyzed_gene = ((expected_noise_counts_without_fpr_G
+    #                                      + expected_real_counts_G * target_fpr)  # fpr addition
+    #                                     / expected_cells)
+    #         target_per_analyzed_gene = target_per_analyzed_gene.cpu().numpy()
+    #         target_per_gene = np.zeros(posterior.dataset_obj.data['matrix'].shape[1])
+    #         target_per_gene[posterior.dataset_obj.analyzed_gene_inds] = target_per_analyzed_gene
+    #         return target_per_gene
+    #
+    # elif how == 'cdf':
+    #
+    #     raise NotImplementedError('TODO')
+    #
+    # else:
+    #     raise NotImplementedError(f'No method {how} for get_noise_budget_per_gene_as_function()')
+    #
+    # # TODO: note - floor() ruined the game (per cell) for the optimal calcs
+    # return expected_noise_count_fcn_per_cell_G
+
+
+def compute_mean_target_removal_as_function(noise_count_posterior_coo: sp.coo_matrix,
+                                            noise_offsets: Dict[int, int],
+                                            index_converter: IndexConverter,
+                                            raw_count_csr_for_cells: sp.csr_matrix,
+                                            n_cells: int,
+                                            device: str,
+                                            per_gene: bool) -> Callable[[float], torch.Tensor]:
+    """Given the noise count posterior, return a function that computes target
+    removal (either overall or per-gene) as a function of FPR.
+
+    NOTE: computes the value "per cell", i.e. dividing
+    by the number of cells, so that total removal can be computed by
+    multiplying this by the number of cells in question.
 
     Args:
-        posterior: Posterior object
-        how: For now this can only be 'fpr'
+        noise_count_posterior_coo: Noise count posterior log prob COO
+        noise_offsets: Offset noise counts per 'm' index
+        index_converter: IndexConverter object from 'm' to (n, g) and back
+        raw_count_csr_for_cells: The input count matrix for only the cells
+            included in the posterior
+        n_cells: Number of cells included in the posterior, same number as in
+            raw_count_csr_for_cells
+        device: 'cpu' or 'cuda'
+        per_gene: True to come up with one target per gene
 
     Returns:
-        expected_noise_count_fcn_per_cell_G: Function that, when called with a
-            certain nominal FPR value, returns an array of per-gene noise counts
-            expected in each cell. Not just analyzed genes: all genes.
+        target_removal_scaled_per_cell: Noise count removal target
 
     """
 
-    logger.debug('Computing per-gene noise targets')
+    # TODO: s1.h5 with FPR 0.99 only removes 50% of signal
 
-    if 'chi_ambient' in pyro.get_param_store().keys():
-        chi_ambient_G = pyro.param('chi_ambient').detach()
-    else:
-        chi_ambient_G = 0.
+    # Compute the expected noise using mean summarization.
+    estimator = Mean(index_converter=index_converter)
+    mean_noise_csr = estimator.estimate_noise(
+        noise_log_prob_coo=noise_count_posterior_coo,
+        noise_offsets=noise_offsets,
+        device=device,
+    )
+    logger.debug(f'Total counts in raw matrix for cells = {raw_count_csr_for_cells.sum()}')
+    logger.debug(f'Total noise counts from mean noise estimator = {mean_noise_csr.sum()}')
 
-    chi_bar_G = posterior.vi_model.avg_gene_expression
+    # Compute the target removal.
+    approx_signal_csr = raw_count_csr_for_cells - mean_noise_csr
+    logger.debug(f'Approximate signal has total counts = {approx_signal_csr.sum()}')
+    logger.debug(f'Number of cells = {n_cells}')
 
-    if how == 'fpr':
-
-        # Expectation for counts in empty droplets.
-        empty_droplet_mean_counts = dist.LogNormal(loc=pyro.param('d_empty_loc'),
-                                                   scale=pyro.param('d_empty_scale')).mean
-        if posterior.vi_model.include_rho:
-            swapping_fraction = dist.Beta(pyro.param('rho_alpha'), pyro.param('rho_beta')).mean
+    def _target_fun(fpr: float) -> torch.Tensor:
+        """The function which gets returned"""
+        if per_gene:
+            target = np.array(mean_noise_csr.sum(axis=0)).squeeze()
+            target = target + fpr * np.array(approx_signal_csr.sum(axis=0)).squeeze()
         else:
-            swapping_fraction = 0.
-        empty_droplet_mean_counts_G = empty_droplet_mean_counts * chi_ambient_G
+            target = mean_noise_csr.sum()
+            target = target + fpr * approx_signal_csr.sum()
 
-        data_loader = posterior.dataset_obj.get_dataloader(
-            use_cuda=posterior.use_cuda,
-            analyzed_bcs_only=True,
-            batch_size=512,
-            shuffle=False,
-        )
+        # Return target scaled to be per-cell.
+        return torch.tensor(target / n_cells).to(device)
 
-        # Keep a running sum over expected noise counts as we minibatch.
-        expected_noise_counts_without_fpr_G = torch.zeros(len(posterior.dataset_obj.analyzed_gene_inds)).to(posterior.device)
-        expected_real_counts_G = torch.zeros(len(posterior.dataset_obj.analyzed_gene_inds)).to(posterior.device)
-        expected_cells = 0
-
-        for i, data in enumerate(data_loader):
-            enc = posterior.vi_model.encoder(x=data,
-                                             chi_ambient=chi_ambient_G,
-                                             cell_prior_log=posterior.vi_model.d_cell_loc_prior)
-            p_batch = enc['p_y'].sigmoid().detach()
-            epsilon_batch = dist.Gamma(enc['epsilon'] * posterior.vi_model.epsilon_prior,
-                                       posterior.vi_model.epsilon_prior).mean.detach()
-            empty_droplet_counts_G = data[p_batch <= 0.5].sum(dim=0)
-            expected_ambient_counts_in_cells_G = (empty_droplet_mean_counts_G
-                                                  * epsilon_batch[p_batch > 0.5].sum())
-            expected_swapping_counts_in_cells_G = (swapping_fraction * chi_bar_G *
-                                                   (data * epsilon_batch.unsqueeze(-1))[p_batch > 0.5].sum())
-            expected_noise_counts_without_fpr_G = (expected_noise_counts_without_fpr_G
-                                                   # + empty_droplet_counts_G
-                                                   + expected_ambient_counts_in_cells_G
-                                                   + expected_swapping_counts_in_cells_G
-                                                   )
-            expected_real_counts_G = (expected_real_counts_G
-                                      + torch.clamp(data[p_batch > 0.5].sum(dim=0)
-                                                    - expected_noise_counts_without_fpr_G, min=0.))
-            expected_cells = expected_cells + (p_batch > 0.5).sum()
-
-        def expected_noise_count_fcn_per_cell_G(target_fpr: float) -> np.ndarray:
-            """The function which gets returned as the output"""
-            target_per_analyzed_gene = ((expected_noise_counts_without_fpr_G
-                                         + expected_real_counts_G * target_fpr)  # fpr addition
-                                        / expected_cells)
-            target_per_analyzed_gene = target_per_analyzed_gene.cpu().numpy()
-            target_per_gene = np.zeros(posterior.dataset_obj.data['matrix'].shape[1])
-            target_per_gene[posterior.dataset_obj.analyzed_gene_inds] = target_per_analyzed_gene
-            return target_per_gene
-
-    elif how == 'cdf':
-
-        raise NotImplementedError('TODO')
-
-    else:
-        raise NotImplementedError(f'No method {how} for _get_noise_budget_per_gene()')
-
-    # TODO: note - floor() ruined the game (per cell) for the optimal calcs
-
-    return expected_noise_count_fcn_per_cell_G
+    return _target_fun
 
 
 # @numba.njit(fastmath=True)

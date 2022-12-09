@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from cellbender.remove_background.data.dataprep import DataLoader
-from cellbender.remove_background.infer import dense_to_sparse_op_torch
+from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch
 
 from .conftest import sparse_matrix_equal, simulated_dataset
 

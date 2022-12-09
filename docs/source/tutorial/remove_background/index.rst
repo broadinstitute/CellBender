@@ -205,3 +205,7 @@ a CellRanger v3 h5 file, so Seurat can load it:
 
 Of course, this will not load any metadata from CellBender, so if that is desired,
 it would have to be accessed and added to the object another way.
+
+Another option for loading data into Seurat would be third party packages like
+`scCustomize from Samuel Marsh
+<https://github.com/broadinstitute/CellBender/issues/145#issuecomment-1217360305>`_.

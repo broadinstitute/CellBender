@@ -322,11 +322,16 @@ def generate_summary_plots(input_file: str,
             cell_calls=(adata.obs['cell_probability'] > 0.5),
             truth_cell_labels=adata.obs['truth_cell_label'],
         )
-        if adata.uns['target_false_positive_rate'][0].decode() != 'NA':
+        if type(adata.uns['target_false_positive_rate'][0]) == np.float64:
             if true_fpr > adata.uns['target_false_positive_rate'][0]:
                 warnings.append('FPR exceeds target FPR.')
                 display(Markdown(f'WARNING: FPR of {true_fpr:.4f} exceeds target FPR of '
-                                 f'{adata.uns["target_false_positive_rate"]}'))
+                                 f'{adata.uns["target_false_positive_rate"]}. Keep '
+                                 f'in mind however that the target FPR is meant to '
+                                 f'target false positives over and above some '
+                                 f'basal level (dataset dependent), so the '
+                                 f'measured FPR should exceed the target by some '
+                                 f'amount.'))
 
     display(Markdown('# Summary of warnings:'))
     if len(warnings) == 0:

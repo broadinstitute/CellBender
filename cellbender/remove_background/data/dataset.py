@@ -8,7 +8,8 @@ import torch
 
 import cellbender.remove_background.model
 import cellbender.remove_background.consts as consts
-from cellbender.remove_background.infer import Posterior, NaivePosterior
+# TODO use the new posterior
+from cellbender.remove_background.posterior import Posterior
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.io import \
     load_data, write_matrix_to_cellranger_h5
@@ -463,6 +464,10 @@ class SingleCellRNACountsDataset:
                                'is almost no noise in the dataset, this is likely '
                                'an error. Have you set --low-count-threshold too low?')
 
+            # TODO: the below logic is all messed up
+            # TODO: simplify: get rid of GMM, use Otsu's method instead
+            # TODO: allow direct input
+
             # Gaussian PDF is about 60% peak height at 1 stdev away.
             x = np.linspace(log_counts.min().item(), log_counts.max().item(), num=100)
             hist, _ = np.histogram(np.log(counts), bins=x, density=True)
@@ -470,8 +475,11 @@ class SingleCellRNACountsDataset:
             x = x[x >= log_mode]
             top_density_ind = np.argmax(hist)
             top_density = hist[top_density_ind].item()
-            std_above_ind = (top_density_ind
-                             + np.where(hist[top_density_ind:] < top_density * 0.6)[0][0])
+            try:  # TODO: awful
+                std_above_ind = (top_density_ind
+                                 + np.where(hist[top_density_ind:] < top_density * 0.6)[0][0])
+            except IndexError:
+                std_above_ind = top_density_ind
             stdev = x[std_above_ind] - x[top_density_ind]
             self.priors['surely_empty_count_estimate'] = np.exp(log_mode + 2 * stdev)
             self.priors['total_droplet_barcodes'] = \
@@ -544,6 +552,9 @@ class SingleCellRNACountsDataset:
             # self.priors['d_empty_std'] = np.sqrt(variance_priors['d_empty_var'])
 
             # TODO ===============^^
+
+            logger.debug(f'log counts is {np.log(counts)}')
+            logger.debug(f'std of log counts > crossover is {np.std(np.log(counts)[np.log(counts) > self.priors["log_counts_crossover"]])}')
 
             self.priors['d_std'] = \
                 np.std(np.log(counts)[np.log(counts) > self.priors['log_counts_crossover']]).item() / 5.
@@ -718,7 +729,7 @@ class SingleCellRNACountsDataset:
         )
         return data_loader
 
-    def _restore_eliminated_features_in_cells(
+    def restore_eliminated_features_in_cells(
             self,
             inferred_count_matrix: sp.csc_matrix,
             cell_probabilities_analyzed_bcs: np.ndarray
@@ -752,443 +763,443 @@ class SingleCellRNACountsDataset:
 
         return out.tocsc()
 
-    def calculate_posterior(self,
-                            inferred_model: Optional['RemoveBackgroundPyroModel'],
-                            posterior_batch_size: int,
-                            debug: bool = False):
-        """Generate posterior for count matrix.
+    # def calculate_posterior(self,
+    #                         inferred_model: Optional['RemoveBackgroundPyroModel'],
+    #                         posterior_batch_size: int,
+    #                         debug: bool = False):
+    #     """Generate posterior for count matrix.
+    #
+    #     Args:
+    #         inferred_model: RemoveBackgroundPyroModel which has
+    #             already had the inference procedure run.
+    #         posterior_batch_size: Max number of cells to be used in a batch
+    #             for posterior regularization calculation, which requires a lot
+    #             of memory.
+    #
+    #     NOTE: returns nothing, but stores the posterior in self.posterior
+    #
+    #     """
+    #
+    #     # Create posterior.
+    #     if inferred_model is not None:
+    #         self.posterior = Posterior(dataset_obj=self,
+    #                                    vi_model=inferred_model,
+    #                                    fpr=self.fpr[0],  # first FPR
+    #                                    posterior_batch_size=posterior_batch_size,
+    #                                    debug=debug)
+    #
+    #         # Encoded values of latent variables.
+    #         enc = self.posterior.latents_map
+    #         z = enc['z']
+    #         d = enc['d']
+    #         p = enc['p']
+    #         epsilon = enc['epsilon']
+    #
+    #     else:
+    #         self.posterior = NaivePosterior(dataset_obj=self)
+    #         z = None
+    #         d = None
+    #         p = torch.ones(self.analyzed_barcode_inds.size)
+    #         epsilon = None
+    #         phi_params = None
 
-        Args:
-            inferred_model: RemoveBackgroundPyroModel which has
-                already had the inference procedure run.
-            posterior_batch_size: Max number of cells to be used in a batch
-                for posterior regularization calculation, which requires a lot
-                of memory.
-
-        NOTE: returns nothing, but stores the posterior in self.posterior
-
-        """
-
-        # Create posterior.
-        if inferred_model is not None:
-            self.posterior = Posterior(dataset_obj=self,
-                                       vi_model=inferred_model,
-                                       fpr=self.fpr[0],  # first FPR
-                                       posterior_batch_size=posterior_batch_size,
-                                       debug=debug)
-
-            # Encoded values of latent variables.
-            enc = self.posterior.latents_map
-            z = enc['z']
-            d = enc['d']
-            p = enc['p']
-            epsilon = enc['epsilon']
-
-        else:
-            self.posterior = NaivePosterior(dataset_obj=self)
-            z = None
-            d = None
-            p = torch.ones(self.analyzed_barcode_inds.size)
-            epsilon = None
-            phi_params = None
-
-    def save_to_output_file(
-            self,
-            output_file: str,
-            inferred_model: Optional['RemoveBackgroundPyroModel'],
-            save_plots: bool = False,
-            create_report: bool = False,
-            truth_file: Optional[str] = None) -> bool:
-        """Write the results of an inference procedure to an output file.
-
-        Output is an HDF5 file.  To be written:
-        Inferred ambient-subtracted UMI count matrix.
-        Inferred probabilities that each barcode contains a real cell.
-        Inferred cell size scale factors.
-        Inferred ambient gene expression count vector for droplets without
-            cells.
-        Inferred contamination fraction hyperparameters.
-        Embeddings of gene expression of cells into a low-dimensional latent
-            space.
-
-        Args:
-            inferred_model: RemoveBackgroundPyroModel which has
-                already had the inference procedure run.
-            output_file: Name of output .h5 file
-            save_plots: Setting this to True will save plots of outputs.
-            create_report: Setting this to True will create an HTML report.
-            truth_file: File containing truth data (for simulations, for report)
-
-        Returns:
-            True if the output was written to file successfully.
-
-        """
-
-        logger.info("Preparing to write outputs to file...")
-
-        # Output file naming.
-        file_dir, file_base = os.path.split(output_file)
-        file_name = os.path.splitext(os.path.basename(file_base))[0]
-
-        # Obtain latents from posterior.
-        if self.posterior.name != 'naive':  # TODO: handle 'naive' as a BasePosterior too, and eliminate if-else
-            # Encoded values of latent variables.
-            enc = self.posterior.latents_map
-            z = enc['z']
-            d = enc['d']
-            p = enc['p']
-            epsilon = enc['epsilon']
-
-        else:
-            z = None
-            d = None
-            p = torch.ones(self.analyzed_barcode_inds.size)
-            epsilon = None
-            phi_params = None
-
-        # Figure out the indices of barcodes that have cells.
-        if p is not None:
-            p[np.isnan(p)] = 0.
-            cell_barcode_inds = self.analyzed_barcode_inds
-            if (p > consts.CELL_PROB_CUTOFF).sum() == 0:
-                logger.warning("Warning: Found no cells!")
-            analyzed_barcode_logic = (p > consts.CELL_PROB_CUTOFF)
-        else:
-            cell_barcode_inds = self.analyzed_barcode_inds
-            analyzed_barcode_logic = np.arange(0, cell_barcode_inds.size)
-
-        # Save barcodes determined to contain cells as _cell_barcodes.csv
-        cell_barcodes = self.data['barcodes'][self.analyzed_barcode_inds[analyzed_barcode_logic]]
-        try:
-            barcode_names = np.array([str(cell_barcodes[i], encoding='UTF-8')
-                                      for i in range(cell_barcodes.size)])
-        except UnicodeDecodeError:
-            # necessary if barcodes are ints
-            barcode_names = cell_barcodes
-        except TypeError:
-            # necessary if barcodes are already decoded
-            barcode_names = cell_barcodes
-        bc_file_name = os.path.join(file_dir, file_name + "_cell_barcodes.csv")
-        np.savetxt(bc_file_name, barcode_names, delimiter=',', fmt='%s')
-        logger.info(f"Saved cell barcodes in {bc_file_name}")
-
-        # Save plots, if called for.
-        if save_plots:
-            try:
-                # File naming.
-                gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
-                summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
-
-                # UMI count prior GMM plot.
-                fig = self.gmm.plot_summary()
-                fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
-                logger.info(f"Saved UMI count plot as {gmm_fig_name}")
-
-                # Three-panel output summary plot.
-                fig = self.plot_summary(inferred_model=inferred_model, p=p, z=z)
-                fig.savefig(summary_fig_name, bbox_inches='tight', format='pdf')
-                logger.info(f"Saved summary plots as {summary_fig_name}")
-
-            except Exception:
-                logger.warning("Unable to save all plots.")
-                logger.warning(traceback.format_exc())
-
-        # Estimate the ambient-background-subtracted UMI count matrix.
-        if self.model_name == 'simple':
-            # No need to generate a new count matrix for simple model.
-            inferred_count_matrix = self.data['matrix'].tocsc()
-            logger.info("Simple model: outputting un-altered count matrix.")
-        else:
-            inferred_count_matrix = self.posterior.denoised_counts
-
-        # TODO: there seems to be some kind of a huge gap between the above
-        # TODO: computation and the below file writing.  HUGE gap in time!
-
-        # Inferred ambient gene expression vector.
-        ambient_expression_trimmed = get_param_store_key('chi_ambient')
-
-        # Convert the indices from trimmed gene set to original gene indices.
-        ambient_expression = np.zeros(self.data['matrix'].shape[1])
-        ambient_expression[self.analyzed_gene_inds] = ambient_expression_trimmed
-
-        def _write_matrix(file: str,
-                          inferred_count_matrix: sp.csc_matrix,
-                          fpr: float,
-                          analyzed_barcode_logic: np.ndarray = ...,
-                          barcode_inds: np.ndarray = ...) -> bool:
-            """Helper function for writing output h5 file.
-            The ellipses as defaults serve to slice everything if the arguments
-            are not supplied.
-
-            Uses variables from the outer scope of save_to_output_file()
-            """
-
-            # CellRanger version (format output like input).
-            if 'cellranger_version' in self.data.keys():
-                cellranger_version = self.data['cellranger_version']
-            else:
-                cellranger_version = 3
-
-            # Some summary statistics:
-            # Fraction of counts in each droplet that were removed.
-            raw_count_matrix = self.data['matrix'][self.analyzed_barcode_inds, :]  # need all genes
-            raw_counts_droplet = np.array(raw_count_matrix.sum(axis=1)).squeeze()
-            out_counts_droplet = np.array(inferred_count_matrix[self.analyzed_barcode_inds, :]
-                                          .sum(axis=1)).squeeze()
-            background_fraction = ((raw_counts_droplet - out_counts_droplet) /
-                                   (raw_counts_droplet + 0.001))
-
-            # Subset latents.
-            z_subset = None if z is None else z[analyzed_barcode_logic, :]
-            d_subset = None if d is None else d[analyzed_barcode_logic]
-            p_subset = None if p is None else p[analyzed_barcode_logic]
-            epsilon_subset = None if epsilon is None else epsilon[analyzed_barcode_logic]
-
-            # Write h5.
-            write_succeeded = write_matrix_to_cellranger_h5(
-                cellranger_version=cellranger_version,
-                output_file=file,
-                gene_names=self.data['gene_names'],
-                gene_ids=self.data['gene_ids'],
-                feature_types=self.data['feature_types'],
-                genomes=self.data['genomes'],
-                barcodes=self.data['barcodes'][barcode_inds],
-                count_matrix=inferred_count_matrix[barcode_inds, :],
-                local_latents={'barcode_indices_for_latents': self.analyzed_barcode_inds,
-                               'gene_expression_encoding': z_subset,
-                               'cell_size': d_subset,
-                               'cell_probability': p_subset,
-                               'droplet_efficiency': epsilon_subset,
-                               'background_fraction': background_fraction},
-                global_latents={'ambient_expression': ambient_expression,
-                                'empty_droplet_size_lognormal_loc': [get_param_store_key('d_empty_loc')],
-                                'empty_droplet_size_lognormal_scale': [get_param_store_key('d_empty_scale')],
-                                'cell_size_lognormal_std': [get_param_store_key('d_cell_scale')],
-                                'swapping_fraction_dist_params':
-                                    cellbender.remove_background.model.get_rho(),
-                                'target_false_positive_rate': [fpr],
-                                'posterior_type': [self.posterior.name]},
-                metadata={'learning_curve': None if inferred_model is None else inferred_model.loss,
-                          'barcodes_analyzed': self.data['barcodes'][self.analyzed_barcode_inds],
-                          'barcodes_analyzed_inds': self.analyzed_barcode_inds,
-                          'features_analyzed_inds': self.analyzed_gene_inds,
-                          'fraction_data_used_for_testing': [1. - consts.TRAINING_FRACTION]},
-            )
-
-            return write_succeeded
-
-        # Write to output file, for each lambda specified by user.
-        logger.debug('Staring FPR loop')
-
-        for i, fpr in enumerate(self.fpr):
-
-            # TODO: what if this loop takes so long that we keep getting pre-empted?
-            # TODO: think about checking for checkpoint and skipping FPRs for which
-            # TODO: we (presumably??) have already written output files
-            # TODO: well, this only works if output files become part of checkpoints...
-
-            logger.debug(f'Working on FPR {fpr}')
-
-            # Re-compute posterior counts for each new lambda.
-            if i > 0:  # no need to re-compute for the first FPR: this is already done.
-                self.posterior.fpr = fpr  # reach in and change the FPR
-                self.posterior._get_denoised_counts()  # force re-computation of posterior
-            inferred_count_matrix = self.posterior.denoised_counts
-
-            # TODO: put the trimmed features back in!  (make sure this works)
-            import time
-            t = time.time()
-            logger.debug('Restoring eliminated features in cells')
-            inferred_count_matrix = self._restore_eliminated_features_in_cells(
-                inferred_count_matrix,
-                self.posterior.latents_map['p'])
-            logger.debug(f'Took {time.time() - t:.3f} sec')
-
-            # TODO: correct posterior cell probabilities so that no zero-count
-            # TODO: droplets contain a cell.  maybe set p to 1e-10 or something
-
-            # Create an output file for this FPR.
-            name_suffix = (f'_FPR_{fpr}' if len(self.fpr) > 1 else '')
-            fpr_output_filename = os.path.join(file_dir, file_name + name_suffix + '.h5')
-
-            fpr = np.array('cohort', dtype=str) if (fpr == 'cohort') else fpr  # for pytables h5 writing
-
-            write_succeeded = _write_matrix(file=fpr_output_filename,
-                                            inferred_count_matrix=inferred_count_matrix,
-                                            fpr=fpr)
-
-            # Write filtered matrix (cells only) to output file.
-            filtered_output_file = os.path.join(file_dir, file_name + name_suffix + '_filtered.h5')
-            if self.include_empties:
-                _write_matrix(file=filtered_output_file,
-                              inferred_count_matrix=inferred_count_matrix,
-                              fpr=fpr,
-                              barcode_inds=self.analyzed_barcode_inds[analyzed_barcode_logic],
-                              analyzed_barcode_logic=analyzed_barcode_logic)
-
-            # Create report, if called for.
-            if create_report:
-                # try:
-                os.environ['INPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), self.input_file))
-                os.environ['OUTPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), fpr_output_filename))
-                if truth_file is not None:
-                    os.environ['TRUTH_FILE'] = os.path.abspath(os.path.join(os.getcwd(), truth_file))
-                html_report_file = os.path.join(file_dir, file_name + name_suffix + '_report.html')
-                run_notebook_make_html(
-                    file=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'report.ipynb')),
-                    output=html_report_file,
-                )
-                logger.info(f'Succeeded in writing report to {html_report_file}')
-
-                # except Exception:
-                #     logger.warning("Unable to create report.")
-                #     logger.warning(traceback.format_exc())
-
-            # Write output metrics file.
-            try:
-                df = self.collect_output_metrics(inferred_count_matrix=inferred_count_matrix,
-                                                 fpr=fpr,
-                                                 cell_logic=(p >= consts.CELL_PROB_CUTOFF),
-                                                 loss=inferred_model.loss)
-                metrics_file_name = os.path.join(file_dir, file_name + name_suffix + '_metrics.csv')
-                df.to_csv(metrics_file_name, index=True, header=False, float_format='%.3f')
-                logger.info(f'Saved output metrics as {metrics_file_name}')
-            except Exception:
-                logger.warning("Unable to collect output metrics.")
-                logger.warning(traceback.format_exc())
-
-        return write_succeeded
-
-    def plot_summary(self,
-                     inferred_model: 'RemoveBackgroundPyroModel',
-                     p: np.ndarray,
-                     z: np.ndarray):
-        """Output summary plot with three panels: training, cells, latent z."""
-
-        fig = plt.figure(figsize=(6, 18))
-
-        # Plot the train error.
-        plt.subplot(3, 1, 1)
-        if inferred_model is not None:
-            plt.plot(inferred_model.loss['train']['elbo'], '.--', label='Train')
-
-            # Plot the test error, if there was held-out test data.
-            if 'test' in inferred_model.loss.keys():
-                if len(inferred_model.loss['test']['epoch']) > 0:
-                    plt.plot(inferred_model.loss['test']['epoch'],
-                             inferred_model.loss['test']['elbo'], 'o:', label='Test')
-                    plt.legend()
-
-            plt.gca().set_ylim(bottom=max(inferred_model.loss['train']['elbo'][0],
-                                          inferred_model.loss['train']['elbo'][-1] - 2000))
-            plt.xlabel('Epoch')
-            plt.ylabel('ELBO')
-            plt.title('Progress of the training procedure')
-        else:
-            # Plot intentionally left blank, if there was no training (fast algorithm).
-            plt.title('Plot intentionally left blank')
-            plt.xticks([])
-            plt.yticks([])
-
-        # Plot the barcodes used, along with the inferred
-        # cell probabilities.
-        plt.subplot(3, 1, 2)
-        count_mat = self.get_count_matrix()
-        counts = np.array(count_mat.sum(axis=1)).squeeze()
-        count_order = np.argsort(counts)[::-1]
-        plt.semilogy(counts[count_order], color='black')
-        plt.ylabel('UMI counts')
-        plt.xlabel('Barcode index, sorted by UMI count')
-        if p is not None:  # The case of a simple model.
-            plt.gca().twinx()
-            plt.plot(p[count_order], '.:', color='red', alpha=0.3, rasterized=True)
-            plt.ylabel('Cell probability', color='red')
-            plt.ylim([-0.05, 1.05])
-            plt.title('Determination of which barcodes contain cells')
-        else:
-            plt.title('The subset of barcodes used for training')
-
-        # Plot the latent encoding via PCA.
-        plt.subplot(3, 1, 3)
-        if p is None:
-            p = np.ones(z.shape[0])
-        # A = torch.tensor(z[p >= consts.CELL_PROB_CUTOFF])
-        # U, S, V = torch.pca_lowrank(A)
-        z_pca = pca_2d(z[p >= consts.CELL_PROB_CUTOFF])  # torch.matmul(A, V[:, :2])
-        plt.plot(z_pca[:, 0], z_pca[:, 1],
-                 '.', ms=3, color='black', alpha=0.3, rasterized=True)
-        plt.ylabel('PC 1')
-        plt.xlabel('PC 0')
-        plt.title('PCA of latent encoding of cell gene expression')
-
-        return fig
-
-    def collect_output_metrics(self,
-                               inferred_count_matrix: sp.csr_matrix,
-                               fpr: Union[float, str],
-                               cell_logic,
-                               loss) -> pd.DataFrame:
-        """Create a table with a few output metrics. The idea is for these to
-        potentially be used by people creating automated pipelines."""
-
-        # Compute some metrics
-        input_count_matrix = self.data['matrix'][self.analyzed_barcode_inds, :]
-        total_raw_counts = self.data['matrix'].sum()
-        total_output_counts = inferred_count_matrix.sum()
-        total_counts_removed = total_raw_counts - total_output_counts
-        fraction_counts_removed = total_counts_removed / total_raw_counts
-        total_raw_counts_in_nonempty_droplets = input_count_matrix[cell_logic].sum()
-        total_counts_removed_from_nonempty_droplets = \
-            total_raw_counts_in_nonempty_droplets - inferred_count_matrix.sum()
-        fraction_counts_removed_from_nonempty_droplets = \
-            total_counts_removed_from_nonempty_droplets / total_raw_counts_in_nonempty_droplets
-        average_counts_removed_per_nonempty_droplet = \
-            total_counts_removed_from_nonempty_droplets / cell_logic.sum()
-        expected_cells = self.expected_cell_count
-        found_cells = cell_logic.sum()
-        average_counts_per_cell = inferred_count_matrix.sum() / found_cells
-        ratio_of_found_cells_to_expected_cells = \
-            None if (expected_cells is None) else (found_cells / expected_cells)
-        found_empties = len(self.analyzed_barcode_inds) - found_cells
-        fraction_of_analyzed_droplets_that_are_nonempty = \
-            found_cells / len(self.analyzed_barcode_inds)
-        if len(loss['train']['elbo']) > 20:
-            # compare mean ELBO increase over last 3 steps to the typical end(ish) fluctuations
-            convergence_indicator = (np.mean(np.abs([(loss['train']['elbo'][i]
-                                                      - loss['train']['elbo'][i - 1])
-                                                     for i in range(-3, -1)]))
-                                     / np.std(loss['train']['elbo'][-20:]))
-        else:
-            convergence_indicator = 'not enough training epochs to compute (requires more than 20)'
-        overall_change_in_train_elbo = loss['train']['elbo'][-1] - loss['train']['elbo'][0]
-
-        all_metrics_dict = \
-            {'total_raw_counts': total_raw_counts,
-             'total_output_counts': total_output_counts,
-             'total_counts_removed': total_counts_removed,
-             'fraction_counts_removed': fraction_counts_removed,
-             'total_raw_counts_in_cells':
-                 total_raw_counts_in_nonempty_droplets,
-             'total_counts_removed_from_cells':
-                 total_counts_removed_from_nonempty_droplets,
-             'fraction_counts_removed_from_cells':
-                 fraction_counts_removed_from_nonempty_droplets,
-             'average_counts_removed_per_cell':
-                 average_counts_removed_per_nonempty_droplet,
-             'target_fpr': fpr,
-             'expected_cells': expected_cells,
-             'found_cells': found_cells,
-             'output_average_counts_per_cell': average_counts_per_cell,
-             'ratio_of_found_cells_to_expected_cells':
-                 ratio_of_found_cells_to_expected_cells,
-             'found_empties': found_empties,
-             'fraction_of_analyzed_droplets_that_are_nonempty':
-                 fraction_of_analyzed_droplets_that_are_nonempty,
-             'convergence_indicator': convergence_indicator,
-             'overall_change_in_train_elbo': overall_change_in_train_elbo}
-
-        return pd.DataFrame(data=all_metrics_dict,
-                            index=['metric']).transpose()
+    # def save_to_output_file(
+    #         self,
+    #         output_file: str,
+    #         inferred_model: Optional['RemoveBackgroundPyroModel'],
+    #         save_plots: bool = False,
+    #         create_report: bool = False,
+    #         truth_file: Optional[str] = None) -> bool:
+    #     """Write the results of an inference procedure to an output file.
+    #
+    #     Output is an HDF5 file.  To be written:
+    #     Inferred ambient-subtracted UMI count matrix.
+    #     Inferred probabilities that each barcode contains a real cell.
+    #     Inferred cell size scale factors.
+    #     Inferred ambient gene expression count vector for droplets without
+    #         cells.
+    #     Inferred contamination fraction hyperparameters.
+    #     Embeddings of gene expression of cells into a low-dimensional latent
+    #         space.
+    #
+    #     Args:
+    #         inferred_model: RemoveBackgroundPyroModel which has
+    #             already had the inference procedure run.
+    #         output_file: Name of output .h5 file
+    #         save_plots: Setting this to True will save plots of outputs.
+    #         create_report: Setting this to True will create an HTML report.
+    #         truth_file: File containing truth data (for simulations, for report)
+    #
+    #     Returns:
+    #         True if the output was written to file successfully.
+    #
+    #     """
+    #
+    #     logger.info("Preparing to write outputs to file...")
+    #
+    #     # Output file naming.
+    #     file_dir, file_base = os.path.split(output_file)
+    #     file_name = os.path.splitext(os.path.basename(file_base))[0]
+    #
+    #     # Obtain latents from posterior.
+    #     if self.posterior.name != 'naive':  # TODO: handle 'naive' as a BasePosterior too, and eliminate if-else
+    #         # Encoded values of latent variables.
+    #         enc = self.posterior.latents_map
+    #         z = enc['z']
+    #         d = enc['d']
+    #         p = enc['p']
+    #         epsilon = enc['epsilon']
+    #
+    #     else:
+    #         z = None
+    #         d = None
+    #         p = torch.ones(self.analyzed_barcode_inds.size)
+    #         epsilon = None
+    #         phi_params = None
+    #
+    #     # Figure out the indices of barcodes that have cells.
+    #     if p is not None:
+    #         p[np.isnan(p)] = 0.
+    #         cell_barcode_inds = self.analyzed_barcode_inds
+    #         if (p > consts.CELL_PROB_CUTOFF).sum() == 0:
+    #             logger.warning("Warning: Found no cells!")
+    #         analyzed_barcode_logic = (p > consts.CELL_PROB_CUTOFF)
+    #     else:
+    #         cell_barcode_inds = self.analyzed_barcode_inds
+    #         analyzed_barcode_logic = np.arange(0, cell_barcode_inds.size)
+    #
+    #     # Save barcodes determined to contain cells as _cell_barcodes.csv
+    #     cell_barcodes = self.data['barcodes'][self.analyzed_barcode_inds[analyzed_barcode_logic]]
+    #     try:
+    #         barcode_names = np.array([str(cell_barcodes[i], encoding='UTF-8')
+    #                                   for i in range(cell_barcodes.size)])
+    #     except UnicodeDecodeError:
+    #         # necessary if barcodes are ints
+    #         barcode_names = cell_barcodes
+    #     except TypeError:
+    #         # necessary if barcodes are already decoded
+    #         barcode_names = cell_barcodes
+    #     bc_file_name = os.path.join(file_dir, file_name + "_cell_barcodes.csv")
+    #     np.savetxt(bc_file_name, barcode_names, delimiter=',', fmt='%s')
+    #     logger.info(f"Saved cell barcodes in {bc_file_name}")
+    #
+    #     # Save plots, if called for.
+    #     if save_plots:
+    #         try:
+    #             # File naming.
+    #             gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
+    #             summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
+    #
+    #             # UMI count prior GMM plot.
+    #             fig = self.gmm.plot_summary()
+    #             fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
+    #             logger.info(f"Saved UMI count plot as {gmm_fig_name}")
+    #
+    #             # Three-panel output summary plot.
+    #             fig = self.plot_summary(inferred_model=inferred_model, p=p, z=z)
+    #             fig.savefig(summary_fig_name, bbox_inches='tight', format='pdf')
+    #             logger.info(f"Saved summary plots as {summary_fig_name}")
+    #
+    #         except Exception:
+    #             logger.warning("Unable to save all plots.")
+    #             logger.warning(traceback.format_exc())
+    #
+    #     # Estimate the ambient-background-subtracted UMI count matrix.
+    #     if self.model_name == 'simple':
+    #         # No need to generate a new count matrix for simple model.
+    #         inferred_count_matrix = self.data['matrix'].tocsc()
+    #         logger.info("Simple model: outputting un-altered count matrix.")
+    #     else:
+    #         inferred_count_matrix = self.posterior.denoised_counts
+    #
+    #     # TODO: there seems to be some kind of a huge gap between the above
+    #     # TODO: computation and the below file writing.  HUGE gap in time!
+    #
+    #     # Inferred ambient gene expression vector.
+    #     ambient_expression_trimmed = get_param_store_key('chi_ambient')
+    #
+    #     # Convert the indices from trimmed gene set to original gene indices.
+    #     ambient_expression = np.zeros(self.data['matrix'].shape[1])
+    #     ambient_expression[self.analyzed_gene_inds] = ambient_expression_trimmed
+    #
+    #     def _write_matrix(file: str,
+    #                       inferred_count_matrix: sp.csc_matrix,
+    #                       fpr: float,
+    #                       analyzed_barcode_logic: np.ndarray = ...,
+    #                       barcode_inds: np.ndarray = ...) -> bool:
+    #         """Helper function for writing output h5 file.
+    #         The ellipses as defaults serve to slice everything if the arguments
+    #         are not supplied.
+    #
+    #         Uses variables from the outer scope of save_to_output_file()
+    #         """
+    #
+    #         # CellRanger version (format output like input).
+    #         if 'cellranger_version' in self.data.keys():
+    #             cellranger_version = self.data['cellranger_version']
+    #         else:
+    #             cellranger_version = 3
+    #
+    #         # Some summary statistics:
+    #         # Fraction of counts in each droplet that were removed.
+    #         raw_count_matrix = self.data['matrix'][self.analyzed_barcode_inds, :]  # need all genes
+    #         raw_counts_droplet = np.array(raw_count_matrix.sum(axis=1)).squeeze()
+    #         out_counts_droplet = np.array(inferred_count_matrix[self.analyzed_barcode_inds, :]
+    #                                       .sum(axis=1)).squeeze()
+    #         background_fraction = ((raw_counts_droplet - out_counts_droplet) /
+    #                                (raw_counts_droplet + 0.001))
+    #
+    #         # Subset latents.
+    #         z_subset = None if z is None else z[analyzed_barcode_logic, :]
+    #         d_subset = None if d is None else d[analyzed_barcode_logic]
+    #         p_subset = None if p is None else p[analyzed_barcode_logic]
+    #         epsilon_subset = None if epsilon is None else epsilon[analyzed_barcode_logic]
+    #
+    #         # Write h5.
+    #         write_succeeded = write_matrix_to_cellranger_h5(
+    #             cellranger_version=cellranger_version,
+    #             output_file=file,
+    #             gene_names=self.data['gene_names'],
+    #             gene_ids=self.data['gene_ids'],
+    #             feature_types=self.data['feature_types'],
+    #             genomes=self.data['genomes'],
+    #             barcodes=self.data['barcodes'][barcode_inds],
+    #             count_matrix=inferred_count_matrix[barcode_inds, :],
+    #             local_latents={'barcode_indices_for_latents': self.analyzed_barcode_inds,
+    #                            'gene_expression_encoding': z_subset,
+    #                            'cell_size': d_subset,
+    #                            'cell_probability': p_subset,
+    #                            'droplet_efficiency': epsilon_subset,
+    #                            'background_fraction': background_fraction},
+    #             global_latents={'ambient_expression': ambient_expression,
+    #                             'empty_droplet_size_lognormal_loc': [get_param_store_key('d_empty_loc')],
+    #                             'empty_droplet_size_lognormal_scale': [get_param_store_key('d_empty_scale')],
+    #                             'cell_size_lognormal_std': [get_param_store_key('d_cell_scale')],
+    #                             'swapping_fraction_dist_params':
+    #                                 cellbender.remove_background.model.get_rho(),
+    #                             'target_false_positive_rate': [fpr],
+    #                             'posterior_type': [self.posterior.name]},
+    #             metadata={'learning_curve': None if inferred_model is None else inferred_model.loss,
+    #                       'barcodes_analyzed': self.data['barcodes'][self.analyzed_barcode_inds],
+    #                       'barcodes_analyzed_inds': self.analyzed_barcode_inds,
+    #                       'features_analyzed_inds': self.analyzed_gene_inds,
+    #                       'fraction_data_used_for_testing': [1. - consts.TRAINING_FRACTION]},
+    #         )
+    #
+    #         return write_succeeded
+    #
+    #     # Write to output file, for each lambda specified by user.
+    #     logger.debug('Staring FPR loop')
+    #
+    #     for i, fpr in enumerate(self.fpr):
+    #
+    #         # TODO: what if this loop takes so long that we keep getting pre-empted?
+    #         # TODO: think about checking for checkpoint and skipping FPRs for which
+    #         # TODO: we (presumably??) have already written output files
+    #         # TODO: well, this only works if output files become part of checkpoints...
+    #
+    #         logger.debug(f'Working on FPR {fpr}')
+    #
+    #         # Re-compute posterior counts for each new lambda.
+    #         if i > 0:  # no need to re-compute for the first FPR: this is already done.
+    #             self.posterior.fpr = fpr  # reach in and change the FPR
+    #             self.posterior._get_denoised_counts()  # force re-computation of posterior
+    #         inferred_count_matrix = self.posterior.denoised_counts
+    #
+    #         # TODO: put the trimmed features back in!  (make sure this works)
+    #         import time
+    #         t = time.time()
+    #         logger.debug('Restoring eliminated features in cells')
+    #         inferred_count_matrix = self._restore_eliminated_features_in_cells(
+    #             inferred_count_matrix,
+    #             self.posterior.latents_map['p'])
+    #         logger.debug(f'Took {time.time() - t:.3f} sec')
+    #
+    #         # TODO: correct posterior cell probabilities so that no zero-count
+    #         # TODO: droplets contain a cell.  maybe set p to 1e-10 or something
+    #
+    #         # Create an output file for this FPR.
+    #         name_suffix = (f'_FPR_{fpr}' if len(self.fpr) > 1 else '')
+    #         fpr_output_filename = os.path.join(file_dir, file_name + name_suffix + '.h5')
+    #
+    #         fpr = np.array('cohort', dtype=str) if (fpr == 'cohort') else fpr  # for pytables h5 writing
+    #
+    #         write_succeeded = _write_matrix(file=fpr_output_filename,
+    #                                         inferred_count_matrix=inferred_count_matrix,
+    #                                         fpr=fpr)
+    #
+    #         # Write filtered matrix (cells only) to output file.
+    #         filtered_output_file = os.path.join(file_dir, file_name + name_suffix + '_filtered.h5')
+    #         if self.include_empties:
+    #             _write_matrix(file=filtered_output_file,
+    #                           inferred_count_matrix=inferred_count_matrix,
+    #                           fpr=fpr,
+    #                           barcode_inds=self.analyzed_barcode_inds[analyzed_barcode_logic],
+    #                           analyzed_barcode_logic=analyzed_barcode_logic)
+    #
+    #         # Create report, if called for.
+    #         if create_report:
+    #             # try:
+    #             os.environ['INPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), self.input_file))
+    #             os.environ['OUTPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), fpr_output_filename))
+    #             if truth_file is not None:
+    #                 os.environ['TRUTH_FILE'] = os.path.abspath(os.path.join(os.getcwd(), truth_file))
+    #             html_report_file = os.path.join(file_dir, file_name + name_suffix + '_report.html')
+    #             run_notebook_make_html(
+    #                 file=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'report.ipynb')),
+    #                 output=html_report_file,
+    #             )
+    #             logger.info(f'Succeeded in writing report to {html_report_file}')
+    #
+    #             # except Exception:
+    #             #     logger.warning("Unable to create report.")
+    #             #     logger.warning(traceback.format_exc())
+    #
+    #         # Write output metrics file.
+    #         try:
+    #             df = self.collect_output_metrics(inferred_count_matrix=inferred_count_matrix,
+    #                                              fpr=fpr,
+    #                                              cell_logic=(p >= consts.CELL_PROB_CUTOFF),
+    #                                              loss=inferred_model.loss)
+    #             metrics_file_name = os.path.join(file_dir, file_name + name_suffix + '_metrics.csv')
+    #             df.to_csv(metrics_file_name, index=True, header=False, float_format='%.3f')
+    #             logger.info(f'Saved output metrics as {metrics_file_name}')
+    #         except Exception:
+    #             logger.warning("Unable to collect output metrics.")
+    #             logger.warning(traceback.format_exc())
+    #
+    #     return write_succeeded
+    #
+    # def plot_summary(self,
+    #                  inferred_model: 'RemoveBackgroundPyroModel',
+    #                  p: np.ndarray,
+    #                  z: np.ndarray):
+    #     """Output summary plot with three panels: training, cells, latent z."""
+    #
+    #     fig = plt.figure(figsize=(6, 18))
+    #
+    #     # Plot the train error.
+    #     plt.subplot(3, 1, 1)
+    #     if inferred_model is not None:
+    #         plt.plot(inferred_model.loss['train']['elbo'], '.--', label='Train')
+    #
+    #         # Plot the test error, if there was held-out test data.
+    #         if 'test' in inferred_model.loss.keys():
+    #             if len(inferred_model.loss['test']['epoch']) > 0:
+    #                 plt.plot(inferred_model.loss['test']['epoch'],
+    #                          inferred_model.loss['test']['elbo'], 'o:', label='Test')
+    #                 plt.legend()
+    #
+    #         plt.gca().set_ylim(bottom=max(inferred_model.loss['train']['elbo'][0],
+    #                                       inferred_model.loss['train']['elbo'][-1] - 2000))
+    #         plt.xlabel('Epoch')
+    #         plt.ylabel('ELBO')
+    #         plt.title('Progress of the training procedure')
+    #     else:
+    #         # Plot intentionally left blank, if there was no training (fast algorithm).
+    #         plt.title('Plot intentionally left blank')
+    #         plt.xticks([])
+    #         plt.yticks([])
+    #
+    #     # Plot the barcodes used, along with the inferred
+    #     # cell probabilities.
+    #     plt.subplot(3, 1, 2)
+    #     count_mat = self.get_count_matrix()
+    #     counts = np.array(count_mat.sum(axis=1)).squeeze()
+    #     count_order = np.argsort(counts)[::-1]
+    #     plt.semilogy(counts[count_order], color='black')
+    #     plt.ylabel('UMI counts')
+    #     plt.xlabel('Barcode index, sorted by UMI count')
+    #     if p is not None:  # The case of a simple model.
+    #         plt.gca().twinx()
+    #         plt.plot(p[count_order], '.:', color='red', alpha=0.3, rasterized=True)
+    #         plt.ylabel('Cell probability', color='red')
+    #         plt.ylim([-0.05, 1.05])
+    #         plt.title('Determination of which barcodes contain cells')
+    #     else:
+    #         plt.title('The subset of barcodes used for training')
+    #
+    #     # Plot the latent encoding via PCA.
+    #     plt.subplot(3, 1, 3)
+    #     if p is None:
+    #         p = np.ones(z.shape[0])
+    #     # A = torch.tensor(z[p >= consts.CELL_PROB_CUTOFF])
+    #     # U, S, V = torch.pca_lowrank(A)
+    #     z_pca = pca_2d(z[p >= consts.CELL_PROB_CUTOFF])  # torch.matmul(A, V[:, :2])
+    #     plt.plot(z_pca[:, 0], z_pca[:, 1],
+    #              '.', ms=3, color='black', alpha=0.3, rasterized=True)
+    #     plt.ylabel('PC 1')
+    #     plt.xlabel('PC 0')
+    #     plt.title('PCA of latent encoding of cell gene expression')
+    #
+    #     return fig
+    #
+    # def collect_output_metrics(self,
+    #                            inferred_count_matrix: sp.csr_matrix,
+    #                            fpr: Union[float, str],
+    #                            cell_logic,
+    #                            loss) -> pd.DataFrame:
+    #     """Create a table with a few output metrics. The idea is for these to
+    #     potentially be used by people creating automated pipelines."""
+    #
+    #     # Compute some metrics
+    #     input_count_matrix = self.data['matrix'][self.analyzed_barcode_inds, :]
+    #     total_raw_counts = self.data['matrix'].sum()
+    #     total_output_counts = inferred_count_matrix.sum()
+    #     total_counts_removed = total_raw_counts - total_output_counts
+    #     fraction_counts_removed = total_counts_removed / total_raw_counts
+    #     total_raw_counts_in_nonempty_droplets = input_count_matrix[cell_logic].sum()
+    #     total_counts_removed_from_nonempty_droplets = \
+    #         total_raw_counts_in_nonempty_droplets - inferred_count_matrix.sum()
+    #     fraction_counts_removed_from_nonempty_droplets = \
+    #         total_counts_removed_from_nonempty_droplets / total_raw_counts_in_nonempty_droplets
+    #     average_counts_removed_per_nonempty_droplet = \
+    #         total_counts_removed_from_nonempty_droplets / cell_logic.sum()
+    #     expected_cells = self.expected_cell_count
+    #     found_cells = cell_logic.sum()
+    #     average_counts_per_cell = inferred_count_matrix.sum() / found_cells
+    #     ratio_of_found_cells_to_expected_cells = \
+    #         None if (expected_cells is None) else (found_cells / expected_cells)
+    #     found_empties = len(self.analyzed_barcode_inds) - found_cells
+    #     fraction_of_analyzed_droplets_that_are_nonempty = \
+    #         found_cells / len(self.analyzed_barcode_inds)
+    #     if len(loss['train']['elbo']) > 20:
+    #         # compare mean ELBO increase over last 3 steps to the typical end(ish) fluctuations
+    #         convergence_indicator = (np.mean(np.abs([(loss['train']['elbo'][i]
+    #                                                   - loss['train']['elbo'][i - 1])
+    #                                                  for i in range(-3, -1)]))
+    #                                  / np.std(loss['train']['elbo'][-20:]))
+    #     else:
+    #         convergence_indicator = 'not enough training epochs to compute (requires more than 20)'
+    #     overall_change_in_train_elbo = loss['train']['elbo'][-1] - loss['train']['elbo'][0]
+    #
+    #     all_metrics_dict = \
+    #         {'total_raw_counts': total_raw_counts,
+    #          'total_output_counts': total_output_counts,
+    #          'total_counts_removed': total_counts_removed,
+    #          'fraction_counts_removed': fraction_counts_removed,
+    #          'total_raw_counts_in_cells':
+    #              total_raw_counts_in_nonempty_droplets,
+    #          'total_counts_removed_from_cells':
+    #              total_counts_removed_from_nonempty_droplets,
+    #          'fraction_counts_removed_from_cells':
+    #              fraction_counts_removed_from_nonempty_droplets,
+    #          'average_counts_removed_per_cell':
+    #              average_counts_removed_per_nonempty_droplet,
+    #          'target_fpr': fpr,
+    #          'expected_cells': expected_cells,
+    #          'found_cells': found_cells,
+    #          'output_average_counts_per_cell': average_counts_per_cell,
+    #          'ratio_of_found_cells_to_expected_cells':
+    #              ratio_of_found_cells_to_expected_cells,
+    #          'found_empties': found_empties,
+    #          'fraction_of_analyzed_droplets_that_are_nonempty':
+    #              fraction_of_analyzed_droplets_that_are_nonempty,
+    #          'convergence_indicator': convergence_indicator,
+    #          'overall_change_in_train_elbo': overall_change_in_train_elbo}
+    #
+    #     return pd.DataFrame(data=all_metrics_dict,
+    #                         index=['metric']).transpose()
 
 
 # def get_d_priors_from_dataset(dataset: SingleCellRNACountsDataset):
