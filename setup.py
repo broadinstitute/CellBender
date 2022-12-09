@@ -24,7 +24,7 @@ install_requires = [
 
 setuptools.setup(
     name='cellbender',
-    version='0.2.0',
+    version='0.2.1',
     description='A software package for eliminating technical artifacts from '
                 'high-throughput single-cell RNA sequencing (scRNA-seq) data',
     long_description=readme(),
