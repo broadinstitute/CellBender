@@ -8,7 +8,7 @@ import scipy.io as io
 
 from cellbender.remove_background import consts
 
-from typing import Dict, Union, List, Optional
+from typing import Dict, Union, List, Optional, Callable
 import logging
 import os
 import gzip
@@ -221,7 +221,7 @@ def load_data(input_file: str)\
     the self.input_file"""
 
     # Detect input data type.
-    load_fn = detect_input_data_type(input_file=input_file)
+    load_fn = choose_data_loader(input_file=input_file)
 
     # Load data using the appropriate loader.
     logger.info(f"Loading data from {input_file}")
@@ -230,8 +230,8 @@ def load_data(input_file: str)\
     return data
 
 
-def detect_input_data_type(input_file: str) -> Callable:
-    """Detect the type of input data."""
+def choose_data_loader(input_file: str) -> Callable:
+    """Detect the type of input data and return the relevant load function."""
 
     # Error if no input data file has been specified.
     assert input_file is not None, \
