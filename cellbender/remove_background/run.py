@@ -704,7 +704,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         #                              use_cuda=args.use_cuda)
         #
         # Set up the optimizer for pre-training.
-        adam_args = {'lr': args.learning_rate}
+        # adam_args = {'lr': args.learning_rate}
         # pretrain_optimizer = ClippedAdam(adam_args)
         #
         # # Set up the inference process.
@@ -754,7 +754,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         if args.constant_learning_rate:
             logger.info('Using ClippedAdam --constant-learning-rate rather than '
                         'the OneCycleLR schedule. This is not usually recommended.')
-            scheduler = ClippedAdam(adam_args)
+            scheduler = ClippedAdam(optimizer_args)
 
     # Determine the loss function.
     if args.use_jit:
