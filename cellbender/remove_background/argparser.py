@@ -203,6 +203,36 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "the posterior.  Reduce this to avoid running "
                                 "out of GPU memory creating the posterior "
                                 "(will be slower).")
+    subparser.add_argument("--posterior-regularization", type=str,
+                           default=None,
+                           choices=["PRq", "PRmu", "PRmu_gene"],
+                           dest="posterior_regularization",
+                           help="Posterior regularization method. (For experts: "
+                                "not required for normal usage, see "
+                                "documentation). PRq is approximate quantile-"
+                                "targeting. PRmu is approximate mean-targeting "
+                                "aggregated over genes (behavior of v0.2.0). "
+                                "PRmu_gene is approximate mean-targeting per "
+                                "gene.")
+    subparser.add_argument("--alpha",
+                           type=float, default=None,
+                           dest="prq_alpha",
+                           help="Tunable parameter alpha for the PRq posterior "
+                                "regularization method (not normally used: see "
+                                "documentation).")
+    subparser.add_argument("--q",
+                           type=float, default=None,
+                           dest="cdf_threshold_q",
+                           help="Tunable parameter q for the CDF threshold "
+                                "estimation method (not normally used: see "
+                                "documentation).")
+    subparser.add_argument("--estimator", type=str,
+                           default="mckp",
+                           choices=["map", "mean", "cdf", "sample", "mckp"],
+                           dest="estimator",
+                           help="Output denoised count estimation method. (For "
+                                "experts: not required for normal usage, see "
+                                "documentation).")
     subparser.add_argument("--constant-learning-rate",
                            dest="constant_learning_rate", action="store_true",
                            help="Including the flag --constant-learning-rate will "
@@ -217,6 +247,11 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "specified, it is not possible to pick up from "
                                 "that final checkpoint and continue training "
                                 "until 250 epochs.")
+    subparser.add_argument("--cpu-threads",
+                           type=int, default=None,
+                           dest="n_threads",
+                           help="Number of threads to use when pytorch is run "
+                                "on CPU. Defaults to the number of logical cores.")
     subparser.add_argument("--debug",
                            dest="debug", action="store_true",
                            help="Including the flag --debug will log "

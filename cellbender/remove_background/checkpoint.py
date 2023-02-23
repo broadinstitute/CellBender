@@ -15,6 +15,7 @@ import glob
 import random
 import pickle
 import tempfile
+import shutil
 
 
 logger = logging.getLogger('cellbender')
@@ -343,6 +344,17 @@ def load_from_checkpoint(filebase: Optional[str],
             load_random_state(filebase=filebase)
             logger.debug('Loaded random state globally for python, numpy, pytorch, and cuda')
 
+        # Copy the posterior file outside the temp dir so it can be loaded later.
+        if 'posterior' in to_load:
+            posterior_file = os.path.join(os.path.dirname(filebase), 'posterior.npz')
+            if os.path.exists(posterior_file):
+                shutil.copyfile(posterior_file, 'posterior.npz')
+                out.update({'posterior_file': 'posterior.npz'})
+                logger.debug(f'Copied posterior.npz file from {posterior_file} to posterior.npz')
+            else:
+                logger.debug('Trying to load posterior in load_from_checkpoint(), but posterior '
+                             'is not present in checkpoint tarball.')
+
     return out
 
 
@@ -407,7 +419,9 @@ def create_workflow_hashcode(module_path: str,
 
     hasher = hashlib.new(name=name)
 
-    files_safe_to_ignore = ['infer.py', 'simulate.py', 'report.py', 'downstream.py', 'monitor.py']
+    files_safe_to_ignore = ['infer.py', 'simulate.py', 'report.py',
+                            'downstream.py', 'monitor.py', 'fpr.py',
+                            'posterior.py', 'estimation.py', 'sparse_utils.py']
 
     if not os.path.exists(module_path):
         return ''

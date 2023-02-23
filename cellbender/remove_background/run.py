@@ -12,26 +12,42 @@ from cellbender.remove_background.checkpoint import attempt_load_checkpoint
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.train import run_training
+from cellbender.remove_background.posterior import Posterior, PRq, PRmu, \
+    compute_mean_target_removal_as_function, load_or_compute_posterior_and_save
+from cellbender.remove_background.estimation import MultipleChoiceKnapsack, \
+    MAP, Mean, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
+from cellbender.remove_background.sparse_utils import zero_out_csr_rows
+from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
+from cellbender.remove_background.report import run_notebook_make_html
 
 import pyro
 from pyro.infer import SVI, JitTraceEnum_ELBO, JitTrace_ELBO, \
     TraceEnum_ELBO, Trace_ELBO
 from pyro.optim import ClippedAdam
 import numpy as np
+import scipy.sparse as sp
+import pandas as pd
 import torch
 
 import os
 import sys
 import logging
+import argparse
+import traceback
+import psutil
 from datetime import datetime
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Union
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt  # This needs to be after matplotlib.use('Agg')
 
 
 logger = logging.getLogger('cellbender')
 
 
-def run_remove_background(args):
+def run_remove_background(args: argparse.Namespace):
     """The full script for the command line tool to remove background RNA.
 
     Args:
@@ -47,6 +63,14 @@ def run_remove_background(args):
     # Log the start time.
     logger.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     logger.info("Running remove-background")
+
+    # Run pytorch multithreaded if running on CPU: but this makes little difference in runtime.
+    if args.n_threads is not None:
+        n_jobs = args.n_threads
+    else:
+        n_jobs = psutil.cpu_count(logical=True)
+    torch.set_num_threads(n_jobs)
+    logger.debug(f'Set pytorch to use {n_jobs} threads')
 
     # Load data from file and choose barcodes and genes to analyze.
     try:
@@ -64,6 +88,7 @@ def run_remove_background(args):
 
     except OSError:
         logger.error(f"OSError: Unable to open file {args.input_file}.")
+        logger.error(traceback.format_exc())
         sys.exit(1)
 
     # Instantiate latent variable model and run full inference procedure.
@@ -72,18 +97,42 @@ def run_remove_background(args):
     else:
         inferred_model, _, _, _ = run_inference(dataset_obj=dataset_obj, args=args)
 
-    # Generate posterior.
-    dataset_obj.calculate_posterior(inferred_model=inferred_model,
-                                    posterior_batch_size=args.posterior_batch_size,
-                                    debug=args.debug)
-
-    # Write outputs to file.
     try:
-        dataset_obj.save_to_output_file(output_file=args.output_file,
-                                        inferred_model=inferred_model,
-                                        save_plots=True,
-                                        create_report=True,
-                                        truth_file=args.truth_file)
+
+        file_dir, file_base = os.path.split(args.output_file)
+        file_name = os.path.splitext(os.path.basename(file_base))[0]
+
+        # Create the posterior and save it.
+        posterior = load_or_compute_posterior_and_save(
+            dataset_obj=dataset_obj,
+            inferred_model=inferred_model,
+            args=args,
+        )
+
+        # Save output plots.
+        save_output_plots(
+            file_dir=file_dir,
+            file_name=file_name,
+            dataset_obj=dataset_obj,
+            inferred_model=inferred_model,
+            p=posterior.latents_map['p'],
+            z=posterior.latents_map['z'],
+        )
+
+        # Save cell barcodes in a CSV file.
+        analyzed_barcode_logic = (posterior.latents_map['p'] > consts.CELL_PROB_CUTOFF)
+        cell_barcodes = (dataset_obj.data['barcodes']
+                         [dataset_obj.analyzed_barcode_inds[analyzed_barcode_logic]])
+        bc_file_name = os.path.join(file_dir, file_name + "_cell_barcodes.csv")
+        write_cell_barcodes_csv(bc_file_name=bc_file_name, cell_barcodes=cell_barcodes)
+
+        # Compute estimates of denoised count matrix for each FPR and save them.
+        compute_output_denoised_counts_reports_metrics(
+            posterior=posterior,
+            args=args,
+            file_dir=file_dir,
+            file_name=file_name,
+        )
 
         logger.info("Completed remove-background.")
         logger.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S\n'))
@@ -108,8 +157,446 @@ def run_remove_background(args):
         logger.info("Keyboard interrupt.  Terminated without saving.\n")
 
 
+def save_output_plots(file_dir: str,
+                      file_name: str,
+                      dataset_obj: SingleCellRNACountsDataset,
+                      inferred_model: RemoveBackgroundPyroModel,
+                      p: np.ndarray,
+                      z: np.ndarray) -> bool:
+    """Save the UMI histogram and the three-panel output summary PDF"""
+
+    try:
+        # File naming.
+        gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
+        summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
+
+        # UMI count prior GMM plot.
+        fig = dataset_obj.gmm.plot_summary()
+        fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
+        logger.info(f"Saved UMI count plot as {gmm_fig_name}")
+
+        # Three-panel output summary plot.
+        counts = np.array(dataset_obj.get_count_matrix().sum(axis=1)).squeeze()
+        fig = plot_summary(loss=inferred_model.loss, umi_counts=counts, p=p, z=z)
+        fig.savefig(summary_fig_name, bbox_inches='tight', format='pdf')
+        logger.info(f"Saved summary plots as {summary_fig_name}")
+        return True
+
+    except Exception:
+        logger.warning("Unable to save all plots.")
+        logger.warning(traceback.format_exc())
+        return False
+
+
+def plot_summary(loss: Dict[str, Dict[str, np.ndarray]],
+                 umi_counts: np.ndarray,
+                 p: np.ndarray,
+                 z: np.ndarray):
+    """Output summary plot with three panels: training, cells, latent z."""
+
+    fig = plt.figure(figsize=(6, 18))
+
+    # Plot the train error.
+    plt.subplot(3, 1, 1)
+    plt.plot(loss['train']['elbo'], '.--', label='Train')
+
+    # Plot the test error, if there was held-out test data.
+    if 'test' in loss.keys():
+        if len(loss['test']['epoch']) > 0:
+            plt.plot(loss['test']['epoch'],
+                     loss['test']['elbo'], 'o:', label='Test')
+            plt.legend()
+
+    plt.gca().set_ylim(bottom=max(loss['train']['elbo'][0],
+                                  loss['train']['elbo'][-1] - 2000))
+    plt.xlabel('Epoch')
+    plt.ylabel('ELBO')
+    plt.title('Progress of the training procedure')
+
+    # Plot the barcodes used, along with the inferred
+    # cell probabilities.
+    plt.subplot(3, 1, 2)
+    count_order = np.argsort(umi_counts)[::-1]
+    plt.semilogy(umi_counts[count_order], color='black')
+    plt.ylabel('UMI counts')
+    plt.xlabel('Barcode index, sorted by UMI count')
+    if p is not None:  # The case of a simple model.
+        plt.gca().twinx()
+        plt.plot(p[count_order], '.:', color='red', alpha=0.3, rasterized=True)
+        plt.ylabel('Cell probability', color='red')
+        plt.ylim([-0.05, 1.05])
+        plt.title('Determination of which barcodes contain cells')
+    else:
+        plt.title('The subset of barcodes used for training')
+
+    plt.subplot(3, 1, 3)
+    if p is None:
+        p = np.ones(z.shape[0])
+
+    # Do PCA on the latent encoding z.
+    A = torch.tensor(z[p >= consts.CELL_PROB_CUTOFF])
+    U, S, V = torch.pca_lowrank(A)
+    z_pca = torch.matmul(A, V[:, :2])
+
+    # Plot the latent encoding via PCA.
+    plt.plot(z_pca[:, 0], z_pca[:, 1],
+             '.', ms=3, color='black', alpha=0.3, rasterized=True)
+    plt.ylabel('PC 1')
+    plt.xlabel('PC 0')
+    plt.title('PCA of latent encoding of gene expression in cells')
+
+    return fig
+
+
+def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
+                                                   args: argparse.Namespace,
+                                                   file_dir: str,
+                                                   file_name: str) -> bool:
+    """Handle the estimation of the output denoised count matrix, given a
+    posterior.  Compute the estimate for all specified FPR values.  Save each
+    as we go.  Create reports and save, and aggregate metrics and save as we go.
+
+    Args:
+        posterior: Posterior object
+        args: Argparser namespace with all parsed input args
+        file_dir:
+        file_name:
+
+    Returns:
+        True iff all files write correctly
+
+    """
+
+    # Ensure that the posterior distribution has been computed.
+    # TODO: when we make the properties non-private, then this should become obsolete
+    posterior.cell_noise_count_posterior_coo()
+
+    # Choose output count matrix estimation method.
+    noise_target_fun = None
+    if args.estimator == 'map':
+        estimator = MAP
+    elif args.estimator == 'mean':
+        estimator = Mean
+    elif args.estimator == 'sample':
+        estimator = SingleSample
+    elif args.estimator == 'cdf':
+        estimator = ThresholdCDF
+    elif args.estimator == 'mckp':
+        estimator = MultipleChoiceKnapsack
+
+        # Prep specific for MCKP: target estimation.
+        logger.info('Computing target noise counts per gene for MCKP estimator')
+        count_matrix = posterior.dataset_obj.data['matrix']  # all barcodes
+        cell_inds = posterior.dataset_obj.analyzed_barcode_inds[posterior.latents_map['p']
+                                                                > consts.CELL_PROB_CUTOFF]
+        non_cell_row_logic = np.array([i not in cell_inds
+                                       for i in range(count_matrix.shape[0])])
+        cell_counts = zero_out_csr_rows(csr=count_matrix, row_logic=non_cell_row_logic)
+
+        noise_target_fun_per_cell = compute_mean_target_removal_as_function(
+            noise_count_posterior_coo=posterior._noise_count_posterior_coo,
+            noise_offsets=posterior._noise_count_posterior_coo_offsets,
+            index_converter=posterior.index_converter,
+            raw_count_csr_for_cells=cell_counts,
+            n_cells=len(cell_inds),
+            device='cuda' if args.use_cuda else 'cpu',
+            per_gene=True,
+        )
+        noise_target_fun = lambda x: noise_target_fun_per_cell(x) * len(cell_inds)
+    else:
+        raise ValueError(f'Input --estimator must be one of '
+                         f'["map", "mean", "sample", "cdf", "mckp"]')
+
+    # Save denoised count matrix outputs (for each FPR if applicable).
+    success = True
+    for fpr in args.fpr:
+
+        # TODO: relying on there being one value in the list by default, even if not using FPR
+
+        logger.debug(f'Working on FPR {fpr}')
+
+        # Regularize posterior again at this FPR, if needed.
+        if args.posterior_regularization in ['PRmu', 'PRmu_gene']:
+            # TODO: currently this re-calculates the first FPR which is not necessary
+            posterior.regularize_posterior(
+                regularization=PRmu,
+                raw_count_matrix=posterior.dataset_obj.data['matrix'],
+                fpr=fpr,
+                per_gene=True if (args.posterior_regularization == 'PRmu_gene') else False,
+                device='cuda',
+            )
+        else:
+            # Other posterior regularizations were already performed in
+            # posterior.load_or_compute_posterior_and_save()
+            pass
+
+        # If using MCKP, recompute noise targets for this FPR.
+        if noise_target_fun is not None:
+            noise_targets = noise_target_fun(fpr).detach().cpu().numpy()
+            logger.debug(f'Computed noise targets for FPR {fpr}:\n{noise_targets}')
+            logger.info(f'Using MCKP noise targets computed for FPR {fpr}')
+        else:
+            noise_targets = None
+
+        # Compute denoised counts.
+        logger.info(f'Computing denoised counts using {args.estimator} estimator')
+        denoised_counts = posterior.compute_denoised_counts(
+            estimator_constructor=estimator,
+            noise_targets_per_gene=noise_targets,
+            q=args.cdf_threshold_q,
+            alpha=args.prq_alpha,
+            device='cuda' if args.use_cuda else 'cpu',
+        )
+
+        # Restore eliminated features in cells.
+        logger.debug('Restoring eliminated features in cells')
+        denoised_counts = posterior.dataset_obj.restore_eliminated_features_in_cells(
+            denoised_counts,
+            posterior.latents_map['p'],
+        )
+
+        # TODO: correct cell probabilities so that any zero-count droplet becomes "empty"
+
+        # Save denoised count matrix.
+        name_suffix = (f'_FPR_{fpr}' if len(args.fpr) > 1 else '')
+        fpr_output_filename = os.path.join(file_dir, file_name + name_suffix + '.h5')
+        filtered_output_file = os.path.join(file_dir, file_name + name_suffix + '_filtered.h5')
+
+        def _writer_helper(file, **kwargs) -> bool:
+            return write_denoised_count_matrix(
+                file=file,
+                denoised_count_matrix=denoised_counts,
+                posterior_regularization=args.posterior_regularization,
+                posterior_regularization_kwargs=posterior._noise_count_regularized_posterior_kwargs,
+                estimator=args.estimator,
+                estimator_kwargs=None if (args.cdf_threshold_q is None) else {'q': args.cdf_threshold_q},
+                latents=posterior.latents_map,
+                dataset_obj=posterior.dataset_obj,
+                learning_curve=posterior.vi_model.loss,
+                fpr=fpr,
+                **kwargs,
+            )
+
+        # Full count matrix.
+        write_succeeded = _writer_helper(file=fpr_output_filename)
+        success = success and write_succeeded
+
+        # Count matrix filtered to cells only.
+        analyzed_barcode_logic = (posterior.latents_map['p'] > consts.CELL_PROB_CUTOFF)
+        write_succeeded = _writer_helper(
+            file=filtered_output_file,
+            analyzed_barcode_logic=analyzed_barcode_logic,
+            barcode_inds=posterior.dataset_obj.analyzed_barcode_inds[analyzed_barcode_logic],
+        )
+        success = success and write_succeeded
+
+        # Compile and save metrics.
+        try:
+            df = collect_output_metrics(
+                dataset_obj=posterior.dataset_obj,
+                inferred_count_matrix=denoised_counts,
+                fpr=fpr,
+                cell_logic=(posterior.latents_map['p'] >= consts.CELL_PROB_CUTOFF),
+                loss=posterior.vi_model.loss,
+            )
+            metrics_file_name = os.path.join(file_dir, file_name + name_suffix + '_metrics.csv')
+            df.to_csv(metrics_file_name, index=True, header=False, float_format='%.3f')
+            logger.info(f'Saved output metrics as {metrics_file_name}')
+        except Exception:
+            logger.warning("Unable to collect output metrics.")
+            logger.warning(traceback.format_exc())
+
+        # Create report.
+        try:
+            os.environ['INPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), args.input_file))
+            os.environ['OUTPUT_FILE'] = os.path.abspath(os.path.join(os.getcwd(), fpr_output_filename))
+            if args.truth_file is not None:
+                os.environ['TRUTH_FILE'] = os.path.abspath(os.path.join(os.getcwd(), args.truth_file))
+            html_report_file = os.path.join(file_dir, file_name + name_suffix + '_report.html')
+            run_notebook_make_html(
+                file=os.path.abspath(os.path.join(os.path.dirname(__file__), 'report.ipynb')),
+                output=html_report_file,
+            )
+            logger.info(f'Succeeded in writing report to {html_report_file}')
+
+        except Exception:
+            logger.warning("Unable to create report.")
+            logger.warning(traceback.format_exc())
+
+    return success
+
+
+def write_denoised_count_matrix(file: str,
+                                denoised_count_matrix: sp.csr_matrix,
+                                posterior_regularization: Optional[str],
+                                posterior_regularization_kwargs: Optional[Dict[str, float]],
+                                estimator: str,
+                                estimator_kwargs: Optional[Dict[str, float]],
+                                latents: Dict[str, np.ndarray],
+                                dataset_obj: SingleCellRNACountsDataset,
+                                learning_curve: Dict[str, np.ndarray],  # inferred_model.loss
+                                fpr: float,
+                                analyzed_barcode_logic: np.ndarray = ...,
+                                barcode_inds: np.ndarray = ...) -> bool:
+    """Helper function for writing output h5 files"""
+
+    z = latents['z'][analyzed_barcode_logic, :]
+    d = latents['d'][analyzed_barcode_logic]
+    p = latents['p'][analyzed_barcode_logic]
+    epsilon = latents['epsilon'][analyzed_barcode_logic]
+
+    # Inferred ambient gene expression vector.
+    ambient_expression_trimmed = pyro.param('chi_ambient').detach().cpu().numpy()
+
+    # Convert the indices from trimmed gene set to original gene indices.
+    ambient_expression = np.zeros(dataset_obj.data['matrix'].shape[1])
+    ambient_expression[dataset_obj.analyzed_gene_inds] = ambient_expression_trimmed
+
+    # Some summary statistics:
+    # Fraction of counts in each droplet that were removed.
+    raw_count_matrix = dataset_obj.data['matrix'][dataset_obj.analyzed_barcode_inds, :]  # need all genes
+    raw_counts_droplet = np.array(raw_count_matrix.sum(axis=1)).squeeze()
+    out_counts_droplet = np.array(denoised_count_matrix[dataset_obj.analyzed_barcode_inds, :]
+                                  .sum(axis=1)).squeeze()
+    background_fraction = ((raw_counts_droplet - out_counts_droplet) /
+                           (raw_counts_droplet + 0.001))[analyzed_barcode_logic]
+
+    # Handle the optional rho parameters.
+    rho = None
+    if (('rho_alpha' in pyro.get_param_store().keys())
+            and ('rho_beta' in pyro.get_param_store().keys())):
+        rho = np.array([pyro.param('rho_alpha').detach().cpu().numpy().item(),
+                        pyro.param('rho_beta').detach().cpu().numpy().item()])
+
+    # Write h5.
+    write_succeeded = write_matrix_to_cellranger_h5(
+        cellranger_version=3,
+        output_file=file,
+        gene_names=dataset_obj.data['gene_names'],
+        gene_ids=dataset_obj.data['gene_ids'],
+        feature_types=dataset_obj.data['feature_types'],
+        genomes=dataset_obj.data['genomes'],
+        barcodes=dataset_obj.data['barcodes'][barcode_inds],
+        count_matrix=denoised_count_matrix[barcode_inds, :],
+        local_latents={'barcode_indices_for_latents': dataset_obj.analyzed_barcode_inds,
+                       'gene_expression_encoding': z,
+                       'cell_size': d,
+                       'cell_probability': p,
+                       'droplet_efficiency': epsilon,
+                       'background_fraction': background_fraction},
+        global_latents={'ambient_expression': ambient_expression,
+                        'empty_droplet_size_lognormal_loc': [pyro.param('d_empty_loc').item()],
+                        'empty_droplet_size_lognormal_scale': [pyro.param('d_empty_scale').item()],
+                        'cell_size_lognormal_std': [pyro.param('d_cell_scale').item()],
+                        'swapping_fraction_dist_params': rho},
+        metadata={'learning_curve': learning_curve,
+                  'barcodes_analyzed': dataset_obj.data['barcodes'][dataset_obj.analyzed_barcode_inds],
+                  'barcodes_analyzed_inds': dataset_obj.analyzed_barcode_inds,
+                  'features_analyzed_inds': dataset_obj.analyzed_gene_inds,
+                  'fraction_data_used_for_testing': [1. - consts.TRAINING_FRACTION],
+                  'target_false_positive_rate': [fpr],
+                  # 'posterior_regularization': [posterior_regularization],
+                  # 'posterior_regularization_kwargs': posterior_regularization_kwargs,
+                  # 'estimator': [estimator],
+                  # 'estimator_parameters': estimator_kwargs,
+                  },
+    )
+    return write_succeeded
+
+
+def collect_output_metrics(dataset_obj: SingleCellRNACountsDataset,
+                           inferred_count_matrix: sp.csr_matrix,
+                           fpr: Union[float, str],
+                           cell_logic,
+                           loss) -> pd.DataFrame:
+    """Create a table with a few output metrics. The idea is for these to
+    potentially be used by people creating automated pipelines."""
+
+    # Compute some metrics
+    input_count_matrix = dataset_obj.data['matrix'][dataset_obj.analyzed_barcode_inds, :]
+    total_raw_counts = dataset_obj.data['matrix'].sum()
+    total_output_counts = inferred_count_matrix.sum()
+    total_counts_removed = total_raw_counts - total_output_counts
+    fraction_counts_removed = total_counts_removed / total_raw_counts
+    total_raw_counts_in_nonempty_droplets = input_count_matrix[cell_logic].sum()
+    total_counts_removed_from_nonempty_droplets = \
+        total_raw_counts_in_nonempty_droplets - inferred_count_matrix.sum()
+    fraction_counts_removed_from_nonempty_droplets = \
+        total_counts_removed_from_nonempty_droplets / total_raw_counts_in_nonempty_droplets
+    average_counts_removed_per_nonempty_droplet = \
+        total_counts_removed_from_nonempty_droplets / cell_logic.sum()
+    expected_cells = dataset_obj.expected_cell_count
+    found_cells = cell_logic.sum()
+    average_counts_per_cell = inferred_count_matrix.sum() / found_cells
+    ratio_of_found_cells_to_expected_cells = \
+        None if (expected_cells is None) else (found_cells / expected_cells)
+    found_empties = len(dataset_obj.analyzed_barcode_inds) - found_cells
+    fraction_of_analyzed_droplets_that_are_nonempty = \
+        found_cells / len(dataset_obj.analyzed_barcode_inds)
+    if len(loss['train']['elbo']) > 20:
+        # compare mean ELBO increase over last 3 steps to the typical end(ish) fluctuations
+        convergence_indicator = (np.mean(np.abs([(loss['train']['elbo'][i]
+                                                  - loss['train']['elbo'][i - 1])
+                                                 for i in range(-3, -1)]))
+                                 / np.std(loss['train']['elbo'][-20:]))
+    else:
+        convergence_indicator = 'not enough training epochs to compute (requires more than 20)'
+    overall_change_in_train_elbo = loss['train']['elbo'][-1] - loss['train']['elbo'][0]
+
+    all_metrics_dict = \
+        {'total_raw_counts': total_raw_counts,
+         'total_output_counts': total_output_counts,
+         'total_counts_removed': total_counts_removed,
+         'fraction_counts_removed': fraction_counts_removed,
+         'total_raw_counts_in_cells':
+             total_raw_counts_in_nonempty_droplets,
+         'total_counts_removed_from_cells':
+             total_counts_removed_from_nonempty_droplets,
+         'fraction_counts_removed_from_cells':
+             fraction_counts_removed_from_nonempty_droplets,
+         'average_counts_removed_per_cell':
+             average_counts_removed_per_nonempty_droplet,
+         'target_fpr': fpr,
+         'expected_cells': expected_cells,
+         'found_cells': found_cells,
+         'output_average_counts_per_cell': average_counts_per_cell,
+         'ratio_of_found_cells_to_expected_cells':
+             ratio_of_found_cells_to_expected_cells,
+         'found_empties': found_empties,
+         'fraction_of_analyzed_droplets_that_are_nonempty':
+             fraction_of_analyzed_droplets_that_are_nonempty,
+         'convergence_indicator': convergence_indicator,
+         'overall_change_in_train_elbo': overall_change_in_train_elbo}
+
+    return pd.DataFrame(data=all_metrics_dict,
+                        index=['metric']).transpose()
+
+
+def write_cell_barcodes_csv(bc_file_name: str, cell_barcodes: np.ndarray):
+    """Write the cell barcode CSV file.
+
+    Args:
+        bc_file_name: Output CSV file
+        cell_barcodes: Array of the cell barcode names
+
+    """
+
+    # Save barcodes determined to contain cells as _cell_barcodes.csv
+    try:
+        barcode_names = np.array([str(cell_barcodes[i], encoding='UTF-8')
+                                  for i in range(cell_barcodes.size)])
+    except UnicodeDecodeError:
+        # necessary if barcodes are ints
+        barcode_names = cell_barcodes
+    except TypeError:
+        # necessary if barcodes are already decoded
+        barcode_names = cell_barcodes
+    np.savetxt(bc_file_name, barcode_names, delimiter=',', fmt='%s')
+    logger.info(f"Saved cell barcodes in {bc_file_name}")
+
+
 def run_inference(dataset_obj: SingleCellRNACountsDataset,
-                  args,
+                  args: argparse.Namespace,
                   output_checkpoint_tarball: str = consts.CHECKPOINT_FILE_NAME,
                   total_epochs_for_testing_only: Optional[int] = None)\
         -> Tuple[RemoveBackgroundPyroModel, pyro.optim.PyroOptim, DataLoader, DataLoader]:
@@ -217,7 +704,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         #                              use_cuda=args.use_cuda)
         #
         # Set up the optimizer for pre-training.
-        adam_args = {'lr': args.learning_rate}
+        # adam_args = {'lr': args.learning_rate}
         # pretrain_optimizer = ClippedAdam(adam_args)
         #
         # # Set up the inference process.
@@ -267,13 +754,13 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         if args.constant_learning_rate:
             logger.info('Using ClippedAdam --constant-learning-rate rather than '
                         'the OneCycleLR schedule. This is not usually recommended.')
-            scheduler = ClippedAdam(adam_args)
+            scheduler = ClippedAdam(optimizer_args)
 
     # Determine the loss function.
     if args.use_jit:
 
         # Call guide() once as a warm-up.
-        model.guide(torch.zeros([10, dataset_obj.analyzed_gene_inds.size]).to(model.device))
+        # model.guide(torch.zeros([10, dataset_obj.analyzed_gene_inds.size]).to(model.device))
 
         if args.model == "simple":
             loss_function = JitTrace_ELBO()

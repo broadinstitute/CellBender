@@ -218,6 +218,7 @@ def generate_sample_dirichlet_dataset(
         chi: Optional[np.ndarray] = None,
         chi_artificial_similarity: float = 0,
         vector_to_add_to_chi_ambient: Optional[np.ndarray] = None,
+        chi_ambient: Optional[np.ndarray] = None,
         cell_mean_umi: List[int] = [5000],
         cell_lognormal_sigma: float = 0.2,
         empty_mean_umi: int = 200,
@@ -269,12 +270,18 @@ def generate_sample_dirichlet_dataset(
         dirichlet_alpha = ['None: chi was input to generate_sample_dataset()']
 
     # Get chi_ambient: a weighted average of expression, possibly with extra.
-    chi_ambient = np.zeros(n_genes)
-    for i in range(n_cell_types):
-        chi_ambient = chi_ambient + chi[i, :] * cells_of_each_type[i] * cell_mean_umi[i]
-    if vector_to_add_to_chi_ambient is None:
-        vector_to_add_to_chi_ambient = np.zeros(n_genes)
-    chi_ambient = chi_ambient + vector_to_add_to_chi_ambient
+    if chi_ambient is None:
+        chi_ambient = np.zeros(n_genes)
+        for i in range(n_cell_types):
+            chi_ambient = chi_ambient + chi[i, :] * cells_of_each_type[i] * cell_mean_umi[i]
+        if vector_to_add_to_chi_ambient is None:
+            vector_to_add_to_chi_ambient = np.zeros(n_genes)
+        chi_ambient = chi_ambient + vector_to_add_to_chi_ambient
+    else:
+        if vector_to_add_to_chi_ambient is not None:
+            print('You specified both `chi_ambient` and `vector_to_add_to_chi_ambient`. '
+                  'Ignoring `vector_to_add_to_chi_ambient` and using `chi_ambient` '
+                  'as provided.')
     chi_ambient = chi_ambient / chi_ambient.sum()
 
     c_real = np.zeros((n_droplets, n_genes))

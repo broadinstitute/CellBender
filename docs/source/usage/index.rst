@@ -9,8 +9,8 @@ remove-background
 Use case
 ~~~~~~~~
 
-``remove-background`` is used to remove ambient / background RNA from a count matrix produced by
-`10x Genomics' CellRanger pipeline
+``remove-background`` is used to remove ambient / background RNA from a count matrix,
+such as one produced by the `10x Genomics' CellRanger pipeline
 <https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/what-is-cell-ranger>`_.
 The output of ``cellranger count`` produces a raw .h5 file that is used as the input
 for ``remove-background``.
@@ -167,8 +167,13 @@ Considerations for setting parameters:
 * ``--cuda``: Include this flag.  The code is meant to be run on a GPU.
 * ``--learning-rate``: The default value of 1e-4 is typically fine, but this value can be
   adjusted if problems arise during quality-control checks of the learning curve (as above).
-* ``--fpr``: A value of 0.01 is generally quite good, but you can generate a few output
-  count matrices and compare them by choosing a few values: 0.01 0.05 0.1
+* ``--fpr``: A value of 0 is the default, and represents the most conservative
+  setting, which is appropriate for jointly analyzing many samples in a cohort.
+  In order to examine a single dataset at a time and remove more noise (at the
+  expense of some signal), choose larger values such as 0.05 or 0.1. Bear in mind
+  that the value 1 represents removal of every count in the dataset, signal and
+  noise.  You can generate multiple output count matrices in the same run by
+  choosing several values: 0.0 0.01 0.05 0.1
 
 .. image:: /_static/remove_background/UMI_curve_defs.png
    :width: 250 px

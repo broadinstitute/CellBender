@@ -130,9 +130,3 @@ def test_restore_eliminated_features_in_cells():
 def test_remove_zero_count_cells():
     """Functionality yet to be written too"""
     pass
-
-
-@pytest.mark.skip
-def test_saving():
-    """Dummy data, and ensure saving all outputs does not error"""
-    pass

@@ -1,4 +1,4 @@
-# Posterior inference.
+"""Posterior generation."""
 
 import pyro
 import pyro.distributions as dist
@@ -10,6 +10,9 @@ import cellbender.remove_background.consts as consts
 from cellbender.remove_background.model import calculate_mu, calculate_lambda
 from cellbender.monitor import get_hardware_usage
 from cellbender.remove_background.data.dataprep import DataLoader
+from cellbender.remove_background.estimation import MultipleChoiceKnapsack
+from cellbender.remove_background.posterior import Posterior as NewPosterior, \
+    get_noise_budget_per_gene_as_function
 
 from typing import Tuple, List, Dict, Optional, Union, Callable
 from abc import ABC, abstractmethod
@@ -19,8 +22,8 @@ import logging
 logger = logging.getLogger('cellbender')
 
 
-class Posterior(ABC):
-    """Base class Posterior handles posterior count inference.
+class BasePosterior(ABC):
+    """Base class BasePosterior handles posteriors on latent variables and denoised counts.
 
     Args:
         dataset_obj: Dataset object.
@@ -32,8 +35,8 @@ class Posterior(ABC):
             a sparse matrix.  Unused if counts_dtype is np.uint32
 
     Properties:
-        mean: Posterior count mean, as a sparse matrix.
-        latents: Posterior latents
+        denoised_counts: BasePosterior denoised counts, as a sparse matrix.
+        latents: BasePosterior latents, MAP estimate
 
     """
 
@@ -51,33 +54,434 @@ class Posterior(ABC):
         self.barcode_inds = None if (dataset_obj is None) else np.arange(0, self.count_matrix_shape[0])
         self.dtype = counts_dtype
         self.float_threshold = float_threshold
-        self._mean = None
+        self._denoised_counts = None
         self._latents = None
-        super(Posterior, self).__init__()
+        super(BasePosterior, self).__init__()
 
     @abstractmethod
-    def _get_mean(self):
-        """Obtain mean posterior counts and store in self._mean"""
+    def _get_denoised_counts(self):
+        """Obtain mean posterior counts and store in self._denoised_counts"""
         pass
 
     @property
-    def mean(self) -> sp.csc_matrix:
-        if self._mean is None:
-            self._get_mean()
-        return self._mean
+    def denoised_counts(self) -> sp.csc_matrix:
+        if self._denoised_counts is None:
+            self._get_denoised_counts()
+        return self._denoised_counts
 
     @property
-    def latents(self) -> Dict[str, np.ndarray]:
+    def latents_map(self) -> Dict[str, np.ndarray]:
         if self._latents is None:
-            self._get_latents()
+            self._get_latents_map()
         return self._latents
 
     @property
     def variance(self):
-        raise NotImplemented("Posterior count variance not implemented.")
+        raise NotImplemented("BasePosterior count variance not implemented.")
 
     @torch.no_grad()
-    def _get_latents(self):
+    def full_noise_count_posterior_cdf_coo(self,
+                                           n_samples: int = 20,
+                                           y_map: bool = True,
+                                           n_counts_max: int = 20):
+        """Compute the full-blown posterior on noise counts for the full dataset,
+        and store its CDF in COO sparse format on CPU.
+
+        Returns:
+            noise_count_posterior_cdf_coo: This sparse COO object contains all
+                the information about the posterior noise count distribution,
+                but it is a bit complicated. The data per entry (n, g) are
+                stored as an unordered list of entries in COO format, and the
+                values represent the CDF of a noise count value. The last entry
+                (noise count vale = observed data) is omitted, since the CDF is
+                1 (this omission makes the matrix sparse, since data = 0 will
+                not have any entries). The order and noise count value
+                associated with each COO entry can be reconstructed based
+                on this information.
+
+        NOTES:
+            Example on reconstructing noise count probabilities for one entry
+            on the count matrix (n, g):
+                Say all COO entries for (n, g) are
+                [0.1, 0.4, 0.7, 0.8, 0.9] (can be in any order)
+                Firstly, the total number of counts at (n, g) is 5, since there
+                are 5 entries. The probabilities per noise count value can be
+                reconstructed thus:
+                1. sort the values, i.e. [0.1, 0.4, 0.7, 0.8, 0.9]
+                2. the full CDF is obtained by appending 1, i.e.
+                    [0.1, 0.4, 0.7, 0.8, 0.9, 1.]
+                3. the probabilities for 0 through 6 noise counts are then the
+                    differences between successive values, i.e.
+                    [0.1, 0.3, 0.3, 0.1, 0.1, 0.1]
+        """
+
+        # Compute posterior in mini-batches.
+        torch.cuda.empty_cache()
+
+        # Dataloader for cells only.
+        analyzed_bcs_only = True
+        count_matrix = self.dataset_obj.get_count_matrix()  # analyzed barcodes
+        cell_logic = (self.latents_map['p'] > consts.CELL_PROB_CUTOFF)
+        dataloader_index_to_analyzed_bc_index = np.where(cell_logic)[0]
+        cell_data_loader = DataLoader(
+            count_matrix[cell_logic],
+            empty_drop_dataset=None,
+            batch_size=self.posterior_batch_size,
+            fraction_empties=0.,
+            shuffle=False,
+            use_cuda=self.use_cuda,
+        )
+
+        barcodes = []
+        genes = []
+        counts = []
+        ind = 0
+
+        logger.info('Computing posterior noise count probabilities in mini-batches...')
+
+        for data in cell_data_loader:
+
+            if self.debug:
+                logger.debug(f'Posterior minibatch starting with droplet {ind}')
+                logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda))
+
+            # Compute noise count probabilities.
+            noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
+                data=data,
+                n_samples=n_samples,
+                y_map=y_map,
+                n_counts_max=n_counts_max,
+            )
+
+            # Convert to sparse CDF format.
+            noise_log_cdf_NGC = torch.logcumsumexp(noise_log_pdf_NGC, dim=-1)
+            bcs_i_chunk, genes_i, counts_i = self.dense_to_sparse(noise_log_cdf_NGC)
+
+            # Add back in the necessary entries from noise count offsets.
+            ind_n, ind_g, val = self.dense_to_sparse(noise_count_offset_NG)
+            if len(val) > 0:
+                bcs_i_chunk_extras = []
+                genes_i_extras = []
+                counts_i_extras = []
+                for n, g, v in zip(ind_n, ind_g, val):
+                    bcs_i_chunk_extras.extend([n] * v)
+                    genes_i_extras.extend([g] * v)
+                    counts_i_extras.extend([0.0] * v)
+                bcs_i_chunk = np.concatenate([bcs_i_chunk, np.array(bcs_i_chunk_extras)])
+                genes_i = np.concatenate([genes_i, np.array(genes_i_extras)])
+                counts_i = np.concatenate([counts_i, np.array(counts_i_extras)])
+
+            # Barcode index in the dataloader.
+            bcs_i = bcs_i_chunk + ind
+
+            # Obtain the real barcode index since we only use cells.
+            bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i.cpu().numpy()]
+
+            # Translate chunk barcode inds to overall inds.
+            if analyzed_bcs_only:
+                bcs_i = self.dataset_obj.analyzed_barcode_inds[bcs_i]
+            else:
+                bcs_i = self.barcode_inds[bcs_i]
+
+            # Add sparse matrix values to lists.
+            try:
+                barcodes.extend(bcs_i.tolist())
+                genes.extend(genes_i.tolist())
+            except TypeError as e:
+                # edge case of a single value
+                barcodes.append(bcs_i)
+                genes.append(genes_i)
+            counts.append(counts_i)  # leave as a list of torch tensors
+
+            # Increment barcode index counter.
+            ind += data.shape[0]  # Same as data_loader.batch_size
+
+        # Convert the lists to numpy arrays.
+        counts = torch.cat(counts, dim=0).detach().cpu().numpy().astype(np.uint32)
+        barcodes = np.array(barcodes, dtype=np.uint32)
+        genes = np.array(genes, dtype=np.uint32)  # uint16 is too small!
+
+        # Put the counts into a sparse csc_matrix.
+        self._denoised_counts = sp.csc_matrix((counts, (barcodes, genes)),
+                                              shape=self.count_matrix_shape)
+
+    @torch.no_grad()
+    def sample(self, data, lambda_multiplier=1., y_map: bool = False) -> torch.Tensor:
+        """Draw a single posterior sample for the count matrix conditioned on data
+
+        Args:
+            data: Count matrix (slice: some droplets, all genes)
+            lambda_multiplier: BasePosterior regularization multiplier
+            y_map: True to enforce the use of the MAP estimate of y, cell or
+                no cell. Useful in the case where many samples are collected,
+                since typically in those cases it is confusing to have samples
+                where a droplet is both cell-containing and empty.
+
+        Returns:
+            denoised_output_count_matrix: Single sample of the denoised output
+                count matrix, sampling all stochastic latent variables in the model.
+
+        """
+
+        # Sample all the latent variables in the model and get mu, lambda, alpha.
+        mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
+
+        # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
+        log_prob_noise_counts_NGC, poisson_values_low_NG = self._log_prob_noise_count_tensor(
+            data=data,
+            mu_est=mu_sample + 1e-30,
+            lambda_est=lambda_sample * lambda_multiplier + 1e-30,
+            alpha_est=alpha_sample + 1e-30,
+            debug=self.debug,
+        )
+
+        # Use those probabilities to draw a sample of c_{ng}^{noise}
+        noise_count_increment_NG = dist.Categorical(logits=log_prob_noise_counts_NGC).sample()
+        noise_counts_NG = noise_count_increment_NG + poisson_values_low_NG
+
+        # Subtract from data to get the denoised output counts.
+        denoised_output_count_matrix = data - noise_counts_NG
+
+        return denoised_output_count_matrix
+
+    @torch.no_grad()
+    def map_denoised_counts_from_sampled_latents(self,
+                                                 data,
+                                                 n_samples: int,
+                                                 lambda_multiplier: float = 1.,
+                                                 y_map: bool = False) -> torch.Tensor:
+        """Draw posterior samples for all stochastic latent variables in the model
+         and use those values to compute a MAP estimate of the denoised count
+         matrix conditioned on data.
+
+        Args:
+            data: Count matrix (slice: some droplets, all genes)
+            lambda_multiplier: BasePosterior regularization multiplier
+            y_map: True to enforce the use of the MAP estimate of y, cell or
+                no cell. Useful in the case where many samples are collected,
+                since typically in those cases it is confusing to have samples
+                where a droplet is both cell-containing and empty.
+
+        Returns:
+            denoised_output_count_matrix: MAP estimate of the denoised output
+                count matrix, sampling all stochastic latent variables in the model.
+
+        """
+
+        noise_log_pdf, offset_noise_counts = self.noise_log_pdf(
+            data=data,
+            n_samples=n_samples,
+            lambda_multiplier=lambda_multiplier,
+            y_map=y_map,
+        )
+
+        noise_counts = torch.argmax(noise_log_pdf, dim=-1) + offset_noise_counts
+        denoised_output_count_matrix = torch.clamp(data - noise_counts, min=0.)
+
+        return denoised_output_count_matrix
+
+    @torch.no_grad()
+    def noise_log_pdf(self,
+                      data,
+                      n_samples: int = 1,
+                      lambda_multiplier=1.,
+                      y_map: bool = False,
+                      n_counts_max: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute the posterior noise-count probability density function
+        using n_samples samples. This is a big matrix [n, g, c] where the last
+        dimension c is of variable size depending on the computation in
+        _log_prob_noise_count_tensor(), but is limited there to be no more than
+        100.  The c dimension represents an index to the number of noise counts
+        in [n, g]: specifically, the noise count once poisson_values_low_NG is added
+
+        Args:
+            data: Count matrix (slice: some droplets, all genes)
+            n_samples: Number of samples (of all stochastic latent variables in
+                the model) used to generate the CDF
+            lambda_multiplier: BasePosterior regularization multiplier
+            y_map: True to enforce the use of the MAP estimate of y, cell or
+                no cell. Useful in the case where many samples are collected,
+                since typically in those cases it is confusing to have samples
+                where a droplet is both cell-containing and empty.
+            n_counts_max: Size of count axis (need not start at zero noise
+                counts, but should be enough to cover the meat of the posterior)
+
+        Returns:
+            noise_log_pdf_NGC: Consensus noise count log_pdf (big tensor) from the samples.
+            noise_count_offset_NG: The offset for the noise count axis [n, g].
+
+        """
+
+        noise_log_pdf_NGC = None
+        noise_count_offset_NG = None
+
+        for s in range(1, n_samples + 1):
+
+            # Sample all the latent variables in the model and get mu, lambda, alpha.
+            mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
+
+            # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
+            log_prob_noise_counts_NGC, noise_count_offset_NG = self._log_prob_noise_count_tensor(
+                data=data,
+                mu_est=mu_sample + 1e-30,
+                lambda_est=lambda_sample * lambda_multiplier + 1e-30,
+                alpha_est=alpha_sample + 1e-30,
+                n_counts_max=n_counts_max,
+                debug=self.debug,
+            )
+
+            # Normalize the PDFs (not necessarily normalized over the count range).
+            log_prob_noise_counts_NGC = (log_prob_noise_counts_NGC
+                                         - torch.logsumexp(log_prob_noise_counts_NGC,
+                                                           dim=-1, keepdim=True))
+
+            # Add the probability from this sample to our running total.
+            # Update rule is
+            # log_prob_total_n = LAE [ log(1 - 1/n) + log_prob_total_{n-1}, log(1/n) + log_prob_sample ]
+            if s == 1:
+                noise_log_pdf_NGC = log_prob_noise_counts_NGC
+            else:
+                # This is a (normalized) running sum over samples in log-probability space.
+                noise_log_pdf_NGC = torch.logaddexp(
+                    noise_log_pdf_NGC + torch.log(torch.tensor(1. - 1. / s).to(device=data.device)),
+                    log_prob_noise_counts_NGC + torch.log(torch.tensor(1. / s).to(device=data.device)),
+                )
+
+        return noise_log_pdf_NGC, noise_count_offset_NG
+
+    @torch.no_grad()
+    def sample_mu_lambda_alpha(self,
+                               data: torch.Tensor,
+                               y_map: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Calculate a single sample estimate of mu, the mean of the true count
+        matrix, and lambda, the rate parameter of the Poisson background counts.
+
+        Args:
+            data: Dense tensor minibatch of cell by gene count data.
+            y_map: True to enforce the use of a MAP estimate of y rather than
+                sampling y. This prevents some samples from having a cell and
+                some not, which can lead to strange summary statistics over
+                many samples.
+
+        Returns:
+            mu_sample: Dense tensor sample of Negative Binomial mean for true
+                counts.
+            lambda_sample: Dense tensor sample of Poisson rate params for noise
+                counts.
+            alpha_sample: Dense tensor sample of Dirichlet concentration params
+                that inform the overdispersion of the Negative Binomial.
+
+        """
+
+        logger.debug('Replaying model with guide to sample mu, alpha, lambda')
+
+        # Use pyro poutine to trace the guide and sample parameter values.
+        guide_trace = pyro.poutine.trace(self.vi_model.guide).get_trace(x=data)
+
+        # If using MAP for y (so that you never get samples of cell and no cell),
+        # then intervene and replace a sampled y with the MAP
+        if y_map:
+            guide_trace.nodes['y']['value'] = (guide_trace.nodes['p_passback']['value'] > 0).clone().detach()
+
+        replayed_model = pyro.poutine.replay(self.vi_model.model, guide_trace)
+
+        # Run the model using these sampled values.
+        replayed_model_output = replayed_model(x=data)
+
+        # The model returns mu, alpha, and lambda.
+        mu_sample = replayed_model_output['mu']
+        lambda_sample = replayed_model_output['lam']
+        alpha_sample = replayed_model_output['alpha']
+
+        return mu_sample, lambda_sample, alpha_sample
+
+    @staticmethod
+    @torch.no_grad()
+    def _log_prob_noise_count_tensor(data: torch.Tensor,
+                                     mu_est: torch.Tensor,
+                                     lambda_est: torch.Tensor,
+                                     alpha_est: Optional[torch.Tensor],
+                                     n_counts_max: int = 100,
+                                     debug: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute the log prob of noise counts [n, g, c] given mu, lambda, alpha, and the data.
+
+        NOTE: this is un-normalized log probability
+
+        Args:
+            data: Dense tensor minibatch of cell by gene count data.
+            mu_est: Dense tensor of Negative Binomial means for true counts.
+            lambda_est: Dense tensor of Poisson rate params for noise counts.
+            alpha_est: Dense tensor of Dirichlet concentration params that
+                inform the overdispersion of the Negative Binomial.  None will
+                use an all-Poisson model
+            n_counts_max: Size of noise count dimension c
+            debug: True will go slow and check for NaNs and zero-probability entries
+
+        Returns:
+            log_prob_tensor: Probability of each noise count value.
+            poisson_values_low: The starting point for noise counts for each
+                cell and gene, because they can be different.
+
+        """
+
+        # Estimate a reasonable low-end to begin the Poisson summation.
+        n = min(n_counts_max, data.max().item())  # No need to exceed the max value
+        poisson_values_low = (lambda_est.detach() - n / 2).int()
+
+        poisson_values_low = torch.clamp(torch.min(poisson_values_low,
+                                                   (data - n + 1).int()), min=0).float()
+
+        # Construct a big tensor of possible noise counts per cell per gene,
+        # shape (batch_cells, n_genes, max_noise_counts)
+        noise_count_tensor = torch.arange(start=0, end=n) \
+            .expand([data.shape[0], data.shape[1], -1]) \
+            .float().to(device=data.device)
+        noise_count_tensor = noise_count_tensor + poisson_values_low.unsqueeze(-1)
+
+        # Compute probabilities of each number of noise counts.
+        # NOTE: some values will be outside the support (negative values for NB).
+        # This results in NaNs.
+        if alpha_est is None:
+            # Poisson only model
+            log_prob_tensor = (dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False)
+                               .log_prob(noise_count_tensor)
+                               + dist.Poisson(mu_est.unsqueeze(-1), validate_args=False)
+                               .log_prob(data.unsqueeze(-1) - noise_count_tensor))
+            logger.debug('Using all poisson model (since alpha is not supplied to posterior)')
+        else:
+            logits = (mu_est.log() - alpha_est.log()).unsqueeze(-1)
+            log_prob_tensor = (dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False)
+                               .log_prob(noise_count_tensor)
+                               + dist.NegativeBinomial(total_count=alpha_est.unsqueeze(-1),
+                                                       logits=logits,
+                                                       validate_args=False)
+                               .log_prob(data.unsqueeze(-1) - noise_count_tensor))
+
+        # Set log_prob to -inf if noise > data.
+        neg_inf_tensor = torch.ones_like(log_prob_tensor) * -np.inf
+        log_prob_tensor = torch.where((noise_count_tensor <= data.unsqueeze(-1)),
+                                      log_prob_tensor,
+                                      neg_inf_tensor)
+
+        # Set log_prob to -inf, -inf, -inf, 0 for entries where mu == 0, since they will be NaN
+        # TODO: either this or require that mu > 0...
+        # log_prob_tensor = torch.where(mu_est == 0,
+        #                               data,
+        #                               log_prob_tensor)
+
+        logger.debug(f'Prob computation with tensor of shape {log_prob_tensor.shape}')
+
+        if debug:
+            assert not torch.isnan(log_prob_tensor).any(), \
+                'log_prob_tensor contains a NaN'
+            if torch.isinf(log_prob_tensor).all(dim=-1).any():
+                print(torch.where(torch.isinf(log_prob_tensor).all(dim=-1)))
+                raise AssertionError('There is at least one log_prob_tensor[n, g, :] that has all-zero probability')
+
+        return log_prob_tensor, poisson_values_low
+
+    @torch.no_grad()
+    def _get_latents_map(self):
         """Calculate the encoded latent variables."""
 
         logger.debug('Computing latent variables')
@@ -193,66 +597,43 @@ class Posterior(ABC):
         return {'mu': mu_map, 'lam': lambda_map, 'alpha': alpha_map}
 
     def dense_to_sparse(self, chunk_dense_counts: torch.Tensor) \
-            -> Tuple[torch.Tensor, np.ndarray, torch.Tensor]:
+            -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Distill a batch of dense counts into sparse format.
         Barcode numbering is relative to the tensor passed in.
         """
 
-        # TODO: speed up by keeping it a torch tensor as long as possible
-
-        if self.name != 'prob':  # ProbPosterior produces ints already
-
-            if self.dtype == np.uint32:
-
-                # Turn the floating point count estimates into integers.
-                # TODO: convert this to torch... but it is not used by ProbPosterior
-                decimal_values, _ = np.modf(chunk_dense_counts)  # Stuff after decimal.
-                roundoff_counts = np.random.binomial(1, p=decimal_values)  # Bernoulli.
-                chunk_dense_counts = np.floor(chunk_dense_counts).astype(dtype=int)
-                chunk_dense_counts += roundoff_counts
-
-            elif self.dtype == np.float32:
-
-                # Truncate counts at a threshold value.
-                chunk_dense_counts = (chunk_dense_counts *
-                                      (chunk_dense_counts > self.float_threshold))
-
-            else:
-                raise NotImplementedError(f"Count matrix dtype {self.dtype} is not "
-                                          f"supported.  Choose from [np.uint32, "
-                                          f"np.float32]")
+        # if self.name != 'prob':  # Posterior produces ints already
+        #
+        #     if self.dtype == np.uint32:
+        #
+        #         # Turn the floating point count estimates into integers.
+        #         # TODO: convert this to torch... but it is not used by Posterior
+        #         decimal_values, _ = np.modf(chunk_dense_counts)  # Stuff after decimal.
+        #         roundoff_counts = np.random.binomial(1, p=decimal_values)  # Bernoulli.
+        #         chunk_dense_counts = np.floor(chunk_dense_counts).astype(dtype=int)
+        #         chunk_dense_counts += roundoff_counts
+        #
+        #     elif self.dtype == np.float32:
+        #
+        #         # Truncate counts at a threshold value.
+        #         chunk_dense_counts = (chunk_dense_counts *
+        #                               (chunk_dense_counts > self.float_threshold))
+        #
+        #     else:
+        #         raise NotImplementedError(f"Count matrix dtype {self.dtype} is not "
+        #                                   f"supported.  Choose from [np.uint32, "
+        #                                   f"np.float32]")
 
         nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed, nonzero_counts = \
-            self.dense_to_sparse_op_torch(chunk_dense_counts)
+            dense_to_sparse_op_torch(chunk_dense_counts)
 
         # Get the original gene index from gene index in the trimmed dataset.
-        nonzero_genes = self.analyzed_gene_inds[nonzero_genes_trimmed.cpu()]
+        nonzero_genes = self.analyzed_gene_inds[nonzero_genes_trimmed]
 
         return nonzero_barcode_inds_this_chunk, nonzero_genes, nonzero_counts
 
-    @staticmethod
-    def dense_to_sparse_op_numpy(chunk_dense_counts: np.ndarray) \
-            -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """This isn't used directly, but it's used by tests since it's tried and true"""
-        # Find all the nonzero counts in this dense matrix chunk.
-        nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed = np.nonzero(chunk_dense_counts)
-        nonzero_counts = chunk_dense_counts[nonzero_barcode_inds_this_chunk,
-                                            nonzero_genes_trimmed].flatten(order='C')
-        return nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed, nonzero_counts
 
-    @staticmethod
-    @torch.no_grad()
-    def dense_to_sparse_op_torch(chunk_dense_counts: torch.Tensor) \
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Find all the nonzero counts in this dense matrix chunk.
-        nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed = \
-            torch.nonzero(chunk_dense_counts, as_tuple=True)
-        nonzero_counts = chunk_dense_counts[nonzero_barcode_inds_this_chunk,
-                                            nonzero_genes_trimmed].flatten()
-        return nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed, nonzero_counts
-
-
-class ImputedPosterior(Posterior):
+class ImputedPosterior(BasePosterior):
     """Posterior count inference using imputation to infer cell mean (d * chi).
 
     Args:
@@ -268,7 +649,7 @@ class ImputedPosterior(Posterior):
             a sparse matrix.  Unused if counts_dtype is np.uint32
 
     Properties:
-        mean: Posterior count mean, as a sparse matrix.
+        mean: BasePosterior count mean, as a sparse matrix.
         encodings: Encoded latent variables, one per barcode in the dataset.
 
     """
@@ -293,7 +674,7 @@ class ImputedPosterior(Posterior):
                                                float_threshold=float_threshold)
 
     @torch.no_grad()
-    def _get_mean(self):
+    def _get_denoised_counts(self):
         """Send dataset through a guide that returns mean posterior counts.
 
         Keep track of only what is necessary to distill a sparse count matrix.
@@ -339,14 +720,14 @@ class ImputedPosterior(Posterior):
                                    shape=self.count_matrix_shape)
 
 
-class NaivePosterior(Posterior):
+class NaivePosterior(BasePosterior):
     """Posterior count inference using naive ambient subtraction.
 
     Args:
         dataset_obj: Dataset object.
 
     Properties:
-        mean: Posterior count mean, as a sparse matrix.
+        mean: BasePosterior count mean, as a sparse matrix.
 
     """
 
@@ -360,7 +741,7 @@ class NaivePosterior(Posterior):
                                              counts_dtype=np.uint32)
 
     @torch.no_grad()
-    def _get_mean(self):
+    def _get_denoised_counts(self):
         """Perform naive ambient subtraction.
 
         Keep track of only what is necessary to distill a sparse count matrix.
@@ -438,7 +819,7 @@ class NaivePosterior(Posterior):
         return dense_counts
 
 
-class ProbPosterior(Posterior):
+class Posterior(BasePosterior):
     """Posterior count inference using a noise count probability distribution.
 
     Args:
@@ -452,7 +833,7 @@ class ProbPosterior(Posterior):
             a sparse matrix.  Unused if counts_dtype is np.uint32
 
     Properties:
-        mean: Posterior count mean, as a sparse matrix.
+        denoised_counts: Posterior count mean, as a sparse matrix.
         encodings: Encoded latent variables, one per barcode in the dataset.
 
     """
@@ -461,6 +842,7 @@ class ProbPosterior(Posterior):
                  dataset_obj: 'SingleCellRNACountsDataset',
                  vi_model: 'RemoveBackgroundPyroModel',
                  fpr: Union[str, float] = 0.01,
+                 summarization: 'EstimationMethod' = MultipleChoiceKnapsack,
                  float_threshold: float = 0.5,
                  posterior_batch_size: int = consts.PROB_POSTERIOR_BATCH_SIZE,
                  debug: bool = False):
@@ -474,154 +856,10 @@ class ProbPosterior(Posterior):
         self.random = np.random
         self.debug = debug
         self.name = 'prob'
-        super(ProbPosterior, self).__init__(dataset_obj=dataset_obj,
-                                            vi_model=vi_model,
-                                            counts_dtype=np.uint32,
-                                            float_threshold=float_threshold)
-
-    @torch.no_grad()
-    def sample(self, data, lambda_multiplier=1., y_map: bool = False) -> torch.Tensor:
-        """Draw a single posterior sample for the count matrix conditioned on data
-
-        Args:
-            data: Count matrix (slice: some droplets, all genes)
-            lambda_multiplier: Posterior regularization multiplier
-            y_map: True to enforce the use of the MAP estimate of y, cell or
-                no cell. Useful in the case where many samples are collected,
-                since typically in those cases it is confusing to have samples
-                where a droplet is both cell-containing and empty.
-
-        Returns:
-            denoised_output_count_matrix: Single sample of the denoised output
-                count matrix, sampling all stochastic latent variables in the model.
-
-        """
-
-        # Sample all the latent variables in the model and get mu, lambda, alpha.
-        mu_sample, lambda_sample, alpha_sample = self._param_sample(data, y_map=y_map)
-
-        # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
-        log_prob_noise_counts_NGC, poisson_values_low_NG = self._log_prob_noise_count_tensor(
-            data=data,
-            mu_est=mu_sample + 1e-30,
-            lambda_est=lambda_sample * lambda_multiplier + 1e-30,
-            alpha_est=alpha_sample + 1e-30,
-            debug=self.debug,
-        )
-
-        # Use those probabilities to draw a sample of c_{ng}^{noise}
-        noise_count_increment_NG = dist.Categorical(logits=log_prob_noise_counts_NGC).sample()
-        noise_counts_NG = noise_count_increment_NG + poisson_values_low_NG
-
-        # Subtract from data to get the denoised output counts.
-        denoised_output_count_matrix = data - noise_counts_NG
-
-        return denoised_output_count_matrix
-
-    @torch.no_grad()
-    def map_from_sampled_latents(self,
-                                 data,
-                                 n_samples: int,
-                                 lambda_multiplier: float = 1.,
-                                 y_map: bool = False) -> torch.Tensor:
-        """Draw posterior samples for all stochastic latent variables in the model
-         and use those values to compute a MAP estimate of the denoised count
-         matrix conditioned on data.
-
-        Args:
-            data: Count matrix (slice: some droplets, all genes)
-            lambda_multiplier: Posterior regularization multiplier
-            y_map: True to enforce the use of the MAP estimate of y, cell or
-                no cell. Useful in the case where many samples are collected,
-                since typically in those cases it is confusing to have samples
-                where a droplet is both cell-containing and empty.
-
-        Returns:
-            denoised_output_count_matrix: MAP estimate of the denoised output
-                count matrix, sampling all stochastic latent variables in the model.
-
-        """
-
-        noise_log_pdf, offset_noise_counts = self.noise_log_pdf(
-            data=data,
-            n_samples=n_samples,
-            lambda_multiplier=lambda_multiplier,
-            y_map=y_map,
-        )
-
-        noise_counts = torch.argmax(noise_log_pdf, dim=-1) + offset_noise_counts
-        denoised_output_count_matrix = torch.clamp(data - noise_counts, min=0.)
-
-        return denoised_output_count_matrix
-
-    @torch.no_grad()
-    def noise_log_pdf(self,
-                      data,
-                      n_samples: int = 1,
-                      lambda_multiplier=1.,
-                      y_map: bool = False,
-                      n_counts_max: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute the posterior noise-count probability density function
-        using n_samples samples. This is a big matrix [n, g, c] where the last
-        dimension c is of variable size depending on the computation in
-        _log_prob_noise_count_tensor(), but is limited there to be no more than
-        100.  The c dimension represents an index to the number of noise counts
-        in [n, g]: specifically, the noise count once poisson_values_low_NG is added
-
-        Args:
-            data: Count matrix (slice: some droplets, all genes)
-            n_samples: Number of samples (of all stochastic latent variables in
-                the model) used to generate the CDF
-            lambda_multiplier: Posterior regularization multiplier
-            y_map: True to enforce the use of the MAP estimate of y, cell or
-                no cell. Useful in the case where many samples are collected,
-                since typically in those cases it is confusing to have samples
-                where a droplet is both cell-containing and empty.
-            n_counts_max: Size of count axis (need not start at zero noise
-                counts, but should be enough to cover the meat of the posterior)
-
-        Returns:
-            noise_log_pdf_NGC: Consensus noise count log_pdf (big tensor) from the samples.
-            noise_count_offset_NG: The offset for the noise count axis [n, g].
-
-        """
-
-        noise_log_pdf_NGC = None
-        noise_count_offset_NG = None
-
-        for s in range(1, n_samples + 1):
-
-            # Sample all the latent variables in the model and get mu, lambda, alpha.
-            mu_sample, lambda_sample, alpha_sample = self._param_sample(data, y_map=y_map)
-
-            # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
-            log_prob_noise_counts_NGC, noise_count_offset_NG = self._log_prob_noise_count_tensor(
-                data=data,
-                mu_est=mu_sample + 1e-30,
-                lambda_est=lambda_sample * lambda_multiplier + 1e-30,
-                alpha_est=alpha_sample + 1e-30,
-                n_counts_max=n_counts_max,
-                debug=self.debug,
-            )
-
-            # Normalize the PDFs (not necessarily normalized over the count range).
-            log_prob_noise_counts_NGC = (log_prob_noise_counts_NGC
-                                         - torch.logsumexp(log_prob_noise_counts_NGC,
-                                                           dim=-1, keepdim=True))
-
-            # Add the probability from this sample to our running total.
-            # Update rule is
-            # log_prob_total_n = LAE [ log(1 - 1/n) + log_prob_total_{n-1}, log(1/n) + log_prob_sample ]
-            if s == 1:
-                noise_log_pdf_NGC = log_prob_noise_counts_NGC
-            else:
-                # This is a (normalized) running sum over samples in log-probability space.
-                noise_log_pdf_NGC = torch.logaddexp(
-                    noise_log_pdf_NGC + torch.log(torch.tensor(1. - 1. / s).to(device=data.device)),
-                    log_prob_noise_counts_NGC + torch.log(torch.tensor(1. / s).to(device=data.device)),
-                )
-
-        return noise_log_pdf_NGC, noise_count_offset_NG
+        super(Posterior, self).__init__(dataset_obj=dataset_obj,
+                                        vi_model=vi_model,
+                                        counts_dtype=np.uint32,
+                                        float_threshold=float_threshold)
 
     @torch.no_grad()
     def counts_from_cdf_threshold(self,
@@ -648,7 +886,7 @@ class ProbPosterior(Posterior):
                 we remove an extra count.
             n_samples: Number of samples (of all stochastic latent variables in
                 the model) used to generate the CDF
-            lambda_multiplier: Posterior regularization multiplier
+            lambda_multiplier: BasePosterior regularization multiplier
             y_map: True to enforce the use of the MAP estimate of y, cell or
                 no cell. Useful in the case where many samples are collected,
                 since typically in those cases it is confusing to have samples
@@ -715,7 +953,7 @@ class ProbPosterior(Posterior):
                                          n_samples: int = 1,
                                          count_range: int = 50,
                                          y_map: bool = True) -> Dict[str, torch.Tensor]:
-        """Compute PDFs for the priors (still conditioned on data via the guide)
+        """Compute PDFs for the priors (after empirical Bayes... via the guide)
         on true counts and noise counts based on n_samples samples of all
         stochastic latent variables in the model.
 
@@ -746,7 +984,7 @@ class ProbPosterior(Posterior):
         n = min(count_range, data.max().item())  # No need to exceed the max value
 
         # Draw an initial sample.
-        mu_sample, lambda_sample, alpha_sample = self._param_sample(data, y_map=y_map)
+        mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
 
         # Estimate a reasonable low-end to begin the Poisson pdf.
         log_pdf_noise_counts_offset_NG = (lambda_sample.detach() - n / 2).int()
@@ -775,7 +1013,7 @@ class ProbPosterior(Posterior):
 
             if s > 0:
                 # Sample all the latent variables in the model and get mu, lambda, alpha.
-                mu_sample, lambda_sample, alpha_sample = self._param_sample(data, y_map=y_map)
+                mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
 
             # Compute log_pdf of cell counts.
             logits = (mu_sample.log() - alpha_sample.log()).unsqueeze(-1)
@@ -1276,91 +1514,120 @@ class ProbPosterior(Posterior):
         return noise_counts_NG, unmet_budget_G
 
     @torch.no_grad()
-    def _get_mean(self):
+    def _get_denoised_counts(self):
         """Compute output counts."""
 
-        logger.debug(f'Re-calculating a posterior count matrix: FPR = {self.fpr}')
+        # logger.debug(f'Re-calculating a posterior count matrix: FPR = {self.fpr}')
 
         # Compute posterior in mini-batches.
         torch.cuda.empty_cache()
 
-        # Dataloader for cells only.
-        analyzed_bcs_only = True
-        count_matrix = self.dataset_obj.get_count_matrix()  # analyzed barcodes
-        cell_logic = (self.latents['p'] > consts.CELL_PROB_CUTOFF)
-        dataloader_index_to_analyzed_bc_index = np.where(cell_logic)[0]
-        cell_data_loader = DataLoader(
-            count_matrix[cell_logic],
-            empty_drop_dataset=None,
-            batch_size=self.posterior_batch_size,
-            fraction_empties=0.,
-            shuffle=False,
-            sort_by=lambda x: self.random.rand(x.shape[0]),  # a simulated dataset can be ordered
-            use_cuda=self.use_cuda,
+        # TODO: messing around ==============
+
+        # Compute full posterior.
+        import time
+        t = time.time()
+        post = NewPosterior(dataset_obj=self.dataset_obj, vi_model=self.vi_model)
+        posterior_coo = post.cell_noise_count_posterior_coo()
+        print(f'Posterior computed in {(time.time() - t) / 60:.2f} mins')
+        sp.save_npz('posterior.npz', posterior_coo)
+        print('Saved full posterior as posterior.npz')
+
+        # Find per-gene noise removal targets using nominal FPR.
+        target_fcn = get_noise_budget_per_gene_as_function(posterior=post)
+        targets_per_cell_G = target_fcn(self.fpr)
+        cell_logic = (self.latents_map['p'] > consts.CELL_PROB_CUTOFF)
+        n_cells = cell_logic.sum()
+        targets_G = targets_per_cell_G * n_cells
+
+        # Compute denoised counts using the MCKP approach.
+        logger.info('Creating a point estimate of the denoised count matrix...')
+        t = time.time()
+        denoised_counts = post.compute_denoised_counts(
+            estimator_constructor=MultipleChoiceKnapsack,
+            noise_targets_per_gene=targets_G,
         )
+        print(f'Total MCKP time is {(time.time() - t) / 60:.2f} mins')
+        self._denoised_counts = denoised_counts
 
-        barcodes = []
-        genes = []
-        counts = []
-        ind = 0
-        carryover_G = 0.  # initialization for MCKP
-
-        logger.info('Performing posterior sampling of count matrix in mini-batches...')
-
-        for data in cell_data_loader:
-
-            if self.debug:
-                logger.debug(f'Posterior minibatch inference starting with droplet {ind}')
-                logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda))
-
-            # Compute an estimate of the true counts.
-            dense_counts, carryover_G = self.mckp_denoised_counts(
-                data=data,
-                carryover_G=carryover_G,
-                n_samples=20,
-                n_counts_max=20,
-                how='fpr',
-                target=self.fpr,
-            )
-
-            bcs_i_chunk, genes_i, counts_i = self.dense_to_sparse(dense_counts)
-
-            # Barcode index in the dataloader.
-            bcs_i = bcs_i_chunk + ind
-
-            # Obtain the real barcode index after unsorting the dataloader.
-            bcs_i = cell_data_loader.unsort_inds(bcs_i)
-
-            # Obtain the real barcode index since we only use cells.
-            bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i.cpu().numpy()]
-
-            # Translate chunk barcode inds to overall inds.
-            if analyzed_bcs_only:
-                bcs_i = self.dataset_obj.analyzed_barcode_inds[bcs_i]
-            else:
-                bcs_i = self.barcode_inds[bcs_i]
-
-            # Add sparse matrix values to lists.
-            try:
-                barcodes.extend(bcs_i.tolist())
-                genes.extend(genes_i.tolist())
-            except TypeError as e:
-                # edge case of a single value
-                barcodes.append(bcs_i)
-                genes.append(genes_i)
-            counts.append(counts_i)  # leave as a list of torch tensors
-
-            # Increment barcode index counter.
-            ind += data.shape[0]  # Same as data_loader.batch_size
-
-        # Convert the lists to numpy arrays.
-        counts = torch.cat(counts, dim=0).detach().cpu().numpy().astype(np.uint32)
-        barcodes = np.array(barcodes, dtype=np.uint32)
-        genes = np.array(genes, dtype=np.uint32)  # uint16 is too small!
-
-        # Put the counts into a sparse csc_matrix.
-        self._mean = sp.csc_matrix((counts, (barcodes, genes)),
-                                   shape=self.count_matrix_shape)
+        # # Dataloader for cells only.
+        # analyzed_bcs_only = True
+        # count_matrix = self.dataset_obj.get_count_matrix()  # analyzed barcodes
+        # cell_logic = (self.latents_map['p'] > consts.CELL_PROB_CUTOFF)
+        # dataloader_index_to_analyzed_bc_index = np.where(cell_logic)[0]
+        # cell_data_loader = DataLoader(
+        #     count_matrix[cell_logic],
+        #     empty_drop_dataset=None,
+        #     batch_size=self.posterior_batch_size,
+        #     fraction_empties=0.,
+        #     shuffle=False,
+        #     sort_by=lambda x: self.random.rand(x.shape[0]),  # a simulated dataset can be ordered
+        #     use_cuda=self.use_cuda,
+        # )
+        #
+        # barcodes = []
+        # genes = []
+        # counts = []
+        # ind = 0
+        # carryover_G = 0.  # initialization for MCKP
+        #
+        # logger.info('Performing posterior sampling of count matrix in mini-batches...')
+        #
+        # for data in cell_data_loader:
+        #
+        #     if self.debug:
+        #         logger.debug(f'BasePosterior minibatch inference starting with droplet {ind}')
+        #         logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda))
+        #
+        #     # Compute an estimate of the true counts.
+        #     dense_counts, carryover_G = self.mckp_denoised_counts(
+        #         data=data,
+        #         carryover_G=carryover_G,
+        #         n_samples=20,
+        #         n_counts_max=20,
+        #         how='fpr',
+        #         target=self.fpr,
+        #     )
+        #
+        #     bcs_i_chunk, genes_i, counts_i = self.dense_to_sparse(dense_counts)
+        #
+        #     # Barcode index in the dataloader.
+        #     bcs_i = bcs_i_chunk + ind
+        #
+        #     # Obtain the real barcode index after unsorting the dataloader.
+        #     bcs_i = cell_data_loader.unsort_inds(bcs_i)
+        #
+        #     # Obtain the real barcode index since we only use cells.
+        #     bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i.cpu().numpy()]
+        #
+        #     # Translate chunk barcode inds to overall inds.
+        #     if analyzed_bcs_only:
+        #         bcs_i = self.dataset_obj.analyzed_barcode_inds[bcs_i]
+        #     else:
+        #         bcs_i = self.barcode_inds[bcs_i]
+        #
+        #     # Add sparse matrix values to lists.
+        #     try:
+        #         barcodes.extend(bcs_i.tolist())
+        #         genes.extend(genes_i.tolist())
+        #     except TypeError as e:
+        #         # edge case of a single value
+        #         barcodes.append(bcs_i)
+        #         genes.append(genes_i)
+        #     counts.append(counts_i)  # leave as a list of torch tensors
+        #
+        #     # Increment barcode index counter.
+        #     ind += data.shape[0]  # Same as data_loader.batch_size
+        #
+        # # Convert the lists to numpy arrays.
+        # counts = torch.cat(counts, dim=0).detach().cpu().numpy().astype(np.uint32)
+        # barcodes = np.array(barcodes, dtype=np.uint32)
+        # genes = np.array(genes, dtype=np.uint32)  # uint16 is too small!
+        #
+        # # Put the counts into a sparse csc_matrix.
+        # self._denoised_counts = sp.csc_matrix((counts, (barcodes, genes)),
+        #                                       shape=self.count_matrix_shape)
+        # TODO ==============================
 
     # @torch.no_grad()
     # def _get_mean(self):
@@ -1420,7 +1687,7 @@ class ProbPosterior(Posterior):
     #     for data in sorted_data_loader:
     #
     #         if self.debug:
-    #             logger.debug(f'Posterior minibatch inference starting with droplet {ind}')
+    #             logger.debug(f'BasePosterior minibatch inference starting with droplet {ind}')
     #             logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda))
     #
     #         # Compute an estimate of the true counts.
@@ -1483,7 +1750,7 @@ class ProbPosterior(Posterior):
     #     genes = np.array(genes, dtype=np.uint32)  # uint16 is too small!
     #
     #     # Put the counts into a sparse csc_matrix.
-    #     self._mean = sp.csc_matrix((counts, (barcodes, genes)),
+    #     self._denoised_counts = sp.csc_matrix((counts, (barcodes, genes)),
     #                                shape=self.count_matrix_shape)
 
     @torch.no_grad()
@@ -1503,9 +1770,6 @@ class ProbPosterior(Posterior):
         )
 
         # draw a sample of the noise counts
-        # TODO: I am messing around with this for experimentation
-        #     noise_counts_NG = torch.distributions.Categorical(logits=log_regularized_posterior_NGC).sample()
-        #     noise_counts_NG = torch.distributions.Categorical(logits=2 * log_regularized_posterior_NGC).sample()
         noise_counts_NG = torch.argmax(log_regularized_posterior_NGC, dim=-1)
         # =================
 
@@ -1599,13 +1863,13 @@ class ProbPosterior(Posterior):
         assert max_value <= 1., 'The maximum q value must be <= 1'
 
         # Get a dataset of solid cells.
-        cell_inds = np.where(self.latents['p'] > 0.9)[0]
+        cell_inds = np.where(self.latents_map['p'] > 0.9)[0]
         if len(cell_inds) == 0:
             logger.warning('No cells detected (no droplets with posterior '
                            'cell probability > 0.9)!')
             logger.info('Relaxing the stringency for "cells" in FPR computation... '
                         'realize that the FPR here may be inaccurate.')
-            cell_inds = np.argsort(self.latents['p'])[::-1][:200]
+            cell_inds = np.argsort(self.latents_map['p'])[::-1][:200]
         qs = []
 
         logger.debug(f'Finding optimal posterior regularization factor for FPR = {fpr}')
@@ -1671,13 +1935,13 @@ class ProbPosterior(Posterior):
         else:
 
             # Get a dataset of solid cells.
-            cell_inds = np.where(self.latents['p'] > 0.9)[0]
+            cell_inds = np.where(self.latents_map['p'] > 0.9)[0]
             if len(cell_inds) == 0:
                 logger.warning('No cells detected (no droplets with posterior '
                                'cell probability > 0.9)!')
                 logger.info('Relaxing the stringency for "cells" in FPR computation... '
                             'realize that the FPR here may be inaccurate.')
-                cell_inds = np.argsort(self.latents['p'])[::-1][:200]
+                cell_inds = np.argsort(self.latents_map['p'])[::-1][:200]
             lambda_mults = []
 
             logger.debug(f'Finding optimal posterior regularization factor for FPR = {fpr}')
@@ -1780,7 +2044,7 @@ class ProbPosterior(Posterior):
 
         else:
 
-            assert n_samples > 0, f"Posterior mean estimate needs to be derived " \
+            assert n_samples > 0, f"BasePosterior mean estimate needs to be derived " \
                 f"from at least one sample: here {n_samples} " \
                 f"samples are called for."
 
@@ -1792,7 +2056,7 @@ class ProbPosterior(Posterior):
             for i in range(n_samples):
                 # Sample from mu and lambda.
                 mu_sample, lambda_sample, alpha_sample = \
-                    self._param_sample(data, y_map=y_map)
+                    self.sample_mu_lambda_alpha(data, y_map=y_map)
 
                 # Compute the de-noised count matrix given the estimates.
                 dense_counts_torch[..., i] = \
@@ -1805,137 +2069,6 @@ class ProbPosterior(Posterior):
             dense_counts = dense_counts_torch.median(dim=2, keepdim=False)[0].detach()
 
         return dense_counts
-
-    @torch.no_grad()
-    def _param_sample(self,
-                      data: torch.Tensor,
-                      y_map: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Calculate a single sample estimate of mu, the mean of the true count
-        matrix, and lambda, the rate parameter of the Poisson background counts.
-
-        Args:
-            data: Dense tensor minibatch of cell by gene count data.
-            y_map: True to enforce the use of a MAP estimate of y rather than
-                sampling y. This prevents some samples from having a cell and
-                some not, which can lead to strange summary statistics over
-                many samples.
-
-        Returns:
-            mu_sample: Dense tensor sample of Negative Binomial mean for true
-                counts.
-            lambda_sample: Dense tensor sample of Poisson rate params for noise
-                counts.
-            alpha_sample: Dense tensor sample of Dirichlet concentration params
-                that inform the overdispersion of the Negative Binomial.
-
-        """
-
-        logger.debug('Replaying model with guide to sample mu, alpha, lambda')
-
-        # Use pyro poutine to trace the guide and sample parameter values.
-        guide_trace = pyro.poutine.trace(self.vi_model.guide).get_trace(x=data)
-
-        # TODO: consider replacing p_y with a MAP estimate so that you never get
-        # TODO: samples of cell + no cell
-        if y_map:
-            guide_trace.nodes['y']['value'] = (guide_trace.nodes['p_passback']['value'] > 0).clone().detach()
-
-        replayed_model = pyro.poutine.replay(self.vi_model.model, guide_trace)
-
-        # Run the model using these sampled values.
-        replayed_model_output = replayed_model(x=data)
-
-        # The model returns mu, alpha, and lambda.
-        mu_sample = replayed_model_output['mu']
-        lambda_sample = replayed_model_output['lam']
-        alpha_sample = replayed_model_output['alpha']
-
-        return mu_sample, lambda_sample, alpha_sample
-
-    @staticmethod
-    @torch.no_grad()
-    def _log_prob_noise_count_tensor(data: torch.Tensor,
-                                     mu_est: torch.Tensor,
-                                     lambda_est: torch.Tensor,
-                                     alpha_est: Optional[torch.Tensor],
-                                     n_counts_max: int = 100,
-                                     debug: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Calculate a MAP estimate of the true counts given a single sample
-        estimate of mu, the mean of the true count matrix, lambda, the rate
-        parameter of the Poisson background counts, and the data.
-
-        NOTE: this is un-normalized log probability
-
-        Args:
-            data: Dense tensor minibatch of cell by gene count data.
-            mu_est: Dense tensor of Negative Binomial means for true counts.
-            lambda_est: Dense tensor of Poisson rate params for noise counts.
-            alpha_est: Dense tensor of Dirichlet concentration params that
-                inform the overdispersion of the Negative Binomial.  None will
-                use an all-Poisson model
-
-        Returns:
-            log_prob_tensor: Probability of each noise count value.
-            poisson_values_low: The starting point for noise counts for each
-                cell and gene, because they can be different.
-
-        """
-
-        # Estimate a reasonable low-end to begin the Poisson summation.
-        n = min(n_counts_max, data.max().item())  # No need to exceed the max value
-        poisson_values_low = (lambda_est.detach() - n / 2).int()
-
-        poisson_values_low = torch.clamp(torch.min(poisson_values_low,
-                                                   (data - n + 1).int()), min=0).float()
-
-        # Construct a big tensor of possible noise counts per cell per gene,
-        # shape (batch_cells, n_genes, max_noise_counts)
-        noise_count_tensor = torch.arange(start=0, end=n) \
-            .expand([data.shape[0], data.shape[1], -1]) \
-            .float().to(device=data.device)
-        noise_count_tensor = noise_count_tensor + poisson_values_low.unsqueeze(-1)
-
-        # Compute probabilities of each number of noise counts.
-        # NOTE: some values will be outside the support (negative values for NB).
-        # This results in NaNs.
-        if alpha_est is None:
-            # Poisson only model
-            log_prob_tensor = (dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False)
-                               .log_prob(noise_count_tensor)
-                               + dist.Poisson(mu_est.unsqueeze(-1), validate_args=False)
-                               .log_prob(data.unsqueeze(-1) - noise_count_tensor))
-            logger.debug('Using all poisson model (since alpha is not supplied to posterior)')
-        else:
-            logits = (mu_est.log() - alpha_est.log()).unsqueeze(-1)
-            log_prob_tensor = (dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False)
-                               .log_prob(noise_count_tensor)
-                               + dist.NegativeBinomial(total_count=alpha_est.unsqueeze(-1),
-                                                       logits=logits,
-                                                       validate_args=False)
-                               .log_prob(data.unsqueeze(-1) - noise_count_tensor))
-
-        # Set log_prob to -inf if noise > data.
-        neg_inf_tensor = torch.ones_like(log_prob_tensor) * -np.inf
-        log_prob_tensor = torch.where((noise_count_tensor <= data.unsqueeze(-1)),
-                                      log_prob_tensor,
-                                      neg_inf_tensor)
-
-        # Set log_prob to -inf, -inf, -inf, 0 for entries where mu == 0, since they will be NaN
-        # TODO: either this or require that mu > 0...
-        # log_prob_tensor = torch.where(mu_est == 0,
-        #                               data,
-        #                               log_prob_tensor)
-
-        logger.debug(f'Prob computation with tensor of shape {log_prob_tensor.shape}')
-
-        if debug:
-            assert not torch.isnan(log_prob_tensor).any(), \
-                'log_prob_tensor contains a NaN'
-            if torch.isinf(log_prob_tensor).all(dim=-1).any():
-                print(torch.where(torch.isinf(log_prob_tensor).all(dim=-1)))
-                raise AssertionError('There is at least one log_prob_tensor[n, g, :] that has all-zero probability')
-
-        return log_prob_tensor, poisson_values_low
 
     @staticmethod
     @torch.no_grad()
@@ -1962,7 +2095,7 @@ class ProbPosterior(Posterior):
         """
 
         # The big tensor: log prob of each possible noise count value, for each cell and gene
-        log_prob_tensor, poisson_values_low = ProbPosterior._log_prob_noise_count_tensor(
+        log_prob_tensor, poisson_values_low = Posterior._log_prob_noise_count_tensor(
             data=data,
             mu_est=mu_est,
             lambda_est=lambda_est,
@@ -2011,7 +2144,7 @@ class ProbPosterior(Posterior):
         """
 
         # The big tensor: log prob of each possible noise count value, for each cell and gene
-        log_prob_tensor, poisson_values_low = ProbPosterior._log_prob_noise_count_tensor(
+        log_prob_tensor, poisson_values_low = Posterior._log_prob_noise_count_tensor(
             data=data,
             mu_est=mu_est,
             lambda_est=lambda_est,
@@ -2058,7 +2191,7 @@ class ProbPosterior(Posterior):
             swapping_fraction = dist.Beta(pyro.param('rho_alpha'), pyro.param('rho_beta')).mean
         else:
             swapping_fraction = 0.
-        mean_cell_epsilon = (self.latents['epsilon'][self.latents['p'] > 0.5]).mean()
+        mean_cell_epsilon = (self.latents_map['epsilon'][self.latents_map['p'] > 0.5]).mean()
 
         if not per_gene:
 
@@ -2610,3 +2743,35 @@ def get_alpha_log_constraint_violation_given_beta(
         dim=-1,
     )
     return log_numerator_B - log_denominator_B - log_mu_plus_alpha_sigma_B
+
+
+def dense_to_sparse_op_numpy(chunk_dense_counts: np.ndarray) \
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """This isn't used directly, but it's used by tests since it's tried and true"""
+
+    # Find all the nonzero counts in this dense matrix chunk.
+    nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed = np.nonzero(chunk_dense_counts)
+    nonzero_counts = chunk_dense_counts[nonzero_barcode_inds_this_chunk,
+                                        nonzero_genes_trimmed].flatten(order='C')
+    return nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed, nonzero_counts
+
+
+@torch.no_grad()
+def dense_to_sparse_op_torch(chunk_dense_counts: torch.Tensor) \
+        -> Tuple[np.ndarray, ...]:
+    """Converts dense matrix to sparse COO format tuple of vectors (*indices, data)"""
+
+    # Find all the nonzero counts in this dense matrix chunk.
+    # nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed = \
+    #     torch.nonzero(chunk_dense_counts, as_tuple=True)
+    # nonzero_counts = chunk_dense_counts[nonzero_barcode_inds_this_chunk,
+    #                                     nonzero_genes_trimmed].flatten()
+    # return nonzero_barcode_inds_this_chunk, nonzero_genes_trimmed, nonzero_counts
+
+    # nonzero_inds_tuple = torch.nonzero(chunk_dense_counts, as_tuple=True)
+    # nonzero_counts = chunk_dense_counts[nonzero_inds_tuple[0], nonzero_inds_tuple[1]].flatten()
+    # return nonzero_inds_tuple[0].cpu().numpy(), nonzero_inds_tuple[1].cpu().numpy(), nonzero_counts.cpu().numpy()
+
+    nonzero_inds_tuple = torch.nonzero(chunk_dense_counts, as_tuple=True)
+    nonzero_values_tuple = (chunk_dense_counts[nonzero_inds_tuple].flatten(), )
+    return tuple([ten.cpu().numpy() for ten in nonzero_inds_tuple + nonzero_values_tuple])
