@@ -43,9 +43,8 @@ class IngestedData(dict):
 class FileLoader:
     """Make explicit guarantees about what a file-loading method yields."""
 
-    def __init__(self, data_type):
-        self.data_type = data_type
-        self.load_fn = eval(f'get_matrix_from_{data_type}')
+    def __init__(self, load_fn):
+        self.load_fn = load_fn
 
     def load(self, file) -> IngestedData:
         data = self.load_fn(file)
@@ -222,16 +221,16 @@ def load_data(input_file: str)\
     the self.input_file"""
 
     # Detect input data type.
-    data_type = detect_input_data_type(input_file=input_file)
+    load_fn = detect_input_data_type(input_file=input_file)
 
     # Load data using the appropriate loader.
     logger.info(f"Loading data from {input_file}")
-    data = FileLoader(data_type).load(input_file)
+    data = FileLoader(load_fn).load(input_file)
 
     return data
 
 
-def detect_input_data_type(input_file: str) -> str:
+def detect_input_data_type(input_file: str) -> Callable:
     """Detect the type of input data."""
 
     # Error if no input data file has been specified.
@@ -242,25 +241,25 @@ def detect_input_data_type(input_file: str) -> str:
 
     # Detect type.
     if os.path.isdir(input_file):
-        return 'cellranger_mtx'
+        return get_matrix_from_cellranger_mtx
 
     elif file_ext == '.h5':
-        return 'cellranger_h5'
+        return get_matrix_from_cellranger_h5
 
     elif input_file.endswith('.txt.gz') or input_file.endswith('.txt'):
-        return 'dropseq_dge'
+        return get_matrix_from_dropseq_dge
 
     elif input_file.endswith('.csv.gz') or input_file.endswith('.csv'):
-        return 'bd_rhapsody'
+        return get_matrix_from_bd_rhapsody
 
     elif file_ext == '.h5ad':
-        return 'anndata'
+        return get_matrix_from_anndata
 
     elif file_ext == '.loom':
-        return 'loom'
+        return get_matrix_from_loom
 
     elif file_ext == '.npz':
-        return 'npz'
+        return get_matrix_from_npz
 
     else:
         raise ValueError('Failed to determine input file type for '
