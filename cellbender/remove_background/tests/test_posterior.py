@@ -312,18 +312,51 @@ def test_torch_binary_search():
         'Two-argument input binary search failed'
 
 
-@pytest.mark.parametrize('fpr', [0., 0.1, 1], ids=lambda a: f'fpr{a}')
+@pytest.mark.parametrize('fpr', [0., 0.1, 0.5, 0.75, 1], ids=lambda a: f'fpr{a}')
 @pytest.mark.parametrize('per_gene', [False], ids=lambda n: 'per_gene' if n else 'overall')
 @pytest.mark.parametrize('cuda',
                          [False,
                           pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA,
                                        reason='requires CUDA'))],
                          ids=lambda b: 'cuda' if b else 'cpu')
-def test_compute_mean_target_removal_as_function(log_prob_coo):
+def test_compute_mean_target_removal_as_function(log_prob_coo, fpr, per_gene, cuda):
     """The target removal computation, very important for the MCKP output"""
 
-    noise_count_posterior_coo = log_prob_coo['coo'],
-    noise_offsets = log_prob_coo['offsets'],
-    device = 'cuda' if cuda else 'cpu',
+    noise_count_posterior_coo = log_prob_coo['coo']
+    noise_offsets = log_prob_coo['offsets']
+    device = 'cuda' if cuda else 'cpu'
 
+    print('log prob posterior coo')
+    print(noise_count_posterior_coo)
 
+    index_converter = IndexConverter(total_n_cells=log_prob_coo['coo'].shape[0],
+                                     total_n_genes=1)
+    print(index_converter)
+
+    print('raw count matrix')
+    count_matrix = sp.csr_matrix(
+        np.expand_dims(np.array([0, 0, 1, 2, 5]), axis=-1)
+    )  # reflecting filled in log_prob values
+    print(count_matrix)
+
+    n_cells = log_prob_coo['coo'].shape[0]  # hard coded from the log_prob_coo
+
+    target_fun = compute_mean_target_removal_as_function(
+        noise_count_posterior_coo=noise_count_posterior_coo,
+        noise_offsets=noise_offsets,
+        index_converter=index_converter,
+        raw_count_csr_for_cells=count_matrix,
+        n_cells=n_cells,
+        device=device,
+        per_gene=per_gene,
+    )
+
+    target = (target_fun(fpr) * n_cells).item()
+    print(f'\nwith fpr={fpr:.2f}, target is: {target:.1g}')
+
+    assert target >= 1, 'There is one noise count guaranteed from this test posterior'
+    if fpr == 1:
+        torch.testing.assert_close(target, float(count_matrix.sum()))
+
+    # assert False
+    # TODO: this has not been tested out
