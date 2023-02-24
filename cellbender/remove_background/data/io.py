@@ -30,7 +30,7 @@ class IngestedData(dict):
     def __init__(self, matrix, barcodes,
                  gene_names, gene_ids, feature_types, genomes,
                  **kwargs):
-        # Requited output values, of which some can be None
+        # Required values, some of which can be None
         super().__init__([('matrix', matrix),
                           ('barcodes', barcodes),
                           ('gene_names', gene_names),

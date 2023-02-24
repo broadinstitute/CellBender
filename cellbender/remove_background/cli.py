@@ -119,13 +119,18 @@ class CLI(AbstractCLI):
         #     Antibody Capture
         #     CRISPR Guide Capture
         #     Custom
+        #     Peaks
         allowed_features = ['Gene Expression', 'Antibody Capture',
-                            'CRISPR Guide Capture', 'Custom']
+                            'CRISPR Guide Capture', 'Custom', 'Peaks']
         for feature in args.exclude_features:
-            assert feature in allowed_features, \
-                f"Specified '{feature}' using --exclude-features, but this is " \
-                f"not one of the allowed CellRanger feature designations: " \
-                f"{allowed_features}"
+            if feature not in allowed_features:
+                sys.stdout.write(f"Specified '{feature}' using --exclude-feature-types, "
+                                 f"but this is not a valid CellRanger feature "
+                                 f"designation: {allowed_features}. Ensure that "
+                                 f"this feature appears in your dataset, and "
+                                 f"ensure that this log file makes note of the "
+                                 f"exclusion of the appropriate features below.")
+                sys.stdout.flush()  # Write immediately
         if 'Gene Expression' in args.exclude_features:
             sys.stdout.write("Warning: Excluding 'Gene Expression' features from the analysis "
                              "is not recommended, since other features alone are typically "
