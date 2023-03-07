@@ -8,7 +8,7 @@ import scipy.sparse as sp
 from cellbender.remove_background.data.io import \
     load_data, get_matrix_from_cellranger_mtx, get_matrix_from_dropseq_dge, \
     get_matrix_from_bd_rhapsody, get_matrix_from_anndata, \
-    detect_cellranger_version_h5, detect_cellranger_version_mtx
+    detect_cellranger_version_h5, detect_cellranger_version_mtx, unravel_dict
 
 from cellbender.remove_background.tests.conftest import \
     sparse_matrix_equal, string_ndarray_equality, h5_v2_file, \
@@ -203,3 +203,21 @@ def test_load_anndata():
 @pytest.mark.skip
 def test_load_loom():
     pass
+
+
+@pytest.mark.skip
+def test_write_matrix_to_cellranger_h5():
+    pass
+
+
+@pytest.mark.skip
+def test_write_denoised_count_matrix():
+    # from run.py, but should probably be refactored to io.py
+    pass
+
+
+def test_unravel_dict():
+    key, value = 'pref', {'a': 1, 'b': {'c': 2, 'd': {'e': 3, 'f': 4}}}
+    answer = {'pref_a': 1, 'pref_b_c': 2, 'pref_b_d_e': 3, 'pref_b_d_f': 4}
+    d = unravel_dict(key, value)
+    assert d == answer, 'unravel_dict failed to produce correct output'

@@ -62,7 +62,7 @@ def write_matrix_to_cellranger_h5(
         genomes: Optional[np.ndarray] = None,
         local_latents: Dict[str, Optional[np.ndarray]] = {},
         global_latents: Dict[str, Optional[np.ndarray]] = {},
-        metadata: Dict[str, Optional[np.ndarray]] = {}) -> bool:
+        metadata: Dict[str, Optional[Union[np.ndarray, int, str, Dict]]] = {}) -> bool:
     """Write count matrix data to output HDF5 file using CellRanger format.
 
     Args:
@@ -156,9 +156,8 @@ def write_matrix_to_cellranger_h5(
                 genomes = np.array(['NA'] * gene_names.size)
             f.create_carray(feature_group, "genome", obj=genomes, filters=filters)
 
-            # Copy the other extraneous information from the input file.
+            # TODO: Copy the other extraneous information from the input file.
             # (Some user might need it for some reason.)
-            # TODO
 
         else:
             raise ValueError(f'Trying to save to CellRanger v{cellranger_version} '
@@ -186,33 +185,36 @@ def write_matrix_to_cellranger_h5(
             if value is not None:
                 f.create_array(global_group, key, value)
 
-        # Store metadata.
-        def unravel(pref: str, d):
-            if type(d) != dict:
-                return d
-            out_d = {}
-            for k, v in d.items():
-                out_d.update({pref + '_' + k: unravel(k, v)})
-            return out_d
+        def create_nonscalar_metadata_array(f, group, k, v):
+            """Wrap scalar or string values in lists"""
+            if v is None:
+                return
+            if (type(v) == list) or (type(v) == np.ndarray):
+                f.create_array(group, k, v)
+            else:
+                f.create_array(group, k, [v])
 
+        # Store metadata.
         metadata_group = f.create_group("/", "metadata", "Metadata")
         for key, value in metadata.items():
-            if value is None:
-                continue
-            if type(value) != dict:
-                f.create_array(metadata_group, key, value)
-            else:
-                d_out = {}
-                for k, v in unravel(key, value).items():
-                    d_out.update(v)
-                for k, v in d_out.items():
-                    if v is not None:
-                        f.create_array(metadata_group, k, v)
+            for k, v in unravel_dict(key, value).items():
+                create_nonscalar_metadata_array(f, metadata_group, k, v)
 
-    logger.info(f"Succeeded in writing CellRanger v{cellranger_version} "
+    logger.info(f"Succeeded in writing CellRanger "
                 f"format output to file {output_file}")
 
     return True
+
+
+def unravel_dict(pref: str, d: Dict) -> Dict:
+    """Unravel a nested dict, returning a dict with values that are not dicts"""
+
+    if type(d) != dict:
+        return {pref: d}
+    out_d = {}
+    for k, v in d.items():
+        out_d.update({pref + '_' + key: val for key, val in unravel_dict(k, v).items()})
+    return out_d
 
 
 def load_data(input_file: str)\

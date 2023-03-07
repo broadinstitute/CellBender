@@ -129,13 +129,13 @@ class CLI(AbstractCLI):
                                  f"designation: {allowed_features}. Ensure that "
                                  f"this feature appears in your dataset, and "
                                  f"ensure that this log file makes note of the "
-                                 f"exclusion of the appropriate features below.")
+                                 f"exclusion of the appropriate features below.\n\n")
                 sys.stdout.flush()  # Write immediately
         if 'Gene Expression' in args.exclude_features:
-            sys.stdout.write("Warning: Excluding 'Gene Expression' features from the analysis "
+            sys.stdout.write("WARNING: Excluding 'Gene Expression' features from the analysis "
                              "is not recommended, since other features alone are typically "
                              "too sparse to form a good prior on cell type, and CellBender "
-                             "relies on being able to construct this sort of prior")
+                             "relies on being able to construct this sort of prior\n\n")
             sys.stdout.flush()  # Write immediately
 
         # Automatic training failures and restarts.
@@ -151,7 +151,7 @@ class CLI(AbstractCLI):
             sys.stdout.write(f"Warning: Timing between checkpoints is specified as "
                              f"{args.checkpoint_min} minutes.  Consider reducing "
                              f"this number if you are concerned about the "
-                             f"possibility of lost work upon preemption.")
+                             f"possibility of lost work upon preemption.\n\n")
             sys.stdout.flush()  # Write immediately
 
         # Posterior regularization checking.

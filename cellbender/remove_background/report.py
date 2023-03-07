@@ -461,7 +461,7 @@ def assess_learning_curve(adata,
     global warnings
     display(Markdown('## Assessing convergence of the algorithm'))
     plot_learning_curve(adata)
-    if 'train_elbo' not in adata.uns.keys():
+    if 'learning_curve_train_elbo' not in adata.uns.keys():
         return
     display(Markdown(
         '*<span style="color:gray">The learning curve tells us about the progress of the algorithm in '
@@ -481,48 +481,55 @@ def assess_learning_curve(adata,
         'quite a bit if training went on for more epochs.</span>*'
     ))
 
-    if adata.uns['train_epoch'][-1] < 50:
+    if adata.uns['learning_curve_train_epoch'][-1] < 50:
         display(Markdown('Short run.  Will not analyze the learning curve.'))
-        warnings.append(f'Short run of only {adata.uns["train_epoch"][-1]} epochs')
+        warnings.append(f'Short run of only {adata.uns["learning_curve_train_epoch"][-1]} epochs')
         return
 
-    train_elbo_min_max = np.percentile(adata.uns['train_elbo'], q=[5, 95])
+    train_elbo_min_max = np.percentile(adata.uns['learning_curve_train_elbo'], q=[5, 95])
     train_elbo_range = train_elbo_min_max.max() - train_elbo_min_max.min()
 
-    large_spikes_in_train = np.any((adata.uns['train_elbo'][1:] - adata.uns['train_elbo'][:-1])
+    large_spikes_in_train = np.any((adata.uns['learning_curve_train_elbo'][1:]
+                                    - adata.uns['learning_curve_train_elbo'][:-1])
                                    < -train_elbo_range * spike_size)
 
-    second_half_train_elbo = adata.uns['train_elbo'][(len(adata.uns['train_elbo']) // 2):]
+    second_half_train_elbo = (adata.uns['learning_curve_train_elbo']
+                              [(len(adata.uns['learning_curve_train_elbo']) // 2):])
     large_deviation_in_train = np.any(second_half_train_elbo
-                                      < np.median(second_half_train_elbo) - train_elbo_range * deviation_size)
+                                      < np.median(second_half_train_elbo)
+                                      - train_elbo_range * deviation_size)
 
-    half = len(adata.uns['train_elbo']) // 2
-    threequarter = len(adata.uns['train_elbo']) * 3 // 4
-    typical_end_variation = np.std(adata.uns['train_elbo'][half:threequarter])
-    low_end_in_train = (adata.uns['train_elbo'][-1]
-                        < adata.uns['train_elbo'].max() - 2 * typical_end_variation)
+    half = len(adata.uns['learning_curve_train_elbo']) // 2
+    threequarter = len(adata.uns['learning_curve_train_elbo']) * 3 // 4
+    typical_end_variation = np.std(adata.uns['learning_curve_train_elbo'][half:threequarter])
+    low_end_in_train = (adata.uns['learning_curve_train_elbo'][-1]
+                        < adata.uns['learning_curve_train_elbo'].max() - 2 * typical_end_variation)
 
-    non_monotonicity = ((adata.uns['train_elbo'][1:] - adata.uns['train_elbo'][:-1])
-                        < -3 * typical_end_variation).sum() / len(adata.uns['train_elbo'])
+    non_monotonicity = ((adata.uns['learning_curve_train_elbo'][1:]
+                         - adata.uns['learning_curve_train_elbo'][:-1])
+                        < -3 * typical_end_variation).sum() / len(adata.uns['learning_curve_train_elbo'])
     non_monotonic = (non_monotonicity > monotonicity_cutoff)
 
     def windowed_cumsum(x, n=20):
         return np.array([np.cumsum(x[i:(i + n)])[-1] for i in range(len(x) - n)])
 
     windowsize = 20
-    tracking_trace = windowed_cumsum(adata.uns['train_elbo'][1:] - adata.uns['train_elbo'][:-1],
+    tracking_trace = windowed_cumsum(adata.uns['learning_curve_train_elbo'][1:]
+                                     - adata.uns['learning_curve_train_elbo'][:-1],
                                      n=windowsize)
     backtracking = (tracking_trace.min() < -50)
     backtracking_ind = np.argmin(tracking_trace) + windowsize
 
-    halftest = len(adata.uns['test_elbo']) // 2
-    threequartertest = len(adata.uns['test_elbo']) * 3 // 4
-    typical_end_variation_test = np.std(adata.uns['test_elbo'][halftest:threequartertest])
-    runaway_test = (adata.uns['test_elbo'][-1]
-                    < adata.uns['test_elbo'].max() - 4 * typical_end_variation_test)
+    halftest = len(adata.uns['learning_curve_test_elbo']) // 2
+    threequartertest = len(adata.uns['learning_curve_test_elbo']) * 3 // 4
+    typical_end_variation_test = np.std(adata.uns['learning_curve_test_elbo'][halftest:threequartertest])
+    runaway_test = (adata.uns['learning_curve_test_elbo'][-1]
+                    < adata.uns['learning_curve_test_elbo'].max() - 4 * typical_end_variation_test)
 
-    non_convergence = (np.mean([adata.uns['train_elbo'][-1] - adata.uns['train_elbo'][-2],
-                                adata.uns['train_elbo'][-2] - adata.uns['train_elbo'][-3]])
+    non_convergence = (np.mean([adata.uns['learning_curve_train_elbo'][-1]
+                                - adata.uns['learning_curve_train_elbo'][-2],
+                                adata.uns['learning_curve_train_elbo'][-2]
+                                - adata.uns['learning_curve_train_elbo'][-3]])
                        > 2 * typical_end_variation)
 
     display(Markdown('**Automated assessment** --------'))
@@ -581,14 +588,16 @@ def assess_learning_curve(adata,
 
 def plot_learning_curve(adata):
 
-    if 'train_elbo' not in adata.uns.keys():
+    if 'learning_curve_train_elbo' not in adata.uns.keys():
         print('No learning curve recorded!')
         return
 
     def _mkplot():
-        plt.plot(adata.uns['train_epoch'], adata.uns['train_elbo'], label='train')
+        plt.plot(adata.uns['learning_curve_train_epoch'],
+                 adata.uns['learning_curve_train_elbo'], label='train')
         try:
-            plt.plot(adata.uns['test_epoch'], adata.uns['test_elbo'], '.:', label='test')
+            plt.plot(adata.uns['learning_curve_test_epoch'],
+                     adata.uns['learning_curve_test_elbo'], '.:', label='test')
             plt.legend()
         except Exception:
             pass
@@ -596,7 +605,7 @@ def plot_learning_curve(adata):
         plt.ylabel('ELBO')
         plt.xlabel('Epoch')
 
-    if len(adata.uns['train_elbo']) > 20:
+    if len(adata.uns['learning_curve_train_elbo']) > 20:
 
         # two panels: zoom on the right-hand side
         plt.figure(figsize=(10, 4))
@@ -604,17 +613,18 @@ def plot_learning_curve(adata):
         _mkplot()
         plt.subplot(1, 2, 2)
         _mkplot()
-        low = np.percentile(adata.uns['train_elbo'], q=10)
-        if (len(adata.uns['train_elbo']) > 0) and (len(adata.uns['test_elbo']) > 0):
-            high = max(adata.uns['train_elbo'].max(), adata.uns['test_elbo'].max())
+        low = np.percentile(adata.uns['learning_curve_train_elbo'], q=10)
+        if (len(adata.uns['learning_curve_train_elbo']) > 0) \
+                and (len(adata.uns['learning_curve_test_elbo']) > 0):
+            high = max(adata.uns['learning_curve_train_elbo'].max(),
+                       adata.uns['learning_curve_test_elbo'].max())
         else:
-            high = adata.uns['train_elbo'].max()
+            high = adata.uns['learning_curve_train_elbo'].max()
         plt.ylim([low, high + (high - low) / 10])
         plt.tight_layout()
         plt.show()
 
     else:
-
         _mkplot()
         plt.show()
 
@@ -692,7 +702,8 @@ def assess_count_removal_per_gene(adata, raw_full_adata,
     display(Markdown('### Table of top genes removed\n\nRanked by fraction removed, '
                      f'and excluding genes with fewer than {genecount_lowlim} '
                      f'total raw counts ({percentile}th percentile)'))
-    display(HTML(adata.var[adata.var[f'n_{input_layer_key}'] > genecount_lowlim]
+    df = adata.var[adata.var['cellbender_analyzed']]  # exclude omitted features
+    display(HTML(df[df[f'n_{input_layer_key}'] > genecount_lowlim]
                  .sort_values(by='fraction_removed', ascending=False).head(10).to_html()))
 
     for g in adata.var[(adata.var[f'n_{input_layer_key}_cells'] > genecount_lowlim)

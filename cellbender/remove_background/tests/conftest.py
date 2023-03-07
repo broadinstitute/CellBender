@@ -184,7 +184,11 @@ def h5_v3_file_post_inference(tmpdir_factory, simulated_dataset) -> 'SavedFileH5
                        'cell_probability': np.random.rand(barcodes_analyzed),
                        'd': np.random.rand(barcodes_analyzed) + 5.},
         global_latents={'global_var1': np.array([1, 2, 3])},
-        metadata={'metadata1': np.array(0.9)},
+        metadata={'metadata1': np.array(0.9),
+                  'metadata2': {'key1': 'val1', 'key2': {'a': 'val2', 'b': 'val3'}},
+                  'metadata3': None,
+                  'metadata4': 0.5,
+                  'metadata5': 'text'},
     )
     yield SavedFileH5(name=filename,
                       keys=['gene_names', 'barcodes', 'genomes', 'gene_ids', 'feature_types'],

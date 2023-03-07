@@ -65,12 +65,13 @@ def run_remove_background(args: argparse.Namespace):
     logger.info("Running remove-background")
 
     # Run pytorch multithreaded if running on CPU: but this makes little difference in runtime.
-    if args.n_threads is not None:
-        n_jobs = args.n_threads
-    else:
-        n_jobs = psutil.cpu_count(logical=True)
-    torch.set_num_threads(n_jobs)
-    logger.debug(f'Set pytorch to use {n_jobs} threads')
+    if not args.use_cuda:
+        if args.n_threads is not None:
+            n_jobs = args.n_threads
+        else:
+            n_jobs = psutil.cpu_count(logical=True)
+        torch.set_num_threads(n_jobs)
+        logger.debug(f'Set pytorch to use {n_jobs} threads')
 
     # Load data from file and choose barcodes and genes to analyze.
     try:
@@ -170,10 +171,11 @@ def save_output_plots(file_dir: str,
         gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
         summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
 
-        # UMI count prior GMM plot.
-        fig = dataset_obj.gmm.plot_summary()
-        fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
-        logger.info(f"Saved UMI count plot as {gmm_fig_name}")
+        # # UMI count prior GMM plot.
+        # fig = dataset_obj.gmm.plot_summary()
+        # fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
+        # logger.info(f"Saved UMI count plot as {gmm_fig_name}")
+        # TODO: replace this plot with another?
 
         # Three-panel output summary plot.
         counts = np.array(dataset_obj.get_count_matrix().sum(axis=1)).squeeze()
@@ -468,9 +470,27 @@ def write_denoised_count_matrix(file: str,
         rho = np.array([pyro.param('rho_alpha').detach().cpu().numpy().item(),
                         pyro.param('rho_beta').detach().cpu().numpy().item()])
 
+    # Determine metadata fields.
+    # Wrap in lists to avoid scanpy loading bug
+    # which may already be fixed by https://github.com/scverse/scanpy/pull/2344
+    metadata = {'learning_curve': learning_curve,
+                'barcodes_analyzed': dataset_obj.data['barcodes'][dataset_obj.analyzed_barcode_inds],
+                'barcodes_analyzed_inds': dataset_obj.analyzed_barcode_inds,
+                'features_analyzed_inds': dataset_obj.analyzed_gene_inds,
+                'fraction_data_used_for_testing': 1. - consts.TRAINING_FRACTION,
+                'target_false_positive_rate': fpr}
+    for k in ['posterior_regularization', 'posterior_regularization_kwargs',
+              'estimator', 'estimator_kwargs']:
+        val = locals().get(k)  # give me the input variable with this name
+        if val is not None:
+            if type(val) != dict:
+                if type(val) != list:
+                    val = [val]  # wrap in a list, unless it's a dict
+            metadata.update({k: val})
+
     # Write h5.
     write_succeeded = write_matrix_to_cellranger_h5(
-        cellranger_version=3,
+        cellranger_version=3,  # always write v3 format output
         output_file=file,
         gene_names=dataset_obj.data['gene_names'],
         gene_ids=dataset_obj.data['gene_ids'],
@@ -485,21 +505,11 @@ def write_denoised_count_matrix(file: str,
                        'droplet_efficiency': epsilon,
                        'background_fraction': background_fraction},
         global_latents={'ambient_expression': ambient_expression,
-                        'empty_droplet_size_lognormal_loc': [pyro.param('d_empty_loc').item()],
-                        'empty_droplet_size_lognormal_scale': [pyro.param('d_empty_scale').item()],
-                        'cell_size_lognormal_std': [pyro.param('d_cell_scale').item()],
+                        'empty_droplet_size_lognormal_loc': pyro.param('d_empty_loc').item(),
+                        'empty_droplet_size_lognormal_scale': pyro.param('d_empty_scale').item(),
+                        'cell_size_lognormal_std': pyro.param('d_cell_scale').item(),
                         'swapping_fraction_dist_params': rho},
-        metadata={'learning_curve': learning_curve,
-                  'barcodes_analyzed': dataset_obj.data['barcodes'][dataset_obj.analyzed_barcode_inds],
-                  'barcodes_analyzed_inds': dataset_obj.analyzed_barcode_inds,
-                  'features_analyzed_inds': dataset_obj.analyzed_gene_inds,
-                  'fraction_data_used_for_testing': [1. - consts.TRAINING_FRACTION],
-                  'target_false_positive_rate': [fpr],
-                  # 'posterior_regularization': [posterior_regularization],
-                  # 'posterior_regularization_kwargs': posterior_regularization_kwargs,
-                  # 'estimator': [estimator],
-                  # 'estimator_parameters': estimator_kwargs,
-                  },
+        metadata=metadata,
     )
     return write_succeeded
 
@@ -525,7 +535,7 @@ def collect_output_metrics(dataset_obj: SingleCellRNACountsDataset,
         total_counts_removed_from_nonempty_droplets / total_raw_counts_in_nonempty_droplets
     average_counts_removed_per_nonempty_droplet = \
         total_counts_removed_from_nonempty_droplets / cell_logic.sum()
-    expected_cells = dataset_obj.expected_cell_count
+    expected_cells = dataset_obj.priors['expected_cells']
     found_cells = cell_logic.sum()
     average_counts_per_cell = inferred_count_matrix.sum() / found_cells
     ratio_of_found_cells_to_expected_cells = \
@@ -662,14 +672,14 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         encoder_z = EncodeZ(input_dim=count_matrix.shape[1],
                             hidden_dims=args.z_hidden_dims,
                             output_dim=args.z_dim,
-                            input_transform='normalize')
+                            input_transform='normalize')  # TODO log?
 
         encoder_other = EncodeNonZLatents(n_genes=count_matrix.shape[1],
                                           z_dim=args.z_dim,
                                           hidden_dims=consts.ENC_HIDDEN_DIMS,
                                           log_count_crossover=dataset_obj.priors['log_counts_crossover'],
                                           prior_log_cell_counts=np.log1p(dataset_obj.priors['cell_counts']),
-                                          input_transform='normalize')
+                                          input_transform='normalize')  # TODO log?
 
         encoder = CompositeEncoder({'z': encoder_z,
                                     'other': encoder_other})

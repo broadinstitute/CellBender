@@ -255,6 +255,8 @@ class EncodeNonZLatents(nn.Module):
 
         # Calculate log total UMI counts per barcode.
         counts = x.sum(dim=-1, keepdim=True)
+        # if (counts < 1).sum() > 0:
+        #     raise ValueError("A zero-count droplet has been passed to the encoder")
         log_sum = counts.log1p()
 
         # Calculate the log of the number of nonzero genes.
@@ -262,7 +264,8 @@ class EncodeNonZLatents(nn.Module):
 
         # Calculate a similarity between expression and ambient.
         if chi_ambient is not None:
-            overlap = self._poisson_log_prob(lam=counts * chi_ambient.detach().unsqueeze(0),
+            # counts + 1
+            overlap = self._poisson_log_prob(lam=(counts + 1) * chi_ambient.detach().unsqueeze(0),
                                              value=x).sum(dim=-1, keepdim=True)
             if self.overlap_mean is None:
                 self.overlap_mean = (overlap.max() + overlap.min()) / 2
@@ -273,16 +276,20 @@ class EncodeNonZLatents(nn.Module):
 
         # Apply transformation to data.
         x = transform_input(x, self.transform)
+        # print(f'x {x}')
+        # print(f'there are {torch.isnan(x).sum()} nans in x')
+        # print(f'there are {torch.isnan(x.sum(-1)).sum()} cells with nans in x')
 
         # Calculate a scale factor (first time through) to control the input variance.
         if self.x_scaling is None:
+            x_cell = x[(counts > counts.median()).squeeze(), :]
             n_std_est = 10
-            num = int(self.n_genes * 0.4)
+            num = int(x_cell.nelement() / 2)
             std_estimates = torch.zeros([n_std_est])
             for i in range(n_std_est):
-                idx = torch.randperm(x.nelement())
-                std_estimates[i] = x.view(-1)[idx][:num].std().item()
-            robust_std = std_estimates.median().item()
+                idx = torch.randperm(x_cell.nelement())
+                std_estimates[i] = x_cell.view(-1)[idx][:num].std().item()
+            robust_std = torch.mean(std_estimates[~torch.isnan(std_estimates)]).item() + 1e-2
             self.x_scaling = (1. / robust_std) / 100.  # Get values on a level field
 
         # Form a new input by concatenation.
@@ -292,6 +299,14 @@ class EncodeNonZLatents(nn.Module):
                           overlap,
                           x * self.x_scaling),
                          dim=-1)
+        # print(f'x_in {x_in}')
+        # print(f'there are {torch.isnan(x_in).sum()} nans in x_in')
+        # print(f'there are {torch.isnan(x_in.sum(-1)).sum()} cells with nans in x_in')
+        # ind = torch.isnan(x_in.sum(-1))
+        # print(f'log_sum {log_sum[ind]}')
+        # print(f'log_nnz {log_nnz[ind]}')
+        # print(f'overlap {overlap[ind]}')
+        # print(f'self.x_scaling {self.x_scaling}')
 
         hidden = self.nonlin(self.linears[0](x_in))
         for i in range(1, len(self.linears)):  # Second hidden layer onward
@@ -305,6 +320,7 @@ class EncodeNonZLatents(nn.Module):
 
             # Heuristic for initialization of logit_cell_probability.
             cells = (log_sum > self.log_count_crossover).squeeze()
+            assert cells.sum() > 4, "Fewer than 4 cells passed to encoder minibatch"
             # if (cells.sum() > 0):  # and ((~cells).sum() > 0):
             #     # cell_median = out[cells, 0].median().item()
             #     # empty_median = out[~cells, 0].median().item()
@@ -320,6 +336,8 @@ class EncodeNonZLatents(nn.Module):
             # Heuristic for initialization of epsilon.
             self.offset['epsilon'] = out[cells, 2].mean().item()
 
+            # print(self.offset)
+
         p_y_logit = ((out[:, 0] - self.offset['logit_p'])
                      * self.P_OUTPUT_SCALE).squeeze()
         epsilon = self.softplus((out[:, 2] - self.offset['epsilon']).squeeze()
@@ -331,6 +349,9 @@ class EncodeNonZLatents(nn.Module):
                                                        - self.log_count_crossover)
                                        + self.log_count_crossover).squeeze(),
                 'epsilon': epsilon}
+
+        # TODO: figure out why the list of droplets in the dataloader is different
+        # TODO for the two test cases: with and without antibodies in file
 
 
 # TODO: this was new
@@ -555,13 +576,14 @@ class EncodeNonZLatents(nn.Module):
 #                 'epsilon': epsilon}
 
 
-def transform_input(x: torch.Tensor, transform: str) -> torch.Tensor:
+def transform_input(x: torch.Tensor, transform: str, eps: float = 1e-5) -> torch.Tensor:
     """Transform input to encoder.
 
     Args:
         x: Input torch.Tensor
         transform: Specifies which transformation to perform.  Must be one of
             ['log', 'normalize', 'normalize_log'].
+        eps: Preclude nan values in case of an input x with zero counts for a cell
 
     Returns:
         Transformed input as a torch.Tensor of the same type and shape as x.
@@ -576,12 +598,12 @@ def transform_input(x: torch.Tensor, transform: str) -> torch.Tensor:
         return x
 
     elif transform == 'normalize':
-        x = x / x.sum(dim=-1, keepdim=True)
+        x = x / (x.sum(dim=-1, keepdim=True) + eps)
         return x
 
     elif transform == 'normalize_log':
         x = x.log1p()
-        x = x / x.sum(dim=-1, keepdim=True)
+        x = x / (x.sum(dim=-1, keepdim=True) + eps)
         return x
 
     else:
