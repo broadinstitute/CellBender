@@ -1,7 +1,7 @@
 numpy
 scipy
 tables
-pandas
+pandas<=1.3.5  # https://github.com/pandas-dev/pandas/issues/51866 estimation.py 288
 pyro-ppl>=0.3.2
 torch
 matplotlib
