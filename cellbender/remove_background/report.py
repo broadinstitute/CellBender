@@ -1510,9 +1510,22 @@ def mixed_species_plots(adata, input_layer_key='raw', output_layer_key='cellbend
             plt.ylabel(f'{genome2} counts (+1)')
             plt.title(f'Counts per droplet: {output_layer_key}')
             lgnd = plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-            for h in lgnd.legendHandles:
-                h._legmarker.set_markersize(10)
+            _set_legend_dot_size(lgnd, size=10)
             plt.show()
+
+
+def _set_legend_dot_size(lgnd, size: int):
+    """Set dot size in a matplotlib legend.
+    Different versions of matplotlib seem to need different things.
+    Just give up and move on if it doesn't work.
+    """
+    for h in lgnd.legendHandles:
+        try:
+            h._legmarker.set_markersize(size)
+        except AttributeError:
+            h.set_sizes([size])
+        except Exception:
+            pass
 
 
 def cell_roc_count_roc(output_csr: sp.csr_matrix,
@@ -1693,8 +1706,7 @@ def plot_roc_points(tp: np.ndarray,
                  sensitivity[point_colors == c],
                  '.', ms=1, alpha=0.5, label=c)
     lgnd = plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-    for h in lgnd.legendHandles:
-        h._legmarker.set_markersize(15)
+    _set_legend_dot_size(lgnd, size=15)
     # midpoint
     plt.plot(1 - spec_mean, sens_mean, 'o', **kwargs)
     # errorbars
