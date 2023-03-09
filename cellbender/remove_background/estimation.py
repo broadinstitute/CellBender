@@ -285,10 +285,10 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
         if len(df_positive_steps > 0):
             df_positive_steps['delta'] = df_positive_steps['log_prob'].diff(periods=1).apply(np.abs)
-            df_positive_steps.at[df_positive_steps['c'] == df_positive_steps['map'], 'delta'] = np.nan
+            df_positive_steps.loc[df_positive_steps['c'] == df_positive_steps['map'], 'delta'] = np.nan
         if len(df_negative_steps > 0):
             df_negative_steps['delta'] = df_negative_steps['log_prob'].diff(periods=-1).apply(np.abs)
-            df_negative_steps.at[df_negative_steps['c'] == df_negative_steps['map'], 'delta'] = np.nan
+            df_negative_steps.loc[df_negative_steps['c'] == df_negative_steps['map'], 'delta'] = np.nan
         df = pd.concat([df_positive_steps, df_negative_steps], axis=0)
 
         if verbose:
