@@ -24,6 +24,9 @@ task run_cellbender_remove_background_gpu {
     # Docker image with CellBender
     String? docker_image = "us.gcr.io/broad-dsde-methods/cellbender:0.3.0"
 
+    # Used by developers for testing non-dockerized versions of CellBender
+    String? dev_git_hash__  # leave blank to run CellBender normally
+
     # Method configuration inputs
     Int? expected_cells
     Int? total_droplets_included
@@ -59,6 +62,9 @@ task run_cellbender_remove_background_gpu {
 
   }
 
+  # For development only: install a non dockerized version of CellBender
+  Boolean install_from_git = (if defined(dev_git_hash__) then true else false)
+
   # Compute the output bucket directory for this sample: output_bucket_base_directory/sample_name/
   String output_bucket_directory = (if defined(output_bucket_base_directory)
                                     then sub(select_first([output_bucket_base_directory]), "/+$", "") + "/${sample_name}/"
@@ -68,18 +74,50 @@ task run_cellbender_remove_background_gpu {
 
     set -e  # fail the workflow if there is an error
 
-    if [[ ! -z "~{barcodes_file}" ]]; then
-        dir=$(dirname ~{input_file_unfiltered})
-        echo "Moving barcodes file to "$dir"/row_index.npy"
-        echo "mv ~{barcodes_file} "$dir"/row_index.npy"
-        [ -f $dir/row_index.npy ] || mv ~{barcodes_file} $dir/row_index.npy
+    # install a specific commit of cellbender from github if called for
+    if [[ ~{install_from_git} == true ]]; then
+        echo "Uninstalling pre-installed cellbender"
+        yes | pip uninstall cellbender
+        echo "Installing cellbender from github"
+        # this more succinct version is broken in some older versions of cellbender
+        echo "pip install --no-cache-dir -U git+https://github.com/broadinstitute/CellBender.git@~{dev_git_hash__}"
+        # yes | pip install --no-cache-dir -U git+https://github.com/broadinstitute/CellBender.git@~{dev_git_hash__}
+        # this should always work
+        git clone -q https://github.com/broadinstitute/CellBender.git /cromwell_root/CellBender
+        cd /cromwell_root/CellBender
+        git checkout -q ~{dev_git_hash__}
+        yes | pip install --no-cache-dir -U -e /cromwell_root/CellBender
+        cd /cromwell_root
     fi
 
+    # put the barcodes_file in the right place, if it is provided
+    if [[ ! -z "~{barcodes_file}" ]]; then
+        dir=$(dirname ~{input_file_unfiltered})
+        if [[ "~{input_file_unfiltered}" == *.npz ]]; then
+            name="row_index.npy"
+        elif [[ "~{barcodes_file}" == *.gz ]]; then
+            name="barcodes.tsv.gz"
+        else
+            name="barcodes.tsv"
+        fi
+        echo "Moving barcodes file to "$dir"/"$name
+        echo "mv ~{barcodes_file} "$dir"/"$name
+        [ -f $dir/$name ] || mv ~{barcodes_file} $dir/$name
+    fi
+
+    # put the genes_file in the right place, if it is provided
     if [[ ! -z "~{genes_file}" ]]; then
         dir=$(dirname ~{input_file_unfiltered})
-        echo "Moving genes file to "$dir"/col_index.npy"
-        echo "mv ~{genes_file} "$dir"/col_index.npy"
-        [ -f $dir/col_index.npy ] || mv ~{genes_file} $dir/col_index.npy
+        if [[ "~{input_file_unfiltered}" == *.npz ]]; then
+            name="col_index.npy"
+        elif [[ "~{genes_file}" == *.gz ]]; then
+            name="features.tsv.gz"
+        else
+            name="genes.tsv"
+        fi
+        echo "Moving genes file to "$dir"/"$name
+        echo "mv ~{genes_file} "$dir"/"$name
+        [ -f $dir/$name ] || mv ~{genes_file} $dir/$name
     fi
 
     cellbender remove-background \
@@ -121,10 +159,9 @@ task run_cellbender_remove_background_gpu {
   output {
     File log = "${sample_name}_out.log"
     File pdf = "${sample_name}_out.pdf"
-    File umi_pdf = "${sample_name}_out_umi_counts.pdf"
     File cell_csv = "${sample_name}_out_cell_barcodes.csv"
-    Array[File] metrics_csv = glob("${sample_name}_out*_metrics.csv")  # a number of outputs depending on "fpr"
-    Array[File] report = glob("${sample_name}_out*_report.html")  # a number of outputs depending on "fpr"
+    Array[File] metrics_array = glob("${sample_name}_out*_metrics.csv")  # a number of outputs depending on "fpr"
+    Array[File] report_array = glob("${sample_name}_out*_report.html")  # a number of outputs depending on "fpr"
     Array[File] h5_array = glob("${sample_name}_out*.h5")  # a number of outputs depending on "fpr"
     String output_dir = "${output_bucket_directory}"
     File ckpt_file = "ckpt.tar.gz"
@@ -181,10 +218,9 @@ workflow cellbender_remove_background {
   output {
     File log = run_cellbender_remove_background_gpu.log
     File summary_pdf = run_cellbender_remove_background_gpu.pdf
-    File raw_umi_histogram_pdf = run_cellbender_remove_background_gpu.umi_pdf
     File cell_barcodes_csv = run_cellbender_remove_background_gpu.cell_csv
-    Array[File] metrics_csv_array = run_cellbender_remove_background_gpu.metrics_csv
-    Array[File] html_report_array = run_cellbender_remove_background_gpu.report
+    Array[File] metrics_csv_array = run_cellbender_remove_background_gpu.metrics_array
+    Array[File] html_report_array = run_cellbender_remove_background_gpu.report_array
     Array[File] h5_array = run_cellbender_remove_background_gpu.h5_array
     String output_directory = run_cellbender_remove_background_gpu.output_dir
     File checkpoint_file = run_cellbender_remove_background_gpu.ckpt_file
