@@ -25,7 +25,7 @@ def get_requirements() -> str:
 
 def get_version() -> str:
     """Version number is centrally located in the file called VERSION"""
-    with open(os.path.join(os.path.dirname(__file__), 'VERSION')) as f:
+    with open('VERSION') as f:
         version = f.read().strip()
     return version
 
