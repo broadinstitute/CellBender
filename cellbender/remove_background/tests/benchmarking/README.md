@@ -2,7 +2,7 @@
 
 ## Running benchmarking tests
 
-There is a benchmarking WDL in /cellbender/remove_background/wdl called 
+There is a benchmarking WDL in /cellbender/remove_background/tests/benchmarking called 
 `benchmark.wdl`.  This can be run using a local installation of cromshell
 (`conda install -c bioconda cromshell`) by running the python script in 
 `run_benchmark.py` as in
@@ -23,7 +23,8 @@ commit `cb2d209d5aedffe71e28947bc5b7859600aef64d`)
 
 ### Datasets from the paper
 
-To re-run the datasets that were analyzed in the CellBender paper, try running
+To re-run the datasets that were analyzed in the CellBender paper, plus 
+several other interesting benchmarks, try running
 
 ```console
 ./run_usual_benchmarks.sh b9d2953c76c538d13549290bd986af4e6a1780d5
@@ -37,4 +38,25 @@ cromshell list -u | tail -n 5
 
 ## Validation of outputs
 
-TBW
+Validation is comprised of a Terra notebook in the following workspace:
+https://app.terra.bio/#workspaces/broad-firecloud-dsde-methods/sfleming_dev
+
+To prepare a data table for the Terra workspace (once all jobs 
+have completed):
+
+```console
+python run_benchmark_result_tabulation.py \
+    --workflows b9d2953c76c538d13549290bd986af4e6a1780d5 \
+    --output samples.tsv
+```
+
+where, for example, `b9d2953c76c538d13549290bd986af4e6a1780d5` is 
+the git hash used to run `run_usual_benchmarks.sh`. (The script will `grep` 
+the local cromshell database for all runs that match. More than one search 
+term can be used.)
+
+Then manually upload the `samples.tsv` to Terra as a data table.
+
+Open the validation notebook and enter the git commit 
+`b9d2953c76c538d13549290bd986af4e6a1780d5` at the top.  Then 
+run the entire notebook to produce plots.

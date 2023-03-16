@@ -13,6 +13,8 @@ import json
 import os
 import sys
 import subprocess
+import shutil
+import random
 import argparse
 from typing import Tuple, Dict, Optional, List
 
@@ -96,23 +98,41 @@ def cromshell_submit(wdl: str,
                      tmpdir: tempfile.TemporaryDirectory,
                      alias: Optional[str] = None,
                      verbose: bool = True) -> Tuple[str, str]:
-    """Submit job via cromshell and return the workflow-id and alias"""
+    """Submit job via cromshell and return the workflow-id and alias
+
+    NOTE: the whole dependency zipping thing is way more difficult than it has
+    to be and took me hours.  it is super fragile.  but at least now I think I
+    can put this benchmark.wdl anywhere I want to.
+    """
 
     # zip up dependencies
     if verbose:
         print('Zipping dependencies')
-    dependencies_zip = os.path.join(tmpdir, 'dependencies')
-    subprocess.run(['zip', dependencies_zip, *dependencies])
-    dependencies_zip = dependencies_zip + '.zip'
+    dependencies_zip = os.path.join(tmpdir, 'dependencies.zip')
+    dependencies_dir = tmpdir
+    for file in dependencies:
+        shutil.copy(file, dependencies_dir)
+    subprocess.run(['zip', '-j', dependencies_zip,
+                    ' '.join([os.path.join(dependencies_dir, os.path.basename(f))
+                              for f in dependencies])])
+
+    # move WDL to tmpdir
+    tmp_wdl = os.path.join(tmpdir, os.path.basename(wdl))
+    shutil.copy(wdl, tmp_wdl)
+
+    submit_cmd = ['cromshell', 'submit',
+                  tmp_wdl,
+                  inputs,
+                  options,
+                  dependencies_zip]
 
     # submit job
     if verbose:
-        print(f'Submitting WDL {wdl}')
-    out = subprocess.run(
-        ['cromshell', 'submit',
-         wdl, inputs, options, dependencies_zip],
-        # capture_output=True,
-    )
+        print(f'Submitting WDL {tmp_wdl}')
+    current_path = os.getcwd()
+    os.chdir(tmpdir)
+    out = subprocess.run(submit_cmd)
+    os.chdir(current_path)
     out.check_returncode()  # error if this failed
 
     # get workflow-id
@@ -122,6 +142,9 @@ def cromshell_submit(wdl: str,
 
     # alias job
     if alias is not None:
+        # solve the issue where an alias cannot be made twice
+        hash = random.getrandbits(128)
+        alias = alias + '__runhash_' + str(hash)[:10]
         subprocess.run(['cromshell', 'alias', '-1', alias])
 
     return workflow_id, alias
@@ -153,8 +176,11 @@ if __name__ == '__main__':
         )
 
         # get the path to the cellbender WDL
-        this_dir = os.path.dirname(__file__)
-        cellbender_wdl_path = os.path.join(this_dir, 'cellbender_remove_background.wdl')
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        cellbender_wdl_path = os.path.abspath(os.path.join(
+            this_dir, '..', '..', '..', '..', 'wdl',
+            'cellbender_remove_background.wdl',
+        ))
 
         # run cromshell submit
         alias = '_'.join(['cellbender', args.sample, args.git_hash])

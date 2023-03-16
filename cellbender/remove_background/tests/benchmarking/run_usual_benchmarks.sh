@@ -5,6 +5,8 @@
 
 GIT_HASH=$1
 
+# from the paper ==========================
+
 # 10x Genomics pbmc8k
 python run_benchmark.py \
     --git $GIT_HASH \
@@ -35,3 +37,11 @@ python run_benchmark.py \
     --input "gs://broad-dsde-methods-sfleming/cellbender_test/s4.h5" \
     --truth "gs://broad-dsde-methods-sfleming/cellbender_test/s4_truth.h5" \
     --sample s4
+
+# additional datasets ========================
+
+# Broad PCL human PV dataset, hard time calling high-count cells in v0.2.0, wobbly learning curve
+python run_benchmark.py \
+    --git $GIT_HASH \
+    --input "gs://broad-dsde-methods-sfleming/cellbender_test/PCL_human_PV_1817_ls.h5" \
+    --sample pv20k

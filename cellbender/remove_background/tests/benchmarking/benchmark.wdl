@@ -17,6 +17,7 @@ workflow run_cellbender_benchmark {
     call cellbender.run_cellbender_remove_background_gpu as cb {
         input:
             dev_git_hash__=git_hash
+
     }
 
     output {
