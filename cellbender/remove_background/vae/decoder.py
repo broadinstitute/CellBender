@@ -42,7 +42,7 @@ class Decoder(FullyConnectedNetwork):
     def __init__(self, input_dim: int, **kwargs):
         super().__init__(input_dim=input_dim, **kwargs)
         self.input_dim = input_dim
-        self.softmax = torch.nn.Softmax()
+        self.softmax = torch.nn.Softmax(dim=-1)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return self.softmax(self.network(z))
