@@ -21,12 +21,16 @@ def get_parser() -> argparse.ArgumentParser:
         description="Create a Terra-compatible data table TSV from cromshell "
                     "benchmarking outputs.",
     )
-
     parser.add_argument('-w', '--workflows',
                         type=str,
                         required=True,
                         dest='grep',
                         help='grep to choose workflows from the cromshell database')
+    parser.add_argument('-n', '--note',
+                        type=str,
+                        required=True,
+                        dest='note',
+                        help='Annotation describing the git commit')
     parser.add_argument('-o', '--output',
                         type=str,
                         required=True,
@@ -120,19 +124,23 @@ if __name__ == '__main__':
     output_h5s = [get_cromshell_output_h5(id) for id in workflow_ids]
     samples = [sample_name_from_h5(h5) for h5 in output_h5s]
     list_of_tuples = [metadata_from_workflow_id(id) for id in workflow_ids]
-    git_hashes, input_h5s, truth_h5s = zip(*list_of_tuples)
+    if len(list_of_tuples) > 0:
+        git_hashes, input_h5s, truth_h5s = zip(*list_of_tuples)
 
-    run_ids = [sample + '_' + git for sample, git in zip(samples, git_hashes)]
+        run_ids = [sample + '_' + git for sample, git in zip(samples, git_hashes)]
 
-    df = pd.DataFrame(data={'entity:sample_id': run_ids,
-                            'git_commit': git_hashes,
-                            'sample': samples,
-                            'output_h5': output_h5s,
-                            'input_h5': input_h5s,
-                            'truth_h5': truth_h5s,
-                            'cromwell_workflow_id': workflow_ids,
-                            'date_time': dates})
+        df = pd.DataFrame(data={'entity:sample_id': run_ids,
+                                'git_commit': git_hashes,
+                                'sample': samples,
+                                'output_h5': output_h5s,
+                                'input_h5': input_h5s,
+                                'truth_h5': truth_h5s,
+                                'cromwell_workflow_id': workflow_ids,
+                                'date_time': dates,
+                                'note': args.note})
 
-    df.to_csv(args.output_file, sep='\t', index=False)
+        df.to_csv(args.output_file, sep='\t', index=False)
+    else:
+        print('No submissions selected')
 
     sys.exit(0)
