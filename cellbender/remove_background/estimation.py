@@ -224,6 +224,10 @@ class MultipleChoiceKnapsack(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
+
+        # TODO: can I split this in chunks of genes and use multiprocessing??
+        # TODO: this runs on one CPU at 100% for quite some time
+
         assert noise_targets_per_gene.size == self.index_converter.total_n_genes, \
             f'The number of noise count targets ({noise_targets_per_gene.size}) ' \
             f'must match the number of genes ({self.index_converter.total_n_genes})'
