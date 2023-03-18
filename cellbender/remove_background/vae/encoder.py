@@ -95,15 +95,15 @@ class EncodeZ(FullyConnectedNetwork):
                  hidden_dims: List[int],
                  output_dim: int,
                  input_transform: str = None,
-                 use_layer_norm: bool = True):
+                 **kwargs):
         assert len(hidden_dims) > 0, 'EncodeZ needs to have at least one hidden layer'
         super(EncodeZ, self).__init__(input_dim=input_dim,
                                       hidden_dims=hidden_dims[:-1],
                                       output_dim=hidden_dims[-1],
                                       hidden_activation=nn.Softplus(),
                                       output_activation=nn.Softplus(),
-                                      use_layer_norm=use_layer_norm,
-                                      norm_output=True)
+                                      norm_output=True,
+                                      **kwargs)
         self.transform = input_transform
         self.input_dim = input_dim
         self.output_dim = output_dim
