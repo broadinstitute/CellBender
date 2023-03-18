@@ -97,6 +97,7 @@ def run_remove_background(args: argparse.Namespace):
         inferred_model = None
     else:
         inferred_model, _, _, _ = run_inference(dataset_obj=dataset_obj, args=args)
+        inferred_model.eval()
 
     try:
 

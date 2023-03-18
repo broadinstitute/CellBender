@@ -168,6 +168,7 @@ class Posterior:
                  debug: bool = False):
         self.dataset_obj = dataset_obj
         self.vi_model = vi_model
+        self.vi_model.eval()
         self.use_cuda = (torch.cuda.is_available() if vi_model is None
                          else vi_model.use_cuda)
         self.device = 'cuda' if self.use_cuda else 'cpu'
@@ -380,7 +381,7 @@ class Posterior:
             n_samples: int = 20,
             y_map: bool = True,
             n_counts_max: int = 20,
-            smallest_log_probability: float = -10.) -> sp.coo_matrix:
+            smallest_log_probability: float = -10.) -> sp.coo_matrix:  # TODO: default -7 ?
         """Compute the full-blown posterior on noise counts for all cells,
         and store log probability in COO sparse format on CPU.
 
@@ -391,6 +392,8 @@ class Posterior:
             y_map: Use the MAP value for y (cell / no cell) when sampling, to
                 avoid samples with a cell and samples without a cell.
             n_counts_max: Maximum number of noise counts.
+            smallest_log_probability: Do not store log prob values smaller than
+                this -- they get set to zero (saves space)
 
         Returns:
             noise_count_posterior_coo: This sparse CSR object contains all

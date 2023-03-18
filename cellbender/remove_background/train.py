@@ -173,6 +173,7 @@ def run_training(model: RemoveBackgroundPyroModel,
             if epoch == start_epoch + 1:
                 t = time.time()
 
+            model.train()
             total_epoch_loss_train = train_epoch(svi, train_loader)
 
             train_elbo.append(-total_epoch_loss_train)
@@ -200,6 +201,7 @@ def run_training(model: RemoveBackgroundPyroModel,
 
                 # Every test_freq epochs, evaluate tests loss.
                 if epoch % test_freq == 0:
+                    model.eval()
                     total_epoch_loss_test = evaluate_epoch(svi, test_loader)
                     test_elbo.append(-total_epoch_loss_test)
                     model.loss['test']['epoch'].append(epoch)
