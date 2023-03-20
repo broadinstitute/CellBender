@@ -102,6 +102,7 @@ class EncodeZ(FullyConnectedNetwork):
                                       output_dim=hidden_dims[-1],
                                       hidden_activation=nn.Softplus(),
                                       output_activation=nn.Softplus(),
+                                      use_batch_norm=True,
                                       norm_output=True,
                                       **kwargs)
         self.transform = input_transform
