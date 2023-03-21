@@ -673,6 +673,8 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         encoder_z = EncodeZ(input_dim=count_matrix.shape[1],
                             hidden_dims=args.z_hidden_dims,
                             output_dim=args.z_dim,
+                            use_batch_norm=False,
+                            use_layer_norm=False,
                             input_transform='normalize')  # TODO log?
 
         encoder_other = EncodeNonZLatents(n_genes=count_matrix.shape[1],
@@ -688,6 +690,8 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         # Decoder.
         decoder = Decoder(input_dim=args.z_dim,
                           hidden_dims=args.z_hidden_dims[::-1],
+                          use_batch_norm=True,
+                          use_layer_norm=False,
                           output_dim=count_matrix.shape[1])
 
         # Set up the pyro model for variational inference.
