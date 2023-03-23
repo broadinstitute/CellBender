@@ -37,8 +37,8 @@ setuptools.setup(
                 'high-throughput single-cell RNA sequencing (scRNA-seq) data',
     long_description=readme(),
     classifiers=[
-      'Development Status :: 3 - Alpha',
-      'Intended Audience :: Science/Research'
+      'Development Status :: 4 - Beta',
+      'Intended Audience :: Science/Research',
       'License :: OSI Approved :: BSD License',
       'Programming Language :: Python :: 3.7',
       'Topic :: Scientific/Engineering :: Bio-Informatics',
