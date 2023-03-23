@@ -256,13 +256,18 @@ def load_anndata_from_input_and_output(input_file: str,
                 adata_out.var[key] = adata_truth.var[key].copy()
 
     # Rename the CellBender encoding of gene expression.
-    embedding_key = 'gene_expression_encoding'
-    if embedding_key not in adata_out.obsm.keys():
-        # cellbender v2 legacy format
-        embedding_key = 'latent_gene_encoding'
+    if analyzed_barcodes_only:
+        slot = adata_out.obsm
+    else:
+        slot = adata_out.uns
+    embedding_key = None
+    for key in ['gene_expression_encoding', 'latent_gene_encoding']:
+        if key in slot.keys():
+            embedding_key = key
+            break
     if gene_expression_encoding_key != embedding_key:
-        adata_out.obsm[gene_expression_encoding_key] = adata_out.obsm[embedding_key].copy()
-        del adata_out.obsm[embedding_key]
+        slot[gene_expression_encoding_key] = slot[embedding_key].copy()
+        del slot[embedding_key]
 
     return adata_out
 
@@ -441,12 +446,17 @@ def load_anndata_from_input_and_outputs(input_file: str,
                 adata_out.var[key] = adata_truth.var[key].copy()
 
     # Rename the CellBender encoding of gene expression.
-    embedding_key = 'gene_expression_encoding'
-    if embedding_key not in adata_out.obsm.keys():
-        # cellbender v2 legacy format
-        embedding_key = 'latent_gene_encoding'
+    if analyzed_barcodes_only:
+        slot = adata_out.obsm
+    else:
+        slot = adata_out.uns
+    embedding_key = None
+    for key in ['gene_expression_encoding', 'latent_gene_encoding']:
+        if key in slot.keys():
+            embedding_key = key
+            break
     if gene_expression_encoding_key != embedding_key:
-        adata_out.obsm[gene_expression_encoding_key] = adata_out.obsm[embedding_key].copy()
-        del adata_out.obsm[embedding_key]
+        slot[gene_expression_encoding_key] = slot[embedding_key].copy()
+        del slot[embedding_key]
 
     return adata_out

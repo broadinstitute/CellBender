@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from cellbender.remove_background.vae.base import FullyConnectedNetwork
 
 from typing import Dict, List, Optional
 
@@ -51,7 +52,7 @@ class CompositeEncoder(dict):
         return out
 
 
-class EncodeZ(nn.Module):
+class EncodeZ(FullyConnectedNetwork):
     """Encoder module transforms gene expression into latent representation.
 
     The number of input units is the total number of genes and the number of
@@ -89,41 +90,77 @@ class EncodeZ(nn.Module):
 
     """
 
-    def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int,
-                 input_transform: str = None):
-        super(EncodeZ, self).__init__()
+    def __init__(self,
+                 input_dim: int,
+                 hidden_dims: List[int],
+                 output_dim: int,
+                 input_transform: str = None,
+                 **kwargs):
+        assert len(hidden_dims) > 0, 'EncodeZ needs to have at least one hidden layer'
+        super(EncodeZ, self).__init__(input_dim=input_dim,
+                                      hidden_dims=hidden_dims[:-1],
+                                      output_dim=hidden_dims[-1],
+                                      hidden_activation=nn.Softplus(),
+                                      output_activation=nn.Softplus(),
+                                      norm_output=True,
+                                      **kwargs)
+        self.transform = input_transform
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.transform = input_transform
-
-        # Set up the linear transformations used in fully-connected layers.
-        self.linears = nn.ModuleList([nn.Linear(input_dim, hidden_dims[0])])
-        for i in range(1, len(hidden_dims)):  # Second hidden layer onward
-            self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
         self.loc_out = nn.Linear(hidden_dims[-1], output_dim)
         self.sig_out = nn.Linear(hidden_dims[-1], output_dim)
 
-        # Set up the non-linear activations.
-        self.softplus = nn.Softplus()
-
-    def forward(self, x: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
-        # Define the forward computation to go from gene expression to latent
-        # representation.
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
 
         # Transform input.
         x = x.reshape(-1, self.input_dim)
-        x = transform_input(x, self.transform)
+        x_ = transform_input(x, self.transform)
 
-        # Compute the hidden layers.
-        hidden = self.softplus(self.linears[0](x))
-        for i in range(1, len(self.linears)):  # Second hidden layer onward
-            hidden = self.softplus(self.linears[i](hidden))
+        # Obtain last hidden layer.
+        hidden = self.network(x_)
 
         # Compute the outputs: loc is any real number, scale must be positive.
         loc = self.loc_out(hidden)
         scale = torch.exp(self.sig_out(hidden))
 
         return {'loc': loc.squeeze(), 'scale': scale.squeeze()}
+
+
+    # def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int,
+    #              input_transform: str = None):
+    #     super(EncodeZ, self).__init__()
+    #     self.input_dim = input_dim
+    #     self.output_dim = output_dim
+    #     self.transform = input_transform
+    #
+    #     # Set up the linear transformations used in fully-connected layers.
+    #     self.linears = nn.ModuleList([nn.Linear(input_dim, hidden_dims[0])])
+    #     for i in range(1, len(hidden_dims)):  # Second hidden layer onward
+    #         self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
+    #     self.loc_out = nn.Linear(hidden_dims[-1], output_dim)
+    #     self.sig_out = nn.Linear(hidden_dims[-1], output_dim)
+    #
+    #     # Set up the non-linear activations.
+    #     self.softplus = nn.Softplus()
+    #
+    # def forward(self, x: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
+    #     # Define the forward computation to go from gene expression to latent
+    #     # representation.
+    #
+    #     # Transform input.
+    #     x = x.reshape(-1, self.input_dim)
+    #     x = transform_input(x, self.transform)
+    #
+    #     # Compute the hidden layers.
+    #     hidden = self.softplus(self.linears[0](x))
+    #     for i in range(1, len(self.linears)):  # Second hidden layer onward
+    #         hidden = self.softplus(self.linears[i](hidden))
+    #
+    #     # Compute the outputs: loc is any real number, scale must be positive.
+    #     loc = self.loc_out(hidden)
+    #     scale = torch.exp(self.sig_out(hidden))
+    #
+    #     return {'loc': loc.squeeze(), 'scale': scale.squeeze()}
 
 
 class EncodeNonZLatents(nn.Module):

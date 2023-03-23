@@ -7,10 +7,11 @@
   "run_cellbender_benchmark.cb.expected_cells": null,
   "run_cellbender_benchmark.cb.total_droplets_included": null,
   "run_cellbender_benchmark.cb.low_count_threshold": null,
-  "run_cellbender_benchmark.cb.fpr": null,
+  "run_cellbender_benchmark.cb.fpr": "FPR",
   "run_cellbender_benchmark.cb.debug": false,
+  "run_cellbender_benchmark.cb.checkpoint_mins": 200,
   "run_cellbender_benchmark.cb.hardware_preemptible_tries": 0,
   "run_cellbender_benchmark.cb.hardware_cpu_count": 8,
-  "run_cellbender_benchmark.cb.hardware_memory_GB": 52,
+  "run_cellbender_benchmark.cb.hardware_memory_GB": 64,
   "run_cellbender_benchmark.cb.docker_image": "us.gcr.io/broad-dsde-methods/cellbender:0.2.1"
 }

@@ -225,6 +225,20 @@ def train_pyro(n_epochs: int,
     return loss_per_epoch
 
 
+def _check_all_close(tensors1, tensors2) -> bool:
+    """For two lists of tensors, check that they are all close"""
+    assert len(tensors1) == len(tensors2), \
+        'Must pass in same number of tensors to check if they are equal'
+    equal = True
+    for t1, t2 in zip(tensors1, tensors2):
+        equal = equal and torch.allclose(t1, t2)
+    return equal
+
+
+def _get_params(module: torch.nn.Module) -> List[torch.Tensor]:
+    return [p.data.clone() for p in module.parameters()]
+
+
 @pytest.mark.parametrize('batch_size_n', [32, 128], ids=lambda n: f'batch{n}')
 def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
     """Check and see if restarting from a checkpoint picks up in the same place
@@ -248,16 +262,17 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
     # set up the inference process
     scheduler = pyro.optim.ClippedAdam({'lr': lr, 'clip_norm': 10.})
     svi = pyro.infer.SVI(initial_model.model, initial_model.guide, scheduler, loss=pyro.infer.Trace_ELBO())
-    w1 = initial_model.encoder.linears[0].weight.data.clone()
+    w1 = _get_params(initial_model.encoder)
 
     print('initial weight matrix =========================')
-    print(w1)
+    print('\n'.join([str(t) for t in w1]))
 
     # train in two parts: part 1
     initial_model.loss.extend(train_pyro(n_epochs=epochs, data_loader=train_loader, svi=svi))
 
     print('no_ckpt trained round 1 (saved) ===============')
-    print(initial_model.encoder.linears[0].weight.data)
+    # print(initial_model.encoder.linears[0].weight.data)
+    print('\n'.join([str(t) for t in _get_params(initial_model.encoder)]))
 
     # save
     save_successful = save_checkpoint(filebase=str(filebase),
@@ -279,9 +294,10 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
     train_loader = ckpt['train_loader']
     s = ckpt['loaded']
     print('model_ckpt loaded =============================')
-    print(model_ckpt.encoder.linears[0].weight.data)
-    matches = (model_ckpt.encoder.linears[0].weight.data
-               != initial_model.encoder.linears[0].weight.data).sum().item() == 0
+    print('\n'.join([str(t) for t in _get_params(model_ckpt.encoder)]))
+
+    matches = _check_all_close(_get_params(model_ckpt.encoder),
+                               _get_params(initial_model.encoder))
     print(f'model_ckpt loaded matches data from (saved) trained round 1: {matches}')
 
     # clean up before most assertions... hokey now due to lack of fixture usage here
@@ -295,7 +311,7 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
     model_ckpt.loss.extend(train_pyro(n_epochs=epochs2, data_loader=train_loader, svi=svi_ckpt))
 
     print('model_ckpt after round 2 ======================')
-    print(model_ckpt.encoder.linears[0].weight.data)
+    print('\n'.join([str(t) for t in _get_params(model_ckpt.encoder)]))
 
     # one-shot training straight through
     model_one_shot = PyroModel(dim=dim)  # resets random state
@@ -312,21 +328,22 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
         'the start of training round 2 do not match.'
 
     print('model_one_shot ================================')
-    print(model_one_shot.encoder.linears[0].weight.data)
+    print('\n'.join([str(t) for t in _get_params(model_one_shot.encoder)]))
 
     print(model_one_shot.loss)
     print(model_ckpt.loss)
     print([l1 == l2 for l1, l2 in zip(model_one_shot.loss, model_ckpt.loss)])
 
     # training should be doing something to the initial weight matrix
-    assert (w1 != model_one_shot.encoder.linears[0].weight).sum().item() > 0, \
+    assert (w1[0] != _get_params(model_one_shot.encoder)[0]).sum().item() > 0, \
         'Training is not changing the weight matrix in test_save_and_load_checkpoint'
-    assert (w1 != model_ckpt.encoder.linears[0].weight).sum().item() > 0, \
+    assert (w1[0] != _get_params(model_ckpt.encoder)[0]).sum().item() > 0, \
         'Training is not changing the checkpointed weight matrix in test_save_and_load_checkpoint'
 
     # see if we end up where we should
-    assert (model_one_shot.encoder.linears[0].weight.data
-            != model_ckpt.encoder.linears[0].weight.data).sum().item() == 0
+    assert _check_all_close(_get_params(model_one_shot.encoder),
+                            _get_params(model_ckpt.encoder)), \
+        'Checkpointed restart does not agree with one-shot training'
 
     # check guide traces
     print('checking guide trace nodes for agreement:')
@@ -401,10 +418,12 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     args.epochs = 0
     initial_model, scheduler, _, _ = run_inference(dataset_obj=dataset_obj,
                                                    args=args)
-    w1 = initial_model.encoder['z'].linears[0].weight.data.clone()
+    w1 = _get_params(initial_model.encoder['z'])
+    print('encoder structure ============')
+    print(initial_model.encoder['z'])
 
     print('initial weight matrix =========================')
-    print(w1)
+    print('\n'.join([str(t) for t in w1]))
 
     # train in two parts: part 1
     create_random_state_blank_slate(0)
@@ -416,7 +435,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
                       total_epochs_for_testing_only=epochs + epochs2)
 
     print('no_ckpt trained round 1 (saved) ===============')
-    print(initial_model.encoder['z'].linears[0].weight.data)
+    print('\n'.join([str(t) for t in _get_params(initial_model.encoder['z'])]))
     # print(scheduler.get_state().keys())
     # print(list(scheduler.get_state().values())[0].keys())
     # print(list(list(scheduler.optim_objs.values())[0].optimizer.state_dict().values())[0].values())
@@ -447,9 +466,10 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
                                                 output_checkpoint_tarball='none')
 
     print('model_ckpt loaded =============================')
-    print(model_ckpt.encoder['z'].linears[0].weight.data)
-    matches = (model_ckpt.encoder['z'].linears[0].weight.data
-               != initial_model.encoder['z'].linears[0].weight.data).sum().item() == 0
+    print('\n'.join([str(t) for t in _get_params(model_ckpt.encoder['z'])]))
+
+    matches = _check_all_close(_get_params(model_ckpt.encoder['z']),
+                               _get_params(initial_model.encoder['z']))
     print(f'model_ckpt loaded matches data from (saved) trained round 1: {matches}')
 
     # and continue training
@@ -460,7 +480,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
                                                 output_checkpoint_tarball='none')
 
     print('model_ckpt after round 2 ======================')
-    print(model_ckpt.encoder['z'].linears[0].weight.data)
+    print('\n'.join([str(t) for t in _get_params(model_ckpt.encoder['z'])]))
 
     # clean up the temp directory to remove checkpoint before running the one-shot
     shutil.rmtree(str(filedir))
@@ -474,7 +494,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
                                                     output_checkpoint_tarball='none')
 
     print('model_one_shot ================================')
-    print(model_one_shot.encoder['z'].linears[0].weight.data)
+    print('\n'.join([str(t) for t in _get_params(model_one_shot.encoder['z'])]))
 
     print('loss for model_one_shot:')
     print(model_one_shot.loss)
@@ -483,14 +503,15 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     print([l1 == l2 for l1, l2 in zip(model_one_shot.loss, model_ckpt.loss)])
 
     # training should be doing something to the initial weight matrix
-    assert (w1 != model_one_shot.encoder['z'].linears[0].weight).sum().item() > 0, \
+    assert (w1[0] != _get_params(model_one_shot.encoder['z'])[0]).sum().item() > 0, \
         'Training is not changing the weight matrix in test_save_and_load_checkpoint'
-    assert (w1 != model_ckpt.encoder['z'].linears[0].weight).sum().item() > 0, \
+    assert (w1[0] != _get_params(model_ckpt.encoder['z'])[0]).sum().item() > 0, \
         'Training is not changing the checkpointed weight matrix in test_save_and_load_checkpoint'
 
     # see if we end up where we should
-    assert (model_one_shot.encoder['z'].linears[0].weight.data
-            != model_ckpt.encoder['z'].linears[0].weight.data).sum().item() == 0
+    assert _check_all_close(_get_params(model_one_shot.encoder['z']),
+                            _get_params(model_ckpt.encoder['z'])), \
+        'Checkpointed restart does not agree with one-shot training'
 
     # # check guide traces
     # print('checking guide trace nodes for agreement:')

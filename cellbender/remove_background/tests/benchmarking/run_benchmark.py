@@ -49,6 +49,12 @@ def get_parser() -> argparse.ArgumentParser:
                         dest='truth_file',
                         help='Truth data path for simulated data (must be a '
                              'gsURL, i.e. "gs://bucket/path/file.h5")')
+    parser.add_argument('-f', '--fpr',
+                        type=str,
+                        required=False,
+                        default="0.01",
+                        dest='fpr',
+                        help='FPR for CellBender')
     parser.add_argument('-q', '--quiet',
                         action='store_true',
                         default=False,
@@ -165,6 +171,7 @@ if __name__ == '__main__':
             'INPUT_GSURL': args.input_file,
             'SAMPLE_NAME': args.sample,
             'TRUTH_GSURL': args.truth_file,
+            'FPR': args.fpr,
         }
 
         # create the updated input json
