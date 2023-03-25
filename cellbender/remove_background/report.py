@@ -489,8 +489,9 @@ def assess_learning_curve(adata,
     train_elbo_min_max = np.percentile(adata.uns['learning_curve_train_elbo'], q=[5, 95])
     train_elbo_range = train_elbo_min_max.max() - train_elbo_min_max.min()
 
-    large_spikes_in_train = np.any((adata.uns['learning_curve_train_elbo'][1:]
-                                    - adata.uns['learning_curve_train_elbo'][:-1])
+    # look only from epoch 45 onward for spikes in train ELBO
+    large_spikes_in_train = np.any((adata.uns['learning_curve_train_elbo'][46:]
+                                    - adata.uns['learning_curve_train_elbo'][45:-1])
                                    < -train_elbo_range * spike_size)
 
     second_half_train_elbo = (adata.uns['learning_curve_train_elbo']
@@ -505,8 +506,9 @@ def assess_learning_curve(adata,
     low_end_in_train = (adata.uns['learning_curve_train_elbo'][-1]
                         < adata.uns['learning_curve_train_elbo'].max() - 2 * typical_end_variation)
 
-    non_monotonicity = ((adata.uns['learning_curve_train_elbo'][1:]
-                         - adata.uns['learning_curve_train_elbo'][:-1])
+    # look only from epoch 45 onward for spikes in train ELBO
+    non_monotonicity = ((adata.uns['learning_curve_train_elbo'][46:]
+                         - adata.uns['learning_curve_train_elbo'][45:-1])
                         < -3 * typical_end_variation).sum() / len(adata.uns['learning_curve_train_elbo'])
     non_monotonic = (non_monotonicity > monotonicity_cutoff)
 
@@ -703,6 +705,7 @@ def assess_count_removal_per_gene(adata, raw_full_adata,
                      f'and excluding genes with fewer than {genecount_lowlim} '
                      f'total raw counts ({percentile}th percentile)'))
     df = adata.var[adata.var['cellbender_analyzed']]  # exclude omitted features
+    df = df[[c for c in df.columns if (c != 'features_analyzed_inds')]]
     display(HTML(df[df[f'n_{input_layer_key}'] > genecount_lowlim]
                  .sort_values(by='fraction_removed', ascending=False).head(10).to_html()))
 

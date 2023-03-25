@@ -97,7 +97,6 @@ class SingleCellRNACountsDataset:
 
         # Load the dataset.
         self.data = load_data(self.input_file)
-        self.analyzed_gene_inds = np.arange(start=0, stop=self.data['matrix'].shape[1])
         self.analyzed_gene_logic = True
 
         # Eliminate feature types not used in the analysis.

@@ -10,7 +10,14 @@ from typing import Dict, Optional
 
 
 def dict_from_h5(file: str) -> Dict[str, np.ndarray]:
-    """Read in everything from an h5 file and put into a dictionary."""
+    """Read in everything from an h5 file and put into a dictionary.
+
+    Args:
+        file: The h5 file
+
+    Returns:
+        Dictionary containing all the information from the h5 file
+    """
     d = {}
     with tables.open_file(file) as f:
         # read in everything
@@ -20,7 +27,7 @@ def dict_from_h5(file: str) -> Dict[str, np.ndarray]:
 
 
 def anndata_from_h5(file: str,
-                    analyzed_barcodes_only: bool = True) -> 'anndata.AnnData':
+                    analyzed_barcodes_only: bool = True) -> anndata.AnnData:
     """Load an output h5 file into an AnnData object for downstream work.
 
     Args:
@@ -32,7 +39,7 @@ def anndata_from_h5(file: str,
             properly into adata.obs and adata.obsm, rather than adata.uns.
 
     Returns:
-        adata: The anndata object, populated with inferred latent variables
+        anndata.AnnData: The anndata object, populated with inferred latent variables
             and metadata.
 
     """
@@ -98,6 +105,9 @@ def anndata_from_h5(file: str,
     if 'features_analyzed_inds' in adata.uns.keys():
         adata.var['cellbender_analyzed'] = [True if (i in adata.uns['features_analyzed_inds'])
                                             else False for i in range(adata.shape[1])]
+    elif 'features_analyzed_inds' in adata.var.keys():
+        adata.var['cellbender_analyzed'] = [True if (i in adata.var['features_analyzed_inds'].values)
+                                            else False for i in range(adata.shape[1])]
 
     if analyzed_barcodes_only:
         for col in adata.obs.columns[adata.obs.columns.str.startswith('barcodes_analyzed')
@@ -110,6 +120,9 @@ def anndata_from_h5(file: str,
         # Add a special additional field to .obs if all barcodes are included.
         if 'barcodes_analyzed_inds' in adata.uns.keys():
             adata.obs['cellbender_analyzed'] = [True if (i in adata.uns['barcodes_analyzed_inds'])
+                                                else False for i in range(adata.shape[0])]
+        elif 'barcodes_analyzed_inds' in adata.obs.keys():
+            adata.obs['cellbender_analyzed'] = [True if (i in adata.obs['barcodes_analyzed_inds'].values)
                                                 else False for i in range(adata.shape[0])]
 
     return adata
@@ -143,14 +156,15 @@ def _fill_adata_slots_automatically(adata, d):
             print('Unable to load data into AnnData: ', key, value, type(value))
 
 
-def load_anndata_from_input(input_file: str) -> 'anndata.AnnData':
-    """Load an input file into an AnnData object (used in report).
+def load_anndata_from_input(input_file: str) -> anndata.AnnData:
+    """Load an input file into an AnnData object (used in report generation).
+    Equivalent to something like scanpy.read(), but uses cellbender's io.
 
     Args:
-        input_file: The h5 file
+        input_file: The raw data file
 
     Returns:
-        adata: The anndata object
+        adata.AnnData: The anndata object
 
     """
 
@@ -182,7 +196,7 @@ def load_anndata_from_input_and_output(input_file: str,
                                        input_layer_key: str = 'cellranger',
                                        retain_input_metadata: bool = False,
                                        gene_expression_encoding_key: str = 'cellbender_embedding',
-                                       truth_file: Optional[str] = None) -> 'anndata.AnnData':
+                                       truth_file: Optional[str] = None) -> anndata.AnnData:
     """Load remove-background output count matrix into an anndata object,
     together with remove-background metadata and the raw input counts.
 
@@ -207,7 +221,7 @@ def load_anndata_from_input_and_output(input_file: str,
         truth_file: File containing truth data if this is a simulation
 
     Return:
-        adata_out: AnnData object with counts before and after remove-background,
+        anndata.AnnData: AnnData object with counts before and after remove-background,
             as well as inferred latent variables from remove-background.
 
     """
@@ -275,7 +289,7 @@ def load_anndata_from_input_and_output(input_file: str,
 def _load_anndata_from_input_and_decontx(input_file: str,
                                          output: str,
                                          input_layer_key: str = 'cellranger',
-                                         truth_file: Optional[str] = None) -> 'anndata.AnnData':
+                                         truth_file: Optional[str] = None) -> anndata.AnnData:
     """Load decontX output count matrix into an anndata object,
     together with remove-background metadata and the raw input counts.
 
@@ -291,7 +305,7 @@ def _load_anndata_from_input_and_decontx(input_file: str,
         truth_file: File containing truth data if this is a simulation
 
     Return:
-        adata_out: AnnData object with counts before and after remove-background,
+        anndata.AnnData: AnnData object with counts before and after remove-background,
             as well as inferred latent variables from remove-background.
 
     """
@@ -362,9 +376,12 @@ def load_anndata_from_input_and_outputs(input_file: str,
                                         analyzed_barcodes_only: bool = True,
                                         input_layer_key: str = 'cellranger',
                                         gene_expression_encoding_key: str = 'cellbender_embedding',
-                                        truth_file: Optional[str] = None) -> 'anndata.AnnData':
-    """Load remove-background output count matrix into an anndata object,
+                                        truth_file: Optional[str] = None) -> anndata.AnnData:
+    """Load remove-background output count matrices into an anndata object,
     together with remove-background metadata and the raw input counts.
+
+    The use case would typically be cellbender runs with multiple output files
+    at different FPRs, which we want to compare.
 
     Args:
         input_file: Raw h5 file (or other compatible remove-background input)
@@ -385,7 +402,7 @@ def load_anndata_from_input_and_outputs(input_file: str,
         truth_file: File containing truth data if this is a simulation
 
     Return:
-        adata_out: AnnData object with counts before and after remove-background,
+        anndata.AnnData: AnnData object with counts before and after remove-background,
             as well as inferred latent variables from remove-background.
 
     """
