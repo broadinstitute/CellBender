@@ -504,7 +504,7 @@ def assess_learning_curve(adata,
     threequarter = len(adata.uns['learning_curve_train_elbo']) * 3 // 4
     typical_end_variation = np.std(adata.uns['learning_curve_train_elbo'][half:threequarter])
     low_end_in_train = (adata.uns['learning_curve_train_elbo'][-1]
-                        < adata.uns['learning_curve_train_elbo'].max() - 2 * typical_end_variation)
+                        < adata.uns['learning_curve_train_elbo'].max() - 5 * typical_end_variation)
 
     # look only from epoch 45 onward for spikes in train ELBO
     non_monotonicity = ((adata.uns['learning_curve_train_elbo'][46:]
