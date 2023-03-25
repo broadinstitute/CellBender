@@ -30,6 +30,9 @@ Proposed pipeline
 #. Run ``cellbender remove-background``
 #. Perform per-cell quality control checks, and filter out dead / dying cells,
    as appropriate for your experiment
+#. Perform all subsequent analyses using the CellBender count matrix. (It is useful
+   to also load the raw data: keep it as a layer in an ``anndata`` object, for
+   example, see :ref:`here <loading-outputs>`)
 
 
 A few caveats and hints:
@@ -63,7 +66,7 @@ Run ``remove-background`` on the dataset using the following command
 
 .. code-block:: console
 
-   (CellBender) $ cellbender remove-background \
+   (cellbender) $ cellbender remove-background \
                     --input raw_feature_bc_matrix.h5 \
                     --output output.h5 \
                     --cuda \
@@ -87,15 +90,22 @@ This command will produce five output files:
   output for convenient use in certain downstream applications.
 * ``output.pdf``: PDF file that provides a standard graphical summary of the inference procedure.
 * ``output.log``: Log file produced by the ``cellbender remove-background`` run.
+* ``output_metrics.csv``: Metrics describing the run, potentially to be used to flag
+  problematic runs when using CellBender as part of a large-scale automated pipeline.
+* ``output_report.html``: HTML report including plots and commentary, along with any
+  warnings or suggestions for improved parameter settings.
+* ``ckpt.tar.gz``: Checkpoint file which contains the trained model and the full posterior.
 
 Quality control checks
 ~~~~~~~~~~~~~~~~~~~~~~
 
 * Check the log file for any warnings.
-* Check lines 8 - 11 in the log file.  Ensure that the automatically-determined priors
+* Check lines 11 -18 in the log file.  Ensure that the automatically-determined priors
   for cell counts and empty droplet counts match your expectation from the UMI curve.
   Ensure that the numbers of "probable cells", "additional barcodes", and "empty droplets"
   are all nonzero and look reasonable.
+* Look at the HTML report and note any warnings it gives. The report will give advice
+  for re-running the tool if appropriate.
 * Examine the PDF output.
 
     * Look at the upper plot to check whether
@@ -127,12 +137,13 @@ Quality control checks
       difficulties in calling which droplets contain cells.)
 
 * Create some validation plots of various analyses with and without
-  ``cellbender remove-background``.  One convenient way to do this is in ``scanpy``
-  and storing the raw count matrix and the background-removed count matrix as
+  ``cellbender remove-background``.  One convenient way to do this is in ``scanpy``,
+  storing the raw count matrix and the background-removed count matrix as
   separate `"layers" <https://anndata.readthedocs.io/en/latest/generated/anndata.AnnData.layers.html>`_.
 
-    * UMAPs with and without (on the same set of cell barcodes)
-    * Marker gene dotplots and violin plots (you should see less background)
+    * UMAPs with and without CellBender (on the same set of cell barcodes)
+    * Marker gene dotplots and violin plots before and after CellBender
+      (you should see less background noise)
 
 * Directly subtract the output count matrix from the input count matrix and take a close
   look at what was removed.
@@ -167,11 +178,11 @@ Considerations for setting parameters:
 * ``--cuda``: Include this flag.  The code is meant to be run on a GPU.
 * ``--learning-rate``: The default value of 1e-4 is typically fine, but this value can be
   adjusted if problems arise during quality-control checks of the learning curve (as above).
-* ``--fpr``: A value of 0 is the default, and represents the most conservative
-  setting, which is appropriate for jointly analyzing many samples in a cohort.
+* ``--fpr``: A value of 0.01 is the default, and represents a fairly conservative
+  setting, which is appropriate for most analyses.
   In order to examine a single dataset at a time and remove more noise (at the
   expense of some signal), choose larger values such as 0.05 or 0.1. Bear in mind
-  that the value 1 represents removal of every count in the dataset, signal and
+  that the value 1 represents removal of (nearly) every count in the dataset, signal and
   noise.  You can generate multiple output count matrices in the same run by
   choosing several values: 0.0 0.01 0.05 0.1
 

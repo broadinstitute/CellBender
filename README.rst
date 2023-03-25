@@ -21,49 +21,39 @@ The current release contains the following modules. More modules will be added i
   added in the future. A quick start tutorial can be found
   `here <https://cellbender.readthedocs.io/en/latest/getting_started/remove_background/index.html>`_.
 
-Please refer to the `documentation <https://cellbender.readthedocs.io/en/latest/>`_ for a quick start tutorial on using CellBender.
+Please refer to `the documentation <https://cellbender.readthedocs.io/en/latest/>`_ for a quick start tutorial on using CellBender.
 
 Installation and Usage
 ----------------------
 
-Manual installation
-~~~~~~~~~~~~~~~~~~~
+CellBender can be installed via
 
-The recommended installation is as follows. Create a conda environment and activate it:
+.. code-block:: console
 
-.. code-block:: bash
+  $ pip install cellbender
 
-   $ conda create -n cellbender python=3.7
-   $ source activate cellbender
+CellBender is run as a command-line tool, as in
 
-Install the `pytables <https://www.pytables.org>`_ module:
+.. code-block:: console
 
-.. code-block:: bash
+  (cellbender) $ cellbender remove-background
+        --cuda
+        --input my_raw_count_matrix_file.h5
+        --output my_cellbender_output_file.h5
 
-   (cellbender) $ conda install -c anaconda pytables
+See `the documentation <https://cellbender.readthedocs.io/en/latest/usage/index.html>`_
+for details.
 
-Install `pytorch <https://pytorch.org>`_ (shown below for CPU; if you have a CUDA-ready GPU, please skip
-this part and follow `these <https://pytorch.org/get-started/locally/>`_ instructions instead):
-
-.. code-block:: bash
-
-   (cellbender) $ conda install pytorch torchvision -c pytorch
-
-Clone this repository and install CellBender:
-
-.. code-block:: bash
-
-   (cellbender) $ pip install -e CellBender
 
 Using The Official Docker Image
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-------------------------------
 
 A GPU-enabled docker image is available from the Google Container Registry (GCR) as:
 
 ``us.gcr.io/broad-dsde-methods/cellbender:latest``
 
 Terra Users
-~~~~~~~~~~~
+-----------
 
 For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/cellbender/remove-background/>`_
 is available as:
@@ -71,12 +61,67 @@ is available as:
 ``cellbender/remove-background``
 
 
+Advanced installation
+---------------------
+
+From source for development
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Create a conda environment and activate it:
+
+.. code-block:: console
+
+  $ conda create -n cellbender python=3.7
+  $ conda activate cellbender
+
+Install the `pytables <https://www.pytables.org>`_ module:
+
+.. code-block:: console
+
+  (cellbender) $ conda install -c anaconda pytables
+
+Install `pytorch <https://pytorch.org>`_ via
+`these instructions <https://pytorch.org/get-started/locally/>`_, for example:
+
+.. code-block:: console
+
+   (cellbender) $ pip install torch
+
+and ensure that your installation is appropriate for your hardware (i.e. that
+the relevant CUDA drivers get installed and that ``torch.cuda.is_available()``
+returns ``True`` if you have a GPU available.
+
+Clone this repository and install CellBender (in editable ``-e`` mode):
+
+.. code-block:: console
+
+   (cellbender) $ git clone https://github.com/broadinstitute/CellBender.git
+   (cellbender) $ pip install -e CellBender
+
+
+From a specific commit
+~~~~~~~~~~~~~~~~~~~~~~
+
+This can be achieved via
+
+.. code-block:: console
+
+   (cellbender) $ pip install --no-cache-dir -U git+https://github.com/broadinstitute/CellBender.git@<SHA>
+
+where ``<SHA>`` must be replaced by any reference to a particular git commit,
+such as a tag, a branch name, or a commit sha.
+
+
 Citing CellBender
 -----------------
 
 If you use CellBender in your research (and we hope you will), please consider
-citing `our paper on bioRxiv <https://doi.org/10.1101/791699>`_.
+citing our paper in Nature Methods:
 
-Stephen J Fleming, John C Marioni, and Mehrtash Babadi. CellBender remove-background:
-a deep generative model for unsupervised removal of background noise from scRNA-seq
-datasets. bioRxiv 791699; doi: `https://doi.org/10.1101/791699 <https://doi.org/10.1101/791699>`_
+Stephen J Fleming, Mark D Chaffin, Alessandro Arduini, Amer-Denis Akkad,
+Eric Banks, John C Marioni, Anthony A Phillipakis, Patrick T Ellinor,
+and Mehrtash Babadi. Unsupervised removal of systematic background noise from
+droplet-based single-cell experiments using CellBender.
+`Nature Methods` (in press), 2023.
+
+See also `our preprint on bioRxiv <https://doi.org/10.1101/791699>`_.

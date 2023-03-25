@@ -3,36 +3,80 @@
 Installation
 ============
 
-Manual Installation
--------------------
+Via pip
+-------
 
-The recommended installation is as follows. Create a conda environment and activate it:
+Python packages can be conveniently installed from the Python Package Index (PyPI)
+using `pip install <https://pip.pypa.io/en/stable/cli/pip_install/>`_.
+CellBender is `available on PyPI <https://pypi.org/project/cellbender/>`_
+and can be installed via
 
 .. code-block:: console
 
-  $ conda create -n CellBender python=3.7
-  $ source activate CellBender
+  $ pip install cellbender
+
+If your machine has a GPU with appropriate drivers installed, it should be
+automatically detected, and the appropriate version of PyTorch with CUDA support
+should automatically be downloaded as a CellBender dependency.
+
+We recommend installing CellBender in its own
+`conda environment <https://docs.conda.io/projects/conda/en/latest/user-guide/concepts/environments.html>`_.
+This allows for easier installation and prevents conflicts with any other python
+packages you may have installed.
+
+.. code-block:: console
+
+  $ conda create -n cellbender python=3.7
+  $ conda activate cellbender
+  (cellbender) $ pip install cellbender
+
+
+Installation from source
+------------------------
+
+Create a conda environment and activate it:
+
+.. code-block:: console
+
+  $ conda create -n cellbender python=3.7
+  $ conda activate cellbender
 
 Install the `pytables <https://www.pytables.org>`_ module:
 
 .. code-block:: console
 
-  (CellBender) $ conda install -c anaconda pytables
+  (cellbender) $ conda install -c anaconda pytables
 
-Install `pytorch <https://pytorch.org>`_ (shown below for CPU; if you have a CUDA-ready GPU, please skip
-this part and follow `these instructions <https://pytorch.org/get-started/locally/>`_ instead):
-
-.. code-block:: console
-
-   (CellBender) $ conda install pytorch torchvision -c pytorch
-
-Clone this repository and install CellBender:
+Install `pytorch <https://pytorch.org>`_ via
+`these instructions <https://pytorch.org/get-started/locally/>`_:
 
 .. code-block:: console
 
-   (CellBender) $ git clone https://github.com/broadinstitute/CellBender.git
-   (CellBender) $ pip install -e CellBender
+   (cellbender) $ pip install torch
 
+and ensure that your installation is appropriate for your hardware (i.e. that
+the relevant CUDA drivers get installed and that ``torch.cuda.is_available()``
+returns ``True`` if you have a GPU available.
+
+Clone this repository and install CellBender (in editable ``-e`` mode):
+
+.. code-block:: console
+
+   (cellbender) $ git clone https://github.com/broadinstitute/CellBender.git
+   (cellbender) $ pip install -e CellBender
+
+
+Install a specific commit directly from GitHub
+----------------------------------------------
+
+This can be achieved via
+
+.. code-block:: console
+
+   (cellbender) $ pip install --no-cache-dir -U git+https://github.com/broadinstitute/CellBender.git@<SHA>
+
+where ``<SHA>`` must be replaced by any reference to a particular git commit,
+such as a tag, a branch name, or a commit sha.
 
 Docker Image
 ------------
