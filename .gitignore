@@ -16,3 +16,4 @@ dist/
 *.h5ad
 *.tsv
 *.csv
+*.npz

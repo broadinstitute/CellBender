@@ -8,9 +8,11 @@ from cellbender.remove_background.downstream import load_anndata_from_input
 dataset_name = "heart10k (CellRanger 3.0.0, v3 Chemistry)"
 dataset_url = "https://cf.10xgenomics.com/samples/cell-exp/3.0.0/heart_10k_v3/heart_10k_v3_raw_feature_bc_matrix.h5"
 dataset_local_filename = "heart10k_raw_feature_bc_matrix.h5"
-expected_cells = 6500
+expected_cells = 7000
+start_of_empties = 10000
 num_cell_barcodes_to_keep = 500
 num_empty_barcodes_to_keep = 50_000
+low_count_threshold = 30
 num_genes_to_keep = 100
 random_seed = 1984
 rng = np.random.RandomState(random_seed)
@@ -47,7 +49,8 @@ adata = adata[:, genes_to_keep_indices].copy()
 umi_per_barcode = np.array(adata.X.sum(axis=1)).squeeze()
 umi_sorted_barcode_indices = np.argsort(umi_per_barcode)[::-1]
 cell_indices = umi_sorted_barcode_indices[:expected_cells]
-empty_indices = umi_sorted_barcode_indices[expected_cells:]
+last_barcode = (umi_per_barcode > low_count_threshold).sum()
+empty_indices = umi_sorted_barcode_indices[start_of_empties:last_barcode]
 
 # putative list of barcodes to keep
 cell_barcodes_to_keep_indices = np.asarray(cell_indices)[
