@@ -1,11 +1,27 @@
 CellBender
 ==========
 
+.. image:: https://img.shields.io/github/license/broadinstitute/CellBender?color=white
+   :target: LICENSE
+   :alt: Documentation Status
+
 .. image:: https://readthedocs.org/projects/cellbender/badge/?version=latest
    :target: https://cellbender.readthedocs.io/en/latest/?badge=latest
    :alt: Documentation Status
 
-.. image:: https://github.com/broadinstitute/CellBender/blob/master/docs/source/_static/design/logo_250_185.png
+.. image:: https://img.shields.io/pypi/v/CellBender.svg
+   :target: https://pypi.org/project/CellBender
+   :alt: Documentation Status
+
+.. image:: https://static.pepy.tech/badge/CellBender
+   :target: https://pepy.tech/project/CellBender
+   :alt: Downloads
+
+.. image:: https://img.shields.io/github/stars/broadinstitute/CellBender?color=yellow&logoColor=yellow)
+   :target: https://github.com/broadinstitute/CellBender/stargazers
+   :alt: Stars
+
+.. image:: docs/source/_static/design/logo_250_185.png
    :alt: CellBender Logo
 
 CellBender is a software package for eliminating technical artifacts from
@@ -54,6 +70,7 @@ A GPU-enabled docker image is available from the Google Container Registry (GCR)
 
 Available image tags track release tags in GitHub, and include ``latest``,
 ``0.1.0``, ``0.2.0``, ``0.2.1``, ``0.2.2``, and ``0.3.0``.
+
 
 WDL Users
 ---------
