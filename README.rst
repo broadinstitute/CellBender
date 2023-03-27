@@ -36,9 +36,9 @@ CellBender is run as a command-line tool, as in
 
 .. code-block:: console
 
-  (cellbender) $ cellbender remove-background
-        --cuda
-        --input my_raw_count_matrix_file.h5
+  (cellbender) $ cellbender remove-background \
+        --cuda \
+        --input my_raw_count_matrix_file.h5 \
         --output my_cellbender_output_file.h5
 
 See `the documentation <https://cellbender.readthedocs.io/en/latest/usage/index.html>`_
@@ -52,13 +52,23 @@ A GPU-enabled docker image is available from the Google Container Registry (GCR)
 
 ``us.gcr.io/broad-dsde-methods/cellbender:latest``
 
-Terra Users
------------
+Available image tags track release tags in GitHub, and include ``latest``,
+``0.1.0``, ``0.2.0``, ``0.2.1``, ``0.2.2``, and ``0.3.0``.
 
-For `Terra <https://app.terra.bio>`_ users, a `workflow <https://portal.firecloud.org/#methods/cellbender/remove-background/>`_
-is available as:
+WDL Users
+---------
 
-``cellbender/remove-background``
+A workflow written in the
+`workflow description language (WDL) <https://github.com/openwdl/wdl>`_
+is available for CellBender remove-background.
+
+For `Terra <https://app.terra.bio>`_ users, a workflow called
+``cellbender/remove-background`` is
+`available from the Broad Methods repository
+<https://portal.firecloud.org/#methods/cellbender/remove-background/>`_.
+
+There is also a `version available on Dockstore
+<https://dockstore.org/workflows/github.com/broadinstitute/CellBender>`_.
 
 
 Advanced installation
