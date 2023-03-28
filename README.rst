@@ -32,12 +32,9 @@ The current release contains the following modules. More modules will be added i
 * ``remove-background``:
 
   This module removes counts due to ambient RNA molecules and random barcode swapping from (raw)
-  UMI-based scRNA-seq count matrices. At the moment, only the count matrices produced by the
-  CellRanger ``count`` pipeline is supported. Support for additional tools and protocols will be
-  added in the future. A quick start tutorial can be found
-  `here <https://cellbender.readthedocs.io/en/latest/getting_started/remove_background/index.html>`_.
+  UMI-based scRNA-seq count matrices.  Also works for snRNA-seq and CITE-seq.
 
-Please refer to `the documentation <https://cellbender.readthedocs.io/en/latest/>`_ for a quick start tutorial on using CellBender.
+Please refer to `the documentation <https://cellbender.readthedocs.io/en/latest/>`_ for a quick start tutorial.
 
 Installation and Usage
 ----------------------
@@ -47,6 +44,9 @@ CellBender can be installed via
 .. code-block:: console
 
   $ pip install cellbender
+
+(and we recommend installing in its own ``conda`` environment to prevent
+conflicts with other software).
 
 CellBender is run as a command-line tool, as in
 
