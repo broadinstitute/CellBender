@@ -1,0 +1,32 @@
+# Run cellbender's tests
+
+name: 'pytest'
+
+on: pull_request
+
+jobs:
+  build:
+
+    runs-on: 'ubuntu-latest'
+    strategy:
+      matrix:
+        python-version: ['3.7']
+
+    steps:
+    - name: 'Checkout repo'
+      uses: actions/checkout@v3
+
+    - name: 'Set up Python ${{ matrix.python-version }}'
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: 'Install package including pytest'
+      run: pip install .[dev]
+
+    - name: 'Print package versions'
+      run: pip list
+
+    - name: 'Test with pytest'
+      run: pytest -v

@@ -1,0 +1,35 @@
+# Package for PyPI
+
+name: 'packaging'
+
+on: pull_request
+
+jobs:
+  build:
+
+    runs-on: 'ubuntu-latest'
+    strategy:
+      matrix:
+        python-version: ['3.7']
+
+    steps:
+    - name: 'Checkout repo'
+      uses: actions/checkout@v3
+
+    - name: 'Set up Python ${{ matrix.python-version }}'
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: 'Install packaging software'
+      run: pip install --upgrade setuptools build twine
+
+    - name: 'Print package versions'
+      run: pip list
+
+    - name: 'Package code using build'
+      run: python -m build
+
+    - name: 'Check package using twine'
+      run: python -m twine check dist/*
