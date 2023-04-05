@@ -154,7 +154,6 @@ def run_training(model: RemoveBackgroundPyroModel,
     train_elbo = []
     test_elbo = []
     epoch_checkpoint_freq = 1000  # a large number... it will be recalculated
-    succeeded = True
 
     # Run training loop.  Use try to allow for keyboard interrupt.
     try:
@@ -209,26 +208,19 @@ def run_training(model: RemoveBackgroundPyroModel,
                     model.loss['test']['elbo'].append(-total_epoch_loss_test)
                     logger.info("[epoch %03d] average test loss: %.4f"
                                 % (epoch, total_epoch_loss_test))
-                    if epoch_elbo_fail_fraction is not None and len(test_elbo) > 1 and \
-                            test_elbo[-1] < test_elbo[-2] and \
-                                (test_elbo[-2] - test_elbo[-1]) / (test_elbo[-2] - train_elbo[0]) > epoch_elbo_fail_fraction:
-                        logging.info(
-                            "Training failed because this test loss (%.4f) exceeds previous test loss(%.4f) by >= %.2f%%, "
-                            "relative to initial train loss %.4f",
-                            test_elbo[-1], test_elbo[-2], 100 * epoch_elbo_fail_fraction, train_elbo[0])
-                        succeeded = False
-                        break
 
-            # Check on whether ELBO has spiked beyond specified conditions.
-            if ((epoch_elbo_fail_fraction is not None)
-                    and (len(model.loss['train']['elbo']) > 1)
-                    and (-model.loss['train']['elbo'][-1]
-                         >= -model.loss['train']['elbo'][-2] * (1 + epoch_elbo_fail_fraction))):
-                raise ElboException(f'Training failed because train loss '
-                                    f'({-model.loss["train"]["elbo"][-1]:.4f}) '
-                                    f'exceeds previous train loss '
-                                    f'({-model.loss["train"]["elbo"][-2]:.4f}) by >= '
-                                    f'{100 * epoch_elbo_fail_fraction:.1f}%')
+            # Check whether ELBO has spiked beyond specified conditions.
+            if epoch_elbo_fail_fraction is not None:
+                current_diff = max(0, test_elbo[-2] - test_elbo[-1])
+                overall_diff = test_elbo[-2] - test_elbo[0]
+                fractional_spike = current_diff / overall_diff
+                if fractional_spike > epoch_elbo_fail_fraction:
+                    raise ElboException(
+                        f'Training failed because test loss moved {current_diff:.2f} '
+                        f'in the wrong direction, and that is {fractional_spike:.2f} '
+                        f'of the total test ELBO change, > '
+                        f'specified epoch_elbo_fail_fraction {epoch_elbo_fail_fraction:.2f}%'
+                    )
 
             # Checkpoint throughout and after final epoch.
             if ((ckpt_tarball_name != 'none')
@@ -242,15 +234,20 @@ def run_training(model: RemoveBackgroundPyroModel,
                                 train_loader=train_loader,
                                 test_loader=test_loader)
 
-        if succeeded and final_elbo_fail_fraction is not None and len(test_elbo) > 1:
+        # Check on the final test ELBO to see if it meets criteria.
+        if final_elbo_fail_fraction is not None:
             best_test_elbo = max(test_elbo)
-            if test_elbo[-1] < best_test_elbo and \
-                   (best_test_elbo - test_elbo[-1])/(best_test_elbo - train_elbo[0]) > final_elbo_fail_fraction:
-                logging.info(
-                    "Training failed because final test loss (%.4f) exceeds "
-                    "best test loss(%.4f) by >= %.2f%%, relative to initial train loss %.4f",
-                    test_elbo[-1], best_test_elbo, 100*final_elbo_fail_fraction, train_elbo[0])
-                succeeded = False
+            if test_elbo[-1] < best_test_elbo:
+                final_best_diff = best_test_elbo - test_elbo[-1]
+                initial_best_diff = best_test_elbo - test_elbo[0]
+                if (final_best_diff / initial_best_diff) > final_elbo_fail_fraction:
+                    raise ElboException(
+                        f'Training failed because final test loss {test_elbo[-1]:.2f} '
+                        f'is not sufficiently close to best test loss {best_test_elbo:.2f}, '
+                        f'compared to the initial test loss {test_elbo[0]:.2f}. '
+                        f'Fractional difference is {final_best_diff / initial_best_diff:.2f}, '
+                        f'which is > specified final_elbo_fail_fraction {final_elbo_fail_fraction:.2f}'
+                    )
 
     # Exception allows program to continue after ending inference prematurely.
     except KeyboardInterrupt:

@@ -816,6 +816,8 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         except ElboException:
             # TODO: ensure this works: trigger a new run with half the learning rate
 
+            logger.warning(traceback.format_exc())
+
             # Keep track of number of failed attempts.
             if not hasattr(args, 'num_failed_attempts'):
                 args.num_failed_attempts = 1

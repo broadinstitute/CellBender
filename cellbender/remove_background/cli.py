@@ -140,10 +140,12 @@ class CLI(AbstractCLI):
 
         # Automatic training failures and restarts.
         assert args.num_training_tries > 0, "--num-training-tries must be > 0"
-        assert (args.epoch_elbo_fail_fraction is None) or (args.epoch_elbo_fail_fraction > 0.), \
-            "--epoch-elbo-fail-fraction must be > 0"
-        assert (args.final_elbo_fail_fraction is None) or (args.final_elbo_fail_fraction > 0.), \
-            "--final-elbo-fail-fraction must be > 0"
+        if args.epoch_elbo_fail_fraction is not None:
+            assert (args.epoch_elbo_fail_fraction > 0.) and (args.epoch_elbo_fail_fraction < 1.), \
+                "--epoch-elbo-fail-fraction must be in (0, 1)"
+        if args.final_elbo_fail_fraction is not None:
+            assert (args.final_elbo_fail_fraction > 0.) and (args.final_elbo_fail_fraction < 1.), \
+                "--final-elbo-fail-fraction must be in (0, 1)"
 
         # Ensure timing of checkpoints is within bounds.
         assert args.checkpoint_min > 0, "--checkpoint-min must be > 0"
