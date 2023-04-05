@@ -3,7 +3,7 @@ CellBender
 
 .. image:: https://img.shields.io/github/license/broadinstitute/CellBender?color=white
    :target: LICENSE
-   :alt: Documentation Status
+   :alt: License
 
 .. image:: https://readthedocs.org/projects/cellbender/badge/?version=latest
    :target: https://cellbender.readthedocs.io/en/latest/?badge=latest
@@ -11,9 +11,9 @@ CellBender
 
 .. image:: https://img.shields.io/pypi/v/CellBender.svg
    :target: https://pypi.org/project/CellBender
-   :alt: Documentation Status
+   :alt: PyPI
 
-.. image:: https://static.pepy.tech/badge/CellBender
+.. image:: https://static.pepy.tech/personalized-badge/cellbender?period=total&units=international_system&left_color=grey&right_color=blue&left_text=downloads%20since%202023
    :target: https://pepy.tech/project/CellBender
    :alt: Downloads
 
