@@ -30,6 +30,21 @@ class IngestedData(dict):
     def __init__(self, matrix, barcodes,
                  gene_names, gene_ids, feature_types, genomes,
                  **kwargs):
+        # Fill in some fields no matter the input source (for loading in scanpy)
+        blank_array = np.array(['NA'] * len(gene_names))
+        if genomes is None:
+            genomes = blank_array
+        if gene_ids is None:
+            gene_ids = blank_array
+        if feature_types is None:
+            feature_types = blank_array
+
+        # Warn if file looks filtered.
+        if len(barcodes) < consts.MINIMUM_BARCODES_H5AD:
+            logger.warning(f'WARNING: Only {len(barcodes)} barcodes in the input file. '
+                           f'Ensure this is a raw (unfiltered) file with all barcodes, '
+                           f'including the empty droplets.')
+
         # Required values, some of which can be None
         super().__init__([('matrix', matrix),
                           ('barcodes', barcodes),
@@ -448,7 +463,7 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
             'gene_names': gene_names,
             'feature_types': feature_types,
             'gene_ids': gene_ids,
-            'genomes': None,  # TODO: check if this info is available in either version
+            'genomes': None,
             'barcodes': barcodes,
             'cellranger_version': cellranger_version}
 
