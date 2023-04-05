@@ -1,1 +1,6 @@
 **/.git
+examples
+docs
+dist
+cellbender.egg-info
+.pytest_cache
