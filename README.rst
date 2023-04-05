@@ -57,7 +57,7 @@ CellBender is run as a command-line tool, as in
         --input my_raw_count_matrix_file.h5 \
         --output my_cellbender_output_file.h5
 
-See `the documentation <https://cellbender.readthedocs.io/en/latest/usage/index.html>`_
+See `the usage documentation <https://cellbender.readthedocs.io/en/latest/usage/index.html>`_
 for details.
 
 

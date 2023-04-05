@@ -1,3 +1,5 @@
 include README.rst
 include VERSION
 include LICENSE
+include REQUIREMENTS.txt
+include REQUIREMENTS-RTD.txt

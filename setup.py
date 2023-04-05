@@ -2,6 +2,7 @@
 
 import os
 import setuptools
+from typing import List
 
 
 def readme() -> str:
@@ -9,17 +10,21 @@ def readme() -> str:
         return f.read()
 
 
-def get_requirements() -> str:
-    filebase = os.path.dirname(__file__)
+def _readlines(filename, filebase=''):
+    with open(os.path.join(filebase, filename)) as f:
+        lines = f.readlines()
+    return lines
 
-    def _readlines(filename):
-        with open(os.path.join(filebase, filename)) as f:
-            lines = f.readlines()
-        return lines
 
+def get_requirements() -> List[str]:
     requirements = _readlines('REQUIREMENTS.txt')
     if 'READTHEDOCS' in os.environ:
-        requirements.extend(_readlines('REQUIREMENTS-RTD.txt'))
+        requirements.extend(get_rtd_requirements())
+    return requirements
+
+
+def get_rtd_requirements() -> List[str]:
+    requirements = _readlines('REQUIREMENTS-RTD.txt')
     return requirements
 
 
@@ -36,6 +41,7 @@ setuptools.setup(
     description='A software package for eliminating technical artifacts from '
                 'high-throughput single-cell RNA sequencing (scRNA-seq) data',
     long_description=readme(),
+    long_description_content_type='text/x-rst',
     classifiers=[
       'Development Status :: 4 - Beta',
       'Intended Audience :: Science/Research',
@@ -49,7 +55,10 @@ setuptools.setup(
     license='BSD (3-Clause)',
     packages=setuptools.find_packages(),
     install_requires=get_requirements(),
-    tests_require=['pytest'],
+    extras_require={
+        "dev": ["pytest"],
+        "docs": get_rtd_requirements(),
+    },
     entry_points={
         'console_scripts': ['cellbender=cellbender.base_cli:main'],
     },
