@@ -154,6 +154,7 @@ def run_training(model: RemoveBackgroundPyroModel,
     train_elbo = []
     test_elbo = []
     epoch_checkpoint_freq = 1000  # a large number... it will be recalculated
+    succeeded = True
 
     # Run training loop.  Use try to allow for keyboard interrupt.
     try:
@@ -208,6 +209,15 @@ def run_training(model: RemoveBackgroundPyroModel,
                     model.loss['test']['elbo'].append(-total_epoch_loss_test)
                     logger.info("[epoch %03d] average test loss: %.4f"
                                 % (epoch, total_epoch_loss_test))
+                    if epoch_elbo_fail_fraction is not None and len(test_elbo) > 1 and \
+                            test_elbo[-1] < test_elbo[-2] and \
+                                (test_elbo[-2] - test_elbo[-1]) / (test_elbo[-2] - train_elbo[0]) > epoch_elbo_fail_fraction:
+                        logging.info(
+                            "Training failed because this test loss (%.4f) exceeds previous test loss(%.4f) by >= %.2f%%, "
+                            "relative to initial train loss %.4f",
+                            test_elbo[-1], test_elbo[-2], 100 * epoch_elbo_fail_fraction, train_elbo[0])
+                        succeeded = False
+                        break
 
             # Check on whether ELBO has spiked beyond specified conditions.
             if ((epoch_elbo_fail_fraction is not None)
@@ -220,10 +230,10 @@ def run_training(model: RemoveBackgroundPyroModel,
                                     f'({-model.loss["train"]["elbo"][-2]:.4f}) by >= '
                                     f'{100 * epoch_elbo_fail_fraction:.1f}%')
 
-            # Checkpoint after final epoch.
+            # Checkpoint throughout and after final epoch.
             if ((ckpt_tarball_name != 'none')
-                and (((checkpoint_freq > 0) and (epoch % epoch_checkpoint_freq == 0))
-                     or (epoch == epochs))):  # checkpoint at final epoch
+                    and (((checkpoint_freq > 0) and (epoch % epoch_checkpoint_freq == 0))
+                         or (epoch == epochs))):  # checkpoint at final epoch
                 save_checkpoint(filebase=output_filename,
                                 tarball_name=ckpt_tarball_name,
                                 args=args,
@@ -231,6 +241,16 @@ def run_training(model: RemoveBackgroundPyroModel,
                                 scheduler=svi.optim,
                                 train_loader=train_loader,
                                 test_loader=test_loader)
+
+        if succeeded and final_elbo_fail_fraction is not None and len(test_elbo) > 1:
+            best_test_elbo = max(test_elbo)
+            if test_elbo[-1] < best_test_elbo and \
+                   (best_test_elbo - test_elbo[-1])/(best_test_elbo - train_elbo[0]) > final_elbo_fail_fraction:
+                logging.info(
+                    "Training failed because final test loss (%.4f) exceeds "
+                    "best test loss(%.4f) by >= %.2f%%, relative to initial train loss %.4f",
+                    test_elbo[-1], best_test_elbo, 100*final_elbo_fail_fraction, train_elbo[0])
+                succeeded = False
 
     # Exception allows program to continue after ending inference prematurely.
     except KeyboardInterrupt:
