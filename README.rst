@@ -13,7 +13,7 @@ CellBender
    :target: https://pypi.org/project/CellBender
    :alt: PyPI
 
-.. image:: https://static.pepy.tech/personalized-badge/cellbender?period=total&units=international_system&left_color=grey&right_color=blue&left_text=downloads%20since%202023
+.. image:: https://static.pepy.tech/personalized-badge/cellbender?period=total&units=international_system&left_color=grey&right_color=blue&left_text=pypi%20downloads
    :target: https://pepy.tech/project/CellBender
    :alt: Downloads
 
