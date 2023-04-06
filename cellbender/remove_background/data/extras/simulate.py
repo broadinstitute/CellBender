@@ -815,13 +815,13 @@ def get_dataset_dict_as_anndata(
 
     # counts
     if 'counts_true' in d.keys() and 'counts_bkg' in d.keys():
-        adata = anndata.AnnData(X=d['counts_true'] + d['counts_bkg'],
+        adata = anndata.AnnData(X=(d['counts_true'] + d['counts_bkg']).astype(np.float32),
                                 obs={'barcode': d.pop('barcodes')},
                                 var={'gene': d.pop('gene_names')})
         adata.layers['counts_true'] = d.pop('counts_true')
         adata.layers['counts'] = adata.layers['counts_true'] + d.pop('counts_bkg')
     elif 'matrix' in d.keys():
-        adata = anndata.AnnData(X=d.pop('matrix'),
+        adata = anndata.AnnData(X=d.pop('matrix').astype(np.float32),
                                 obs={'barcode': d.pop('barcodes')},
                                 var={'gene': d.pop('gene_names')})
 

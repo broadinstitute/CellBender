@@ -983,7 +983,7 @@ class PRq(PosteriorRegularization):
             log_pdf_noise_counts_BC: torch.Tensor,
             noise_count_BC: torch.Tensor,
             log_mu_plus_alpha_sigma_B: torch.Tensor) -> torch.Tensor:
-        """Returns log constraint violation for the regularized posterior of p(x), which
+        r"""Returns log constraint violation for the regularized posterior of p(x), which
         here is p(\omega) = p(x) e^{\beta x}, and we want
         E[\omega] = E[x] + \alpha * Std[x] = log_mu_plus_alpha_sigma_B.exp()
 
@@ -1155,7 +1155,7 @@ class PRq(PosteriorRegularization):
 
 
 class PRmu(PosteriorRegularization):
-    """Approximate noise mean targeting:
+    r"""Approximate noise mean targeting:
 
     Overall (default):
         E_reg[\sum_{n} \sum_{g} noise_counts_{ng}] =

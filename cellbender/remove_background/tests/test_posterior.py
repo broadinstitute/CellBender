@@ -12,6 +12,7 @@ from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, 
     log_prob_sparse_to_dense, todense_fill
 from cellbender.remove_background.estimation import Mean
 
+import warnings
 from typing import Dict, Union
 
 from .conftest import sparse_matrix_equal, simulated_dataset, tensors_equal
@@ -99,15 +100,19 @@ def test_PRq(log_prob_coo, alpha, n_chunks, cuda):
     truth_means_after_regularization = input_means + alpha * input_std
     print(truth_means_after_regularization)
     print('and the log')
-    print(np.log(truth_means_after_regularization))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="divide by zero encountered in log")
+        print(np.log(truth_means_after_regularization))
 
     print('testing compute_log_target_dict()')
     target_dict = PRq._compute_log_target_dict(noise_count_posterior_coo=log_prob_coo['coo'],
                                                alpha=alpha)
     print(target_dict)
     for m in target_dict.keys():
-        np.testing.assert_almost_equal(target_dict[m],
-                                       np.log(truth_means_after_regularization[m]))
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="divide by zero encountered in log")
+            np.testing.assert_almost_equal(target_dict[m],
+                                           np.log(truth_means_after_regularization[m]))
 
     print('targets are correct\n\n')
 

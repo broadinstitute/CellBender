@@ -1326,7 +1326,7 @@ def compare_latents(adata, input_layer_key='raw'):
         plt.tight_layout()
         plt.show()
 
-    display(Markdown('### Droplet efficiency $\epsilon$'))
+    display(Markdown(r'### Droplet efficiency $\epsilon$'))
     if truth_exists:
         display(Markdown('Comparison with the truth.'))
 
@@ -1342,7 +1342,7 @@ def compare_latents(adata, input_layer_key='raw'):
                  label='truth', alpha=0.5)
     plt.plot(adata.obs['droplet_efficiency'].values[order],
              'r', label='inferred', alpha=0.5)
-    plt.ylabel('$\epsilon$', fontsize=18, color='r')
+    plt.ylabel(r'$\epsilon$', fontsize=18, color='r')
     plt.legend()
     plt.show()
 
@@ -1373,7 +1373,7 @@ def compare_latents(adata, input_layer_key='raw'):
     plt.step(xx[:-1], yy / np.sum(yy * delta), alpha=0.5, label='posterior: empties')
 
     plt.ylabel('Probability density')
-    plt.xlabel('$\epsilon$', fontsize=18)
+    plt.xlabel(r'$\epsilon$', fontsize=18)
     plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
     plt.show()
 
@@ -1396,7 +1396,7 @@ def compare_latents(adata, input_layer_key='raw'):
     plt.legend()
     plt.show()
 
-    display(Markdown('### The combination $d \epsilon$'))
+    display(Markdown(r'### The combination $d \epsilon$'))
     display(Markdown('It is easier for the model to nail this down, since there '
                      'is less degeneracy.'))
 
@@ -1413,11 +1413,11 @@ def compare_latents(adata, input_layer_key='raw'):
     plt.semilogy((adata.obs['cell_size'].values[cells][cell_order]
                  * adata.obs['droplet_efficiency'].values[cells][cell_order]),
                  'r', label='inferred', alpha=0.5)
-    plt.ylabel('$d \epsilon$', fontsize=18, color='r')
+    plt.ylabel(r'$d \epsilon$', fontsize=18, color='r')
     plt.legend()
     plt.show()
 
-    display(Markdown('### Joint distributions of $d$ and $\epsilon$'))
+    display(Markdown(r'### Joint distributions of $d$ and $\epsilon$'))
     if truth_exists:
         display(Markdown('In true cells'))
     else:
@@ -1431,7 +1431,7 @@ def compare_latents(adata, input_layer_key='raw'):
                          adata.obs['truth_cell_size'][ctype],
                          '.', alpha=0.5)
         plt.ylabel('$d$', fontsize=18)
-        plt.xlabel('$\epsilon$', fontsize=18)
+        plt.xlabel(r'$\epsilon$', fontsize=18)
         plt.title('Truth')
         plt.subplot(1, 2, 2)
         for c in sorted(adata.obs['truth_cell_label'][cells].unique()):
@@ -1446,7 +1446,7 @@ def compare_latents(adata, input_layer_key='raw'):
                      adata.obs['cell_size'][cells],
                      'k.', ms=1, alpha=0.5)
     plt.ylabel('$d$', fontsize=18)
-    plt.xlabel('$\epsilon$', fontsize=18)
+    plt.xlabel(r'$\epsilon$', fontsize=18)
     plt.title('Inferred')
     plt.tight_layout()
     plt.show()
