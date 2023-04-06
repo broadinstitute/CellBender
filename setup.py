@@ -56,7 +56,7 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     install_requires=get_requirements(),
     extras_require={
-        "dev": ["pytest"],
+        "dev": ["pytest", "scikit-learn"],
         "docs": get_rtd_requirements(),
     },
     entry_points={

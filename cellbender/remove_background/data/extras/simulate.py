@@ -14,6 +14,7 @@ import random
 import matplotlib.pyplot as plt
 from typing import List, Union, Dict, Optional
 
+
 if torch.cuda.is_available():
     USE_CUDA = True
     DEVICE = 'cuda'
