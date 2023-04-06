@@ -17,14 +17,14 @@ def _readlines(filename, filebase=''):
 
 
 def get_requirements() -> List[str]:
-    requirements = _readlines('REQUIREMENTS.txt')
+    requirements = _readlines('requirements.txt')
     if 'READTHEDOCS' in os.environ:
         requirements.extend(get_rtd_requirements())
     return requirements
 
 
 def get_rtd_requirements() -> List[str]:
-    requirements = _readlines('REQUIREMENTS-RTD.txt')
+    requirements = _readlines('requirements-rtd.txt')
     return requirements
 
 
