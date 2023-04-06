@@ -708,7 +708,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
 
         # Load the dataset into DataLoaders.
         frac = args.training_fraction  # Fraction of barcodes to use for training
-        batch_size = int(min(300, frac * dataset_obj.analyzed_barcode_inds.size / 2))
+        batch_size = int(min(consts.MAX_BATCH_SIZE, frac * dataset_obj.analyzed_barcode_inds.size / 2))
 
         # pretrain_loader = DataLoader(dataset=count_matrix[np.array(count_matrix.sum(axis=1)).squeeze() >
         #                                                   np.exp(dataset_obj.priors['log_counts_crossover']), :],

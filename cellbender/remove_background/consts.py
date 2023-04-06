@@ -110,3 +110,6 @@ CHECKPOINT_FILE_NAME = 'ckpt.tar.gz'
 
 # Whether to create an extended report (for development purposes).
 EXTENDED_REPORT = False
+
+# Maximum batch size
+MAX_BATCH_SIZE = 256
