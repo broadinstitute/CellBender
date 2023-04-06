@@ -113,3 +113,4 @@ EXTENDED_REPORT = False
 
 # Maximum batch size
 MAX_BATCH_SIZE = 256
+SMALLEST_ALLOWED_BATCH = 4  # BatchNorm chokes if there is only 1 cell in last batch

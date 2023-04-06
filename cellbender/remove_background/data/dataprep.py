@@ -134,7 +134,8 @@ class DataLoader:
         return self
 
     def __next__(self):
-        if self.ptr == self.ind_list.size:
+        # Skip last batch if the size is < smallest allowed batch
+        if (self.ind_list.size - self.ptr) < consts.SMALLEST_ALLOWED_BATCH:
             self._reset()
             raise StopIteration()
 
