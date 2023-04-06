@@ -2,21 +2,15 @@
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.stats import gaussian_kde
 import torch
 
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.io import load_data
-from cellbender.remove_background.gmm import GMM
 from cellbender.remove_background.data.priors import get_priors
 
-from typing import Dict, List, Tuple, Optional, Iterable, Callable
+from typing import Dict, List, Optional, Iterable, Callable
 import logging
-
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt  # This needs to be after matplotlib.use('Agg')
 
 
 logger = logging.getLogger('cellbender')

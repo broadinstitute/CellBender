@@ -3,14 +3,11 @@
 import pytest
 import scipy.sparse as sp
 import numpy as np
-import torch
 
 from cellbender.remove_background.data.dataset import \
     _overwrite_matrix_with_columns_from_another, _csr_set_rows_to_zero
-import cellbender.remove_background.consts as consts
-from cellbender.remove_background.gmm import GMM
 
-from .conftest import sparse_matrix_equal, USE_CUDA
+from .conftest import sparse_matrix_equal
 
 
 @pytest.mark.parametrize('mat1, mat2, col_inds',
@@ -84,26 +81,6 @@ def test_csr_set_rows_to_zero(mat: sp.csr_matrix, row_inds: np.ndarray):
 
     # specified rows should be all zero
     assert out[row_inds, :].sum() == 0
-
-
-@pytest.mark.parametrize('cuda',
-                         [False,
-                          pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA,
-                                       reason='requires CUDA'))],
-                         ids=lambda b: 'cuda' if b else 'cpu')
-def test_gmm(cuda):
-    """Dummy data no error; and also specific test cases"""
-
-    counts = np.concatenate((np.random.rand(1000) + 2, 2 * np.random.rand(100) + 4))
-
-    # Fit a Gaussian mixture model to the counts.
-    gmm = GMM(torch.tensor(counts).float().to('cuda' if cuda else 'cpu'),
-              n_components=consts.GMM_COMPONENTS,
-              alpha_prior=consts.GMM_ALPHA_PRIOR,
-              use_cuda=cuda,
-              verbose=False)
-    gmm.train(epochs=consts.GMM_EPOCHS)
-    map_est = gmm.map_estimate()
 
 
 @pytest.mark.skip
