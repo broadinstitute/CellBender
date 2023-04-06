@@ -34,6 +34,7 @@ run_notebook_str = lambda file: \
 to_html_str = lambda file, output: \
     f'jupyter nbconvert ' \
     f'--to html ' \
+    f'--no-input' \
     f'{file}'
 
 
@@ -615,6 +616,7 @@ def plot_learning_curve(adata):
         _mkplot()
         plt.subplot(1, 2, 2)
         _mkplot()
+        plt.title('Learning curve (zoomed in)')
         low = np.percentile(adata.uns['learning_curve_train_elbo'], q=10)
         if (len(adata.uns['learning_curve_train_elbo']) > 0) \
                 and (len(adata.uns['learning_curve_test_elbo']) > 0):
