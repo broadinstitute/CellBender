@@ -34,7 +34,7 @@ run_notebook_str = lambda file: \
 to_html_str = lambda file, output: \
     f'jupyter nbconvert ' \
     f'--to html ' \
-    f'--no-input' \
+    f'--no-input ' \
     f'{file}'
 
 
