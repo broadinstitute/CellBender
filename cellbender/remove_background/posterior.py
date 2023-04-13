@@ -101,7 +101,7 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
     )
     ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
                                           filebase=args.checkpoint_filename,
-                                          to_load='posterior')
+                                          to_load=['posterior'])
     if os.path.exists(ckpt_posterior.get('posterior_file', 'does_not_exist')):
         # Load posterior if it was saved in the checkpoint.
         posterior.load(file=ckpt_posterior['posterior_file'])
