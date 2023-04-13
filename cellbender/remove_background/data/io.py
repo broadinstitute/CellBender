@@ -71,7 +71,7 @@ def write_matrix_to_cellranger_h5(
         output_file: str,
         gene_names: np.ndarray,
         barcodes: np.ndarray,
-        count_matrix: sp.csc.csc_matrix,
+        count_matrix: sp.csc_matrix,
         feature_types: Optional[np.ndarray] = None,
         gene_ids: Optional[np.ndarray] = None,
         genomes: Optional[np.ndarray] = None,
@@ -233,7 +233,7 @@ def unravel_dict(pref: str, d: Dict) -> Dict:
 
 
 def load_data(input_file: str)\
-        -> Dict[str, Union[sp.csr.csr_matrix, List[np.ndarray], np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, List[np.ndarray], np.ndarray]]:
     """Load a dataset into the SingleCellRNACountsDataset object from
     the self.input_file"""
 
@@ -344,7 +344,7 @@ def detect_cellranger_version_h5(filename: str) -> int:
 
 
 def get_matrix_from_cellranger_mtx(filedir: str) \
-        -> Dict[str, Union[sp.csr.csr_matrix, List[np.ndarray], np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, List[np.ndarray], np.ndarray]]:
     """Load a count matrix from an mtx directory from CellRanger's output.
 
     For CellRanger v2:
@@ -469,7 +469,7 @@ def get_matrix_from_cellranger_mtx(filedir: str) \
 
 
 def get_matrix_from_cellranger_h5(filename: str) \
-        -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, np.ndarray]]:
     """Load a count matrix from an h5 file from CellRanger's output.
 
     The file needs to be a _raw_gene_bc_matrices_h5.h5 file.  This function
@@ -612,7 +612,7 @@ def get_matrix_from_cellranger_h5(filename: str) \
 
 
 def get_matrix_from_dropseq_dge(filename: str) \
-        -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, np.ndarray]]:
     """Load a count matrix from a DropSeq DGE matrix file.
 
     The file needs to be a gzipped text file in DGE format.  This function
@@ -693,7 +693,7 @@ def get_matrix_from_dropseq_dge(filename: str) \
 
 
 def get_matrix_from_bd_rhapsody(filename: str) \
-        -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, np.ndarray]]:
     """Load a count matrix from a BD Rhapsody MolsPerCell.csv file.
 
     The file needs to be in MolsPerCell_Unfiltered format, which is comma
@@ -775,7 +775,7 @@ def get_matrix_from_bd_rhapsody(filename: str) \
 
 
 def get_matrix_from_npz(filename: str) \
-        -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, np.ndarray]]:
     """Load a count matrix from a sparse NPZ file, accompanied by barcode and
     gene NPY files.
     NOTE: This format is one output of the Optimus pipeline. It loads much
@@ -827,7 +827,7 @@ def get_matrix_from_npz(filename: str) \
 
 
 def get_matrix_from_anndata(filename: str) \
-        -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, np.ndarray]]:
     """Load a count matrix from an h5ad AnnData file.
     The file needs to contain raw counts for all measured barcodes in the
     `.X` attribute or a `.layer[{'counts', 'spliced'}]` attribute.  This function
@@ -871,7 +871,7 @@ def get_matrix_from_anndata(filename: str) \
 
 
 def get_matrix_from_loom(filename: str) \
-        -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+        -> Dict[str, Union[sp.csr_matrix, np.ndarray]]:
     """Load a count matrix from a loom file.
     The file needs to contain raw counts for all measured barcodes in the
     layer '', as in
@@ -915,7 +915,7 @@ def get_matrix_from_loom(filename: str) \
     return _dict_from_anndata(adata)
 
 
-def _dict_from_anndata(adata: anndata.AnnData) -> Dict[str, Union[sp.csr.csr_matrix, np.ndarray]]:
+def _dict_from_anndata(adata: anndata.AnnData) -> Dict[str, Union[sp.csr_matrix, np.ndarray]]:
     """Extract relevant information from AnnData and format it as a dict
 
     Args:
