@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from torch.distributions import constraints
 import pyro
+import pyro.optim as optim
 
 import cellbender
 from cellbender.remove_background.checkpoint import make_tarball, unpack_tarball, \
@@ -260,7 +261,7 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
     initial_model = PyroModel(dim=dim)
 
     # set up the inference process
-    scheduler = pyro.optim.ClippedAdam({'lr': lr, 'clip_norm': 10.})
+    scheduler = optim.ClippedAdam({'lr': lr, 'clip_norm': 10.})
     svi = pyro.infer.SVI(initial_model.model, initial_model.guide, scheduler, loss=pyro.infer.Trace_ELBO())
     w1 = _get_params(initial_model.encoder)
 
@@ -315,7 +316,7 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
 
     # one-shot training straight through
     model_one_shot = PyroModel(dim=dim)  # resets random state
-    scheduler = pyro.optim.ClippedAdam({'lr': lr, 'clip_norm': 10.})
+    scheduler = optim.ClippedAdam({'lr': lr, 'clip_norm': 10.})
     train_loader = new_train_loader(data=dataset, batch_size=batch_size_n)
     svi_one_shot = pyro.infer.SVI(model_one_shot.model, model_one_shot.guide, scheduler, loss=pyro.infer.Trace_ELBO())
     model_one_shot.loss.extend(train_pyro(n_epochs=epochs, data_loader=train_loader, svi=svi_one_shot))
@@ -528,10 +529,10 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
 @pytest.mark.parametrize(
     "Optim, config",
     [
-        (pyro.optim.ClippedAdam, {"lr": 0.01}),
-        (pyro.optim.ExponentialLR, {"optimizer": torch.optim.SGD,
-                                    "optim_args": {"lr": 0.01},
-                                    "gamma": 0.9}),
+        (optim.ClippedAdam, {"lr": 0.01}),
+        (optim.ExponentialLR, {"optimizer": torch.optim.SGD,
+                               "optim_args": {"lr": 0.01},
+                               "gamma": 0.9}),
     ],
 )
 def test_optimizer_checkpoint_restart(Optim, config, tmpdir_factory):
@@ -556,7 +557,7 @@ def test_optimizer_checkpoint_restart(Optim, config, tmpdir_factory):
 
     def get_snapshot(optimizer):
         s = {k: v.data.clone() for k, v in store.items()}
-        if type(optimizer) == pyro.optim.lr_scheduler.PyroLRScheduler:
+        if type(optimizer) == optim.lr_scheduler.PyroLRScheduler:
             lr = list(optimizer.optim_objs.values())[0].get_last_lr()[0]
         else:
             lr = list(optimizer.optim_objs.values())[0].param_groups[0]['lr']
@@ -572,7 +573,7 @@ def test_optimizer_checkpoint_restart(Optim, config, tmpdir_factory):
     for _ in range(5 + 10):
         svi.step()
         expected.append(get_snapshot(optimizer))
-        if type(optimizer) == pyro.optim.lr_scheduler.PyroLRScheduler:
+        if type(optimizer) == optim.lr_scheduler.PyroLRScheduler:
             svi.optim.step()
     del svi, optimizer
 
@@ -585,7 +586,7 @@ def test_optimizer_checkpoint_restart(Optim, config, tmpdir_factory):
     for _ in range(5):
         svi.step()
         actual.append(get_snapshot(optimizer))
-        if type(optimizer) == pyro.optim.lr_scheduler.PyroLRScheduler:
+        if type(optimizer) == optim.lr_scheduler.PyroLRScheduler:
             svi.optim.step()
 
     # checkpoint
@@ -604,7 +605,7 @@ def test_optimizer_checkpoint_restart(Optim, config, tmpdir_factory):
     for _ in range(10):
         svi.step()
         actual.append(get_snapshot(optimizer))
-        if type(optimizer) == pyro.optim.lr_scheduler.PyroLRScheduler:
+        if type(optimizer) == optim.lr_scheduler.PyroLRScheduler:
             svi.optim.step()
 
     # display learning rates and actual/expected values for z_loc

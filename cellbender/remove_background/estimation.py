@@ -210,9 +210,111 @@ class MultipleChoiceKnapsack(EstimationMethod):
                        noise_log_prob_coo: sp.coo_matrix,
                        noise_offsets: Dict[int, int],
                        noise_targets_per_gene: np.ndarray,
+                       approx_gb: float = 1.,
                        verbose: bool = False,
+                       min_chunks: Optional[int] = None,  # just for testing
                        **kwargs) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts
+
+        Args:
+            noise_log_prob_coo: The noise log prob data structure: log prob
+                values in a (m, c) COO matrix
+            noise_targets_per_gene: Integer noise count target for each gene
+            noise_offsets: Noise count offset values keyed by 'm'.
+            approx_gb: Approximate memory to be used for each gene-wise chunk
+                of this computation. This is baseline, not peak memory. Peak
+                memory might be 12x this value (on top of whatever else is
+                going on)
+            verbose: True to print lots of intermediate information (for tests)
+            min_chunks: For tests, to ensure chunking works
+
+        Returns:
+            noise_count_csr: Estimated noise count matrix.
+        """
+        csr_matrices = []
+        for chunk in self._gene_chunk_iterator(
+            noise_log_prob_coo=noise_log_prob_coo,
+            approx_gb=approx_gb,
+            min_chunks=min_chunks,
+        ):
+            noise_coo = chunk[0]
+            gene_logic = chunk[1]
+            chunk_csr = self._chunk_estimate_noise(
+                noise_log_prob_coo=noise_coo,
+                noise_offsets=noise_offsets,
+                noise_targets_per_gene=noise_targets_per_gene,
+                verbose=verbose,
+            )
+            csr_matrices.append(chunk_csr.tocsc()[:, gene_logic].tocsr())
+        return sp.hstack(csr_matrices)
+
+    def _gene_chunk_iterator(self,
+                             noise_log_prob_coo: sp.coo_matrix,
+                             approx_gb: float,
+                             min_chunks: Optional[int] = None) \
+            -> Generator[Tuple[sp.coo_matrix, np.ndarray], None, None]:
+        """Yields chunks of the posterior that can be treated as independent,
+        from the standpoint of MCKP count estimation.  That is, they contain all
+        matrix entries for any genes they include.
+
+        Args:
+            approx_gb: Aim to grab a chunk of this size
+            min_chunks: For testing, force this many chunks
+
+        Yields:
+            Tuple of (coo posterior, gene_logic) for the chunk
+        """
+
+        def _approx_size(n_entries: int) -> float:
+            approx_size = (n_entries * 3) * 4 / 1e9  # GB, torch float32 is 4 bytes
+            approx_size = approx_size * 20  # empirical fudge from memory profiler
+            return approx_size
+
+        if min_chunks is not None:
+            # reset approx_gb to target the right number of chunks
+            approx_gb = _approx_size((noise_log_prob_coo.data.size - 1) // min_chunks)
+
+        # get gene annotations
+        _, genes = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
+
+        # things we need to keep track of for each chunk
+        current_chunk_genes = []
+        entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
+        gene_logic = np.zeros(self.index_converter.total_n_genes, dtype=bool)
+
+        def _subset_coo(coo: sp.coo_matrix, logic: np.ndarray) -> sp.coo_matrix:
+            return sp.coo_matrix((coo.data[logic], (coo.row[logic], coo.col[logic])))
+
+        # go through all genes
+        for g in np.unique(genes):
+
+            # append current gene
+            current_chunk_genes.append(g)
+            entry_logic = entry_logic | (genes == g)
+            gene_logic[g] = True
+
+            # figure out when to send out a chunk
+            if _approx_size(entry_logic.sum()) >= approx_gb:
+                logger.debug('New gene chunk being processed by MCKP')
+                yield _subset_coo(noise_log_prob_coo, entry_logic), gene_logic
+
+                # keep track and reset stuff
+                entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
+                gene_logic = np.zeros(self.index_converter.total_n_genes, dtype=bool)
+                current_chunk_genes = []
+
+        # last bit
+        if entry_logic.sum() > 0:
+            logger.debug('New gene chunk being processed by MCKP')
+            yield _subset_coo(noise_log_prob_coo, entry_logic), gene_logic
+
+    def _chunk_estimate_noise(self,
+                              noise_log_prob_coo: sp.coo_matrix,
+                              noise_offsets: Dict[int, int],
+                              noise_targets_per_gene: np.ndarray,
+                              verbose: bool = False) -> sp.csr_matrix:
+        """Given the full probabilistic posterior, compute noise counts. This is
+        to be run for a given chunk of genes at a time.
 
         Args:
             noise_log_prob_coo: The noise log prob data structure: log prob
@@ -244,6 +346,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
         map_csr = self._estimation_array_to_csr(data=map_dict['result'],
                                                 m=map_dict['m'],
                                                 noise_offsets=noise_offsets)
+        logger.info('Computed initial MAP estimate')
         logger.debug(f'Time for MAP calculation = {(time.time() - t) / 60:.2f} mins')
         map_noise_counts_per_gene = np.array(map_csr.sum(axis=0)).squeeze()
         additional_noise_counts_per_gene = (noise_targets_per_gene
@@ -259,10 +362,12 @@ class MultipleChoiceKnapsack(EstimationMethod):
                                 'g': g,
                                 'c': coo.col,
                                 'log_prob': coo.data})
-        df['positive_step_gene'] = df['g'].apply(lambda g: g in set_positive_genes)
-        df['negative_step_gene'] = df['g'].apply(lambda g: g in set_negative_genes)
+        logger.debug('Computing step directions')
+        df['positive_step_gene'] = df['g'].apply(lambda gene: gene in set_positive_genes)
+        df['negative_step_gene'] = df['g'].apply(lambda gene: gene in set_negative_genes)
         df['step_direction'] = (df['positive_step_gene'].astype(int)
                                 - df['negative_step_gene'].astype(int))  # -1 or 1
+        logger.debug('Step directions done')
 
         if verbose:
             pd.set_option('display.width', 120)
@@ -273,14 +378,22 @@ class MultipleChoiceKnapsack(EstimationMethod):
         df = df[df['step_direction'] != 0]
 
         # Now we mask out log probs (-np.inf) that represent steps in the wrong direction.
+        logger.debug('Masking')
         lookup_map_from_m = dict(zip(map_dict['m'], map_dict['result']))
         df['map'] = df['m'].apply(lambda x: lookup_map_from_m[x])
         df['mask'] = ((df['negative_step_gene'] & (df['c'] > df['map']))
                       | (df['positive_step_gene'] & (df['c'] < df['map'])))  # keep MAP
         df.loc[df['mask'], 'log_prob'] = -np.inf
+        logger.debug('Masking done')
+
+        # And we remove those entries.
+        df = df[~df['mask']]
+        df = df[[c for c in df.columns if (c != 'mask')]]
 
         # Sort
+        logger.debug('Sorting')
         df = df.sort_values(by=['m', 'c'])
+        logger.debug('Sorting done')
 
         if verbose:
             print(df, end='\n\n')
@@ -289,22 +402,33 @@ class MultipleChoiceKnapsack(EstimationMethod):
         df_positive_steps = df[df['step_direction'] == 1].copy()
         df_negative_steps = df[df['step_direction'] == -1].copy()
 
+        logger.debug('Computing deltas')
         if len(df_positive_steps > 0):
-            df_positive_steps['delta'] = df_positive_steps['log_prob'].diff(periods=1).apply(np.abs)
+            df_positive_steps.loc[:, 'delta'] = df_positive_steps['log_prob'].diff(periods=1).apply(np.abs)
             df_positive_steps.loc[df_positive_steps['c'] == df_positive_steps['map'], 'delta'] = np.nan
         if len(df_negative_steps > 0):
-            df_negative_steps['delta'] = df_negative_steps['log_prob'].diff(periods=-1).apply(np.abs)
+            df_negative_steps.loc[:, 'delta'] = df_negative_steps['log_prob'].diff(periods=-1).apply(np.abs)
             df_negative_steps.loc[df_negative_steps['c'] == df_negative_steps['map'], 'delta'] = np.nan
         df = pd.concat([df_positive_steps, df_negative_steps], axis=0)
+        logger.debug('Computing deltas done')
 
         if verbose:
             print(df, end='\n\n')
 
+        # if this is an empty dataframe, we are not doing anything here beyond MAP
+        if len(df) == 0:
+            return map_csr
+
         # Remove irrelevant entries: those with infinite delta.
         df = df[df['delta'].apply(np.isfinite)]
 
+        # if this is an empty dataframe, we are not doing anything here beyond MAP
+        if len(df) == 0:
+            return map_csr
+
         # How many additional noise counts ("steps") we will need for each gene.
-        df['topk'] = df['g'].apply(lambda g: abs_additional_noise_counts_per_gene[g])
+        logger.debug('Computing nsmallest')
+        df['topk'] = df['g'].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
 
         if verbose:
             print(df, end='\n\n')
@@ -314,12 +438,18 @@ class MultipleChoiceKnapsack(EstimationMethod):
         df_out = df[['m', 'g', 'delta', 'topk']].groupby('g', group_keys=False).apply(
             lambda x: x.nsmallest(x['topk'].iat[0], columns='delta')
         )
+        logger.debug('Computing nsmallest done')
 
         if verbose:
             print(df_out, end='\n\n')
 
+        # if this is an empty dataframe, we are not doing anything here beyond MAP
+        if len(df_out) == 0:
+            return map_csr
+
         # And the number by which to increment noise counts per entry 'm' is
         # now the number of times that each m value appears in this dataframe.
+        logger.debug('Summarizing steps')
         vc = df_out['m'].value_counts()
         vc_df = pd.DataFrame(data={'m': vc.index, 'steps': vc.values})
         step_direction_lookup_from_m = dict(zip(df['m'], df['step_direction']))
@@ -328,6 +458,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
         steps_csr = self._estimation_array_to_csr(data=vc_df['counts'],
                                                   m=vc_df['m'],
                                                   noise_offsets=None)
+        logger.debug('Summarizing steps done')
 
         if verbose:
             print(vc_df, end='\n\n')
