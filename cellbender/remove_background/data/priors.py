@@ -4,6 +4,8 @@ import numpy as np
 import torch
 from scipy.stats import gaussian_kde
 
+from cellbender.remove_background import consts
+
 from typing import Dict, Tuple, Union
 import logging
 
@@ -82,7 +84,7 @@ def _peak_density_given_cutoff(umi_counts: np.ndarray,
     """Run scipy.stats gaussian_kde on part of the UMI curve"""
 
     # get the UMI count values we are including
-    noncell_counts = umi_counts[umi_counts < cutoff]
+    noncell_counts = umi_counts[umi_counts <= cutoff]
 
     # resample them: the magic of looking at a log log plot
     n_putative_cells = (umi_counts > cell_count_low_limit).sum()
@@ -125,6 +127,52 @@ def _peak_density_given_cutoff(umi_counts: np.ndarray,
     empty_count_upper_limit = np.exp(x[log_peak_ind:][one_std_ind])
 
     return empty_count_prior, empty_count_upper_limit
+
+
+def get_cell_count_given_expected_cells(umi_counts: np.ndarray,
+                                        expected_cells: int) -> Dict[str, float]:
+    """In the case where a prior is passed in as input, use it
+
+    Args:
+        umi_counts: Array of UMI counts per droplet, in no particular order
+        expected_cells: Input by user
+
+    Returns:
+        Dict with keys ['cell_counts']
+    """
+    order = np.argsort(umi_counts)[::-1]
+    cell_counts = np.exp(np.mean(np.log(umi_counts[order][:expected_cells]))).item()
+    return {'cell_counts': cell_counts}
+
+
+def get_empty_count_given_expected_cells_and_total_droplets(
+        umi_counts: np.ndarray,
+        expected_cells: int,
+        total_droplets: int,
+) -> Dict[str, float]:
+    """In the case where a prior is passed in as input, use it
+
+    Args:
+        umi_counts: Array of UMI counts per droplet, in no particular order
+        expected_cells: Input by user, or prior estimate
+        total_droplets: Input by user
+
+    Returns:
+        Dict with keys ['empty_counts', 'empty_count_upper_limit']
+    """
+
+    order = np.argsort(umi_counts)[::-1]
+    starting_point = max(expected_cells, total_droplets - 500)
+    empty_counts = np.median(umi_counts[order]
+                             [int(starting_point):int(total_droplets)]).item()
+
+    # need to estimate here
+    cell_counts = np.exp(np.mean(np.log(umi_counts[order][:expected_cells]))).item()
+    middle = np.sqrt(cell_counts * empty_counts)
+    empty_count_upper_limit = min(middle, 1.5 * empty_counts)
+
+    return {'empty_counts': empty_counts,
+            'empty_count_upper_limit': empty_count_upper_limit}
 
 
 def get_cell_count_empty_count(umi_counts: np.ndarray,
@@ -172,7 +220,7 @@ def get_cell_count_empty_count(umi_counts: np.ndarray,
 
     # initial conditions for the loop
     # start low, but have a failsafe (especially for simulated data)
-    cutoff = max(0.1 * cell_count_low_limit, reverse_sorted_umi_counts[-50])
+    cutoff = max(0.1 * cell_count_low_limit, umi_counts_for_kde[-100])
     empty_count_prior = -100
     empty_count_upper_limit = None
     delta = np.inf
@@ -218,7 +266,9 @@ def get_cell_count_empty_count(umi_counts: np.ndarray,
 def get_expected_cells_and_total_droplets(umi_counts: np.ndarray,
                                           cell_counts: float,
                                           empty_counts: float,
-                                          empty_count_upper_limit: float) -> Dict[str, int]:
+                                          empty_count_upper_limit: float,
+                                          max_empties: int = consts.MAX_EMPTIES_TO_INCLUDE) \
+        -> Dict[str, int]:
     """Obtain priors on cell counts and empty droplet counts from a UMI curve
     using heuristics, and without applying any other prior information.
 
@@ -229,9 +279,10 @@ def get_expected_cells_and_total_droplets(umi_counts: np.ndarray,
         cell_counts: Prior from get_cell_count_empty_count()
         empty_counts: Prior from get_cell_count_empty_count()
         empty_count_upper_limit: Prior from get_cell_count_empty_count()
+        max_empties: Do not include more putative empty droplets than this
 
     Returns:
-        Dict with keys ['expected_cells', 'total_droplets']
+        Dict with keys ['expected_cells', 'total_droplets', 'transition_point']
 
     Example:
         >>> priors = get_cell_count_empty_count(umi_counts)
@@ -244,12 +295,28 @@ def get_expected_cells_and_total_droplets(umi_counts: np.ndarray,
     total_droplets_count_value = np.sqrt(empty_counts * empty_count_upper_limit)
     total_droplets = (umi_counts >= total_droplets_count_value).sum()
 
-    return {'expected_cells': expected_cells, 'total_droplets': total_droplets}
+    # find the transition point
+    transition_umi_counts = umi_counts[(umi_counts <= cell_counts)
+                                       & (umi_counts >= empty_count_upper_limit)]
+    smoothing_radius = max(1, len(transition_umi_counts) // 20)
+    diff = np.diff(np.sort(transition_umi_counts)[::-1][::smoothing_radius], n=1)
+    transition_point = ((umi_counts > cell_counts).sum()
+                        + np.argmin(diff) * smoothing_radius)
+    logger.debug(f'In get_expected_cells_and_total_droplets(), found transition '
+                 f'point at droplet {transition_point}')
+
+    # ensure out heuristics don't go too far out datasets with many cells
+    total_droplets = min(total_droplets, transition_point + max_empties)
+
+    return {'expected_cells': expected_cells,
+            'total_droplets': total_droplets,
+            'transition_point': transition_point}
 
 
 def get_priors(umi_counts: np.ndarray,
                low_count_threshold: float,
-               max_total_droplets: int = 70000) -> Dict[str, Union[int, float]]:
+               max_total_droplets: int = consts.MAX_TOTAL_DROPLETS_GUESSED) \
+        -> Dict[str, Union[int, float]]:
     """Get all priors using get_cell_count_empty_count() and
     get_expected_cells_and_total_droplets(), employing a failsafe if
     total_droplets is improbably large.
@@ -273,6 +340,7 @@ def get_priors(umi_counts: np.ndarray,
         low_count_threshold=low_count_threshold,
     )
     priors.update(get_expected_cells_and_total_droplets(umi_counts=umi_counts, **priors))
+    logger.debug(f'Automatically computed priors: {priors}')
 
     a = 0
     while priors['total_droplets'] > max_total_droplets:
@@ -285,9 +353,32 @@ def get_priors(umi_counts: np.ndarray,
             low_count_threshold=priors['empty_count_upper_limit'],
         )
         priors.update(get_expected_cells_and_total_droplets(umi_counts=umi_counts, **priors))
+        logger.debug(f'Automatically computed priors: {priors}')
         a += 1
         if a > 5:
             break
+
+    # compute a few last things
+    compute_crossover_surely_empty_and_stds(umi_counts=umi_counts, priors=priors)
+
+    return priors
+
+
+def compute_crossover_surely_empty_and_stds(umi_counts, priors):
+    """Given cell_counts and total_droplets, compute a few more quantities
+
+    Args:
+        umi_counts: Array of UMI counts per droplet, in no particular order
+        priors: Dict of priors
+
+    Returns:
+        None.  Modifies priors dict in place.
+    """
+
+    assert 'total_droplets' in priors.keys(), \
+        'Need total_droplets in priors to run compute_crossover_surely_empty_and_stds()'
+    assert 'cell_counts' in priors.keys(), \
+        'Need cell_counts in priors to run compute_crossover_surely_empty_and_stds()'
 
     # Compute a crossover point in log count space.
     reverse_sorted_counts = np.sort(umi_counts)[::-1]
@@ -301,8 +392,3 @@ def get_priors(umi_counts: np.ndarray,
     d_std = np.std(log_nonzero_umi_counts[log_nonzero_umi_counts > log_counts_crossover]).item() / 5.
     d_empty_std = 0.01  # this is basically turned off in favor of epsilon
     priors.update({'d_std': d_std, 'd_empty_std': d_empty_std})
-
-    logger.info(f"Prior on counts for cells is {int(priors['cell_counts'])}")
-    logger.info(f"Prior on counts for empty droplets is {int(priors['empty_counts'])}")
-
-    return priors
