@@ -1,4 +1,4 @@
-name: 'Validate all WDLs using miniwdl'
+name: 'validate WDL'
 on: [pull_request]
 env:
   MINIWDL_VERSION: 1.8.0
