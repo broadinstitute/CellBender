@@ -182,80 +182,15 @@ def load_checkpoint(filebase: Optional[str],
         -> Dict[str, Union['RemoveBackgroundPyroModel', pyro.optim.PyroOptim, DataLoader, bool]]:
     """Load checkpoint and prepare a RemoveBackgroundPyroModel and optimizer."""
 
-    def _torch_load(file):
-        if force_device is None:
-            return torch.load(file)
-        else:
-            return torch.load(file, map_location=torch.device(force_device))
-
-    # Work in a temporary directory.
-    with tempfile.TemporaryDirectory() as tmp_dir:
-
-        # Unpack the checkpoint tarball.
-        logger.info(f'Attempting to unpack tarball "{tarball_name}" to {tmp_dir}')
-        success = unpack_tarball(tarball_name=tarball_name, directory=tmp_dir)
-        if success:
-            unpacked_files = '\n'.join(glob.glob(os.path.join(tmp_dir, "*")))
-            logger.info(f'Successfully unpacked tarball to {tmp_dir}\n'
-                        f'{unpacked_files}')
-        else:
-            # no tarball loaded, so do not continue trying to load files
-            raise FileNotFoundError
-
-        # See if files have a hash matching input filebase.
-        if filebase is not None:
-            basename = os.path.basename(filebase)
-            filebase = os.path.join(tmp_dir, basename)
-            logger.debug(f'Looking for files with base name matching {filebase}*')
-            if not os.path.exists(filebase + '_model.torch'):
-                logger.info('Workflow hash does not match that of checkpoint.')
-                raise ValueError
-        else:
-            filebase = (glob.glob(os.path.join(tmp_dir, '*_model.torch'))[0]
-                        .replace('_model.torch', ''))
-            logger.debug(f'Accepting any file hash, so loading {filebase}*')
-
-        # Load the saved model.
-        model_obj = _torch_load(filebase + '_model.torch')
-        logger.debug('Model loaded from ' + filebase + '_model.torch')
-
-        # Load the saved optimizer.
-        scheduler = _torch_load(filebase + '_optim.torch')
-        scheduler.load(filebase + '_optim.pyro')  # use PyroOptim method
-        # TODO: reinstate this after the pyro update is committed:
-        # scheduler.load(filebase + '_optim.pyro', map_location=force_device)  # use PyroOptim method
-        logger.debug('Optimizer loaded from ' + filebase + '_optim.*')
-
-        # Load the pyro param store.
-        pyro.get_param_store().load(filebase + '_params.pyro', map_location=force_device)
-        logger.debug('Pyro param store loaded from ' + filebase + '_params.pyro')
-
-        # Load dataloader states.
-        # load_dataloader_state(data_loader=train_loader, file=filebase + '_train.loaderstate')
-        # load_dataloader_state(data_loader=test_loader, file=filebase + '_test.loaderstate')
-        train_loader = None
-        test_loader = None
-        if os.path.exists(filebase + '_train.loaderstate'):
-            train_loader = _torch_load(filebase + '_train.loaderstate')
-            logger.debug('Train loader loaded from ' + filebase + '_train.loaderstate')
-        if os.path.exists(filebase + '_test.loaderstate'):
-            test_loader = _torch_load(filebase + '_test.loaderstate')
-            logger.debug('Test loader loaded from ' + filebase + '_test.loaderstate')
-
-        # Load args, which can be modified in the case of auto-learning-rate updates.
-        args = np.load(filebase + '_args.npy', allow_pickle=True).item()
-
-        # Update states of random number generators across the board.
-        load_random_state(filebase=filebase)
-        logger.debug('Loaded random state globally for python, numpy, pytorch, and cuda')
-
+    out = load_from_checkpoint(
+        filebase=filebase,
+        tarball_name=tarball_name,
+        to_load=['model', 'optim', 'param_store' ,'dataloader', 'args', 'random_state'],
+        force_device=force_device,
+    )
+    out.update({'loaded': True})
     logger.info(f'Loaded partially-trained checkpoint from {tarball_name}')
-    return {'model': model_obj,
-            'optim': scheduler,
-            'train_loader': train_loader,
-            'test_loader': test_loader,
-            'args': args,
-            'loaded': True}
+    return out
 
 
 def load_from_checkpoint(filebase: Optional[str],
@@ -264,11 +199,9 @@ def load_from_checkpoint(filebase: Optional[str],
                          force_device: Optional[str] = None) -> Dict:
     """Load specific files from a checkpoint tarball."""
 
-    def _torch_load(file):
-        if force_device is None:
-            return torch.load(file)
-        else:
-            return torch.load(file, map_location=torch.device(force_device))
+    load_kwargs = {}
+    if force_device is not None:
+        load_kwargs.update({'map_location': torch.device(force_device)})
 
     # Work in a temporary directory.
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -301,16 +234,14 @@ def load_from_checkpoint(filebase: Optional[str],
 
         # Load the saved model.
         if 'model' in to_load:
-            model_obj = _torch_load(filebase + '_model.torch')
+            model_obj = torch.load(filebase + '_model.torch', **load_kwargs)
             logger.debug('Model loaded from ' + filebase + '_model.torch')
             out.update({'model': model_obj})
 
         # Load the saved optimizer.
         if 'optim' in to_load:
-            scheduler = _torch_load(filebase + '_optim.torch')
-            scheduler.load(filebase + '_optim.pyro')  # use PyroOptim method
-            # TODO: reinstate this after the pyro update is committed:
-            # scheduler.load(filebase + '_optim.pyro', map_location=force_device)  # use PyroOptim method
+            scheduler = torch.load(filebase + '_optim.torch', **load_kwargs)
+            scheduler.load(filebase + '_optim.pyro', **load_kwargs)  # use PyroOptim method
             logger.debug('Optimizer loaded from ' + filebase + '_optim.*')
             out.update({'optim': scheduler})
 
@@ -326,11 +257,11 @@ def load_from_checkpoint(filebase: Optional[str],
             train_loader = None
             test_loader = None
             if os.path.exists(filebase + '_train.loaderstate'):
-                train_loader = _torch_load(filebase + '_train.loaderstate')
+                train_loader = torch.load(filebase + '_train.loaderstate', **load_kwargs)
                 logger.debug('Train loader loaded from ' + filebase + '_train.loaderstate')
                 out.update({'train_loader': train_loader})
             if os.path.exists(filebase + '_test.loaderstate'):
-                test_loader = _torch_load(filebase + '_test.loaderstate')
+                test_loader = torch.load(filebase + '_test.loaderstate', **load_kwargs)
                 logger.debug('Test loader loaded from ' + filebase + '_test.loaderstate')
                 out.update({'test_loader': test_loader})
 

@@ -17,7 +17,7 @@ ENV PATH="$CONDA_DIR/bin:$GCLOUD_DIR/google-cloud-sdk/bin:$PATH"
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates sudo git \
  && apt-get clean \
  && sudo rm -rf /var/lib/apt/lists/* \
- && curl -so $HOME/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py38_4.12.0-Linux-x86_64.sh \
+ && curl -so $HOME/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py37_23.1.0-1-Linux-x86_64.sh \
  && chmod +x $HOME/miniconda.sh \
  && $HOME/miniconda.sh -b -p $CONDA_DIR \
  && rm $HOME/miniconda.sh

@@ -101,7 +101,7 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
     )
     ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
                                           filebase=args.checkpoint_filename,
-                                          to_load='posterior')
+                                          to_load=['posterior'])
     if os.path.exists(ckpt_posterior.get('posterior_file', 'does_not_exist')):
         # Load posterior if it was saved in the checkpoint.
         posterior.load(file=ckpt_posterior['posterior_file'])
@@ -417,6 +417,21 @@ class Posterior:
         analyzed_bcs_only = True
         count_matrix = self.dataset_obj.get_count_matrix()  # analyzed barcodes
         cell_logic = (self.latents_map['p'] > consts.CELL_PROB_CUTOFF)
+
+        # Raise an error if there are no cells found.
+        if cell_logic.sum() == 0:
+            logger.error(f'ERROR: Found zero droplets with posterior cell '
+                         f'probability > {consts.CELL_PROB_CUTOFF}. Please '
+                         f'check the log for estimated priors on expected cells, '
+                         f'total droplets included, UMI counts per cell, and '
+                         f'UMI counts in empty droplets, and see whether these '
+                         f'values make sense. Consider using additional input '
+                         f'arguments like --expected-cells, '
+                         f'--total-droplets-included, --force-cell-umi-prior, '
+                         f'and --force-empty-umi-prior, to make these values '
+                         f'accurate for your dataset.')
+            raise RuntimeError('Zero cells found!')
+
         dataloader_index_to_analyzed_bc_index = np.where(cell_logic)[0]
         cell_data_loader = DataLoader(
             count_matrix[cell_logic],

@@ -415,7 +415,7 @@ class SingleCellRNACountsDataset:
 
         return {'chi_ambient': chi_ambient, 'chi_bar': chi_bar}
 
-    def get_count_matrix(self) -> sp.csr.csr_matrix:
+    def get_count_matrix(self) -> sp.csr_matrix:
         """Get the count matrix, trimmed if trimming has occurred."""
 
         # if self.is_trimmed:
@@ -430,7 +430,7 @@ class SingleCellRNACountsDataset:
         #     logger.warning("Using full count matrix, without any trimming.  Could be slow.")
         #     return self.data['matrix']
 
-    def get_count_matrix_empties(self) -> sp.csr.csr_matrix:
+    def get_count_matrix_empties(self) -> sp.csr_matrix:
         """Get the count matrix for empty drops, trimmed if possible."""
 
         # if self.is_trimmed_features:
@@ -445,7 +445,7 @@ class SingleCellRNACountsDataset:
         #     logger.error("Trying to get empty count matrix without trimmed data.")
         #     return self.data['matrix']
 
-    def get_count_matrix_all_barcodes(self) -> sp.csr.csr_matrix:
+    def get_count_matrix_all_barcodes(self) -> sp.csr_matrix:
         """Get the count matrix, trimming only genes, not barcodes."""
 
         # if self.is_trimmed_features:

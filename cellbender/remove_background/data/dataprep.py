@@ -173,8 +173,8 @@ class DataLoader:
             return dense_tensor.to(device=self.device)
 
 
-def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
-                                  empty_drop_dataset: sp.csr.csr_matrix,
+def prep_sparse_data_for_training(dataset: sp.csr_matrix,
+                                  empty_drop_dataset: sp.csr_matrix,
                                   training_fraction: float = consts.TRAINING_FRACTION,
                                   fraction_empties: float = consts.FRACTION_EMPTIES,
                                   batch_size: int = consts.DEFAULT_BATCH_SIZE,
@@ -252,7 +252,7 @@ def prep_sparse_data_for_training(dataset: sp.csr.csr_matrix,
     return train_loader, test_loader
 
 
-def sparse_collate(batch: List[Tuple[sp.csr.csr_matrix]]) -> torch.Tensor:
+def sparse_collate(batch: List[Tuple[sp.csr_matrix]]) -> torch.Tensor:
     """Load a minibatch of sparse data as a dense torch.Tensor in memory.
 
     Puts each data field into a tensor with leftmost dimension batch size.
