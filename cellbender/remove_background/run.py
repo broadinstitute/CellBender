@@ -79,6 +79,8 @@ def run_remove_background(args: argparse.Namespace):
             SingleCellRNACountsDataset(input_file=args.input_file,
                                        expected_cell_count=args.expected_cell_count,
                                        total_droplet_barcodes=args.total_droplets,
+                                       force_cell_umi_prior=args.force_cell_umi_prior,
+                                       force_empty_umi_prior=args.force_empty_umi_prior,
                                        fraction_empties=args.fraction_empties,
                                        model_name=args.model,
                                        gene_blacklist=args.blacklisted_genes,

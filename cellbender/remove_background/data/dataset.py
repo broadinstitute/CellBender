@@ -7,7 +7,10 @@ import torch
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.io import load_data
-from cellbender.remove_background.data.priors import get_priors
+from cellbender.remove_background.data.priors import get_priors, \
+    get_cell_count_given_expected_cells, \
+    get_empty_count_given_expected_cells_and_total_droplets, \
+    compute_crossover_surely_empty_and_stds
 
 from typing import Dict, List, Optional, Iterable, Callable
 import logging
@@ -25,6 +28,10 @@ class SingleCellRNACountsDataset:
         expected_cell_count: Expected number of real cells a priori.
         total_droplet_barcodes: Total number of droplets to include in the
             cell-calling analysis.
+        force_cell_umi_prior: User wants to force cell UMI prior to be this
+        force_empty_umi_prior: User wants to force empty UMI prior to be this
+        ambient_counts_in_cells_low_limit: Limit to determine how many features
+            are included in the analysis
         model_name: Model to use.
         gene_blacklist: List of integer indices of genes to exclude entirely.
         exclude_features: List of feature types to exclude from the analysis.
@@ -33,7 +40,6 @@ class SingleCellRNACountsDataset:
         low_count_threshold: Droplets with UMI counts below this number are
             excluded entirely from the analysis.
         fpr: Target expected false positive rate.
-        random_seed: Seed for random number generators.
 
     Attributes:
         input_file: Name of data source file.
@@ -65,6 +71,8 @@ class SingleCellRNACountsDataset:
                  fpr: List[float],
                  expected_cell_count: Optional[int] = None,
                  total_droplet_barcodes: Optional[int] = None,
+                 force_cell_umi_prior: Optional[float] = None,
+                 force_empty_umi_prior: Optional[float] = None,
                  fraction_empties: Optional[float] = None,
                  ambient_counts_in_cells_low_limit: float = consts.AMBIENT_COUNTS_IN_CELLS_LOW_LIMIT,
                  gene_blacklist: List[int] = []):
@@ -106,10 +114,51 @@ class SingleCellRNACountsDataset:
 
         # Overwrite heuristic priors with user inputs.
         if expected_cell_count is not None:
+            logger.debug(f'Fixing expected_cells at {expected_cell_count}')
             self.priors['expected_cells'] = expected_cell_count
+            self.priors.update(
+                get_cell_count_given_expected_cells(
+                    umi_counts=counts, expected_cells=expected_cell_count,
+                )
+            )
+            if (expected_cell_count + consts.NUM_EMPTIES_INCREMENT) > self.priors['total_droplets']:
+                # Bump this up to avoid an immediate error
+                total_drops = expected_cell_count + consts.NUM_EMPTIES_INCREMENT
+                self.priors['total_droplets'] = total_drops
+                logger.debug(f'Incrementing total_droplets to be {total_drops}')
+                if total_droplet_barcodes is None:
+                    # If this isn't getting recomputed next, recompute now
+                    self.priors.update(
+                        get_empty_count_given_expected_cells_and_total_droplets(
+                            umi_counts=counts, expected_cells=self.priors['expected_cells'],
+                            total_droplets=total_drops,
+                        )
+                    )
         if total_droplet_barcodes is not None:
+            logger.debug(f'Fixing total_droplets at {total_droplet_barcodes}')
             self.priors['total_droplets'] = total_droplet_barcodes
-        # TODO add forced priors
+            self.priors.update(
+                get_empty_count_given_expected_cells_and_total_droplets(
+                    umi_counts=counts, expected_cells=self.priors['expected_cells'],
+                    total_droplets=total_droplet_barcodes,
+                )
+            )
+
+        # Force priors if user elects to do so.
+        if force_cell_umi_prior is not None:
+            logger.debug(f'Forcing cell UMI count prior to be {force_cell_umi_prior}')
+            self.priors['cell_counts'] = force_cell_umi_prior
+        if force_empty_umi_prior is not None:
+            logger.debug(f'Forcing empty droplet UMI count prior to be {force_empty_umi_prior}')
+            self.priors['empty_counts'] = force_empty_umi_prior
+            middle = np.sqrt(self.priors['cell_counts'] * force_empty_umi_prior)
+            self.priors['empty_count_upper_limit'] = min(middle, 2 * force_empty_umi_prior)
+
+        # Recompute a few quantities if some things were replaced by user input.
+        compute_crossover_surely_empty_and_stds(umi_counts=counts, priors=self.priors)
+        logger.info(f"Prior on counts for cells is {int(self.priors['cell_counts'])}")
+        logger.info(f"Prior on counts for empty droplets is {int(self.priors['empty_counts'])}")
+        logger.debug('\n'.join(['Priors:'] + [f'{k}: {v}' for k, v in self.priors.items()]))
 
         # Do not analyze features which are not expected to contribute to noise.
         self._trim_noiseless_features()
@@ -339,7 +388,7 @@ class SingleCellRNACountsDataset:
                         f"and {len(self.empty_barcode_inds)} empty "
                         f"droplets.")
             logger.info(f"Largest surely-empty droplet has "
-                        f"{self.empty_UMI_threshold} UMI counts.")
+                        f"{int(self.empty_UMI_threshold)} UMI counts.")
 
             if ((low_count_cutoff == self.low_count_threshold)
                     and (len(self.empty_barcode_inds) == 0)):

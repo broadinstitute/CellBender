@@ -114,3 +114,8 @@ EXTENDED_REPORT = False
 # Maximum batch size
 MAX_BATCH_SIZE = 256
 SMALLEST_ALLOWED_BATCH = 4  # BatchNorm chokes if there is only 1 cell in last batch
+
+# Guesses during prior estimation
+MAX_TOTAL_DROPLETS_GUESSED = 70000
+MAX_EMPTIES_TO_INCLUDE = 20000
+NUM_EMPTIES_INCREMENT = 20000  # if input expected_cells > heuristic prior total_drops

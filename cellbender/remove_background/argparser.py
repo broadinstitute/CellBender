@@ -67,6 +67,16 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "Include the droplets which might contain "
                                 "cells. Droplets beyond TOTAL_DROPLETS_INCLUDED "
                                 "should be 'surely empty' droplets.")
+    subparser.add_argument("--force-cell-umi-prior",
+                           nargs=None, type=float, default=None,
+                           dest="force_cell_umi_prior",
+                           help="Ignore CellBender's heuristic prior estimation, "
+                                "and use this prior for UMI counts in cells.")
+    subparser.add_argument("--force-empty-umi-prior",
+                           nargs=None, type=float, default=None,
+                           dest="force_empty_umi_prior",
+                           help="Ignore CellBender's heuristic prior estimation, "
+                                "and use this prior for UMI counts in empty droplets.")
     subparser.add_argument("--model", nargs=None, type=str,
                            default="full",
                            choices=["naive", "simple", "ambient", "swapping", "full"],
