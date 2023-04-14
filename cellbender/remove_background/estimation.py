@@ -239,6 +239,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
                     n_chunks=n_chunks,
                 )
         ):
+            logger.info(f'Working on chunk ({i + 1}/{n_chunks})')
             chunk_csr = self._chunk_estimate_noise(
                 noise_log_prob_coo=noise_coo_chunk,
                 noise_offsets=noise_offsets,
@@ -334,7 +335,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
         map_csr = self._estimation_array_to_csr(data=map_dict['result'],
                                                 m=map_dict['m'],
                                                 noise_offsets=noise_offsets)
-        logger.info('Computed initial MAP estimate')
+        logger.debug(f'{timestamp()} Computed initial MAP estimate')
         logger.debug(f'{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec')
         map_noise_counts_per_gene = np.array(map_csr.sum(axis=0)).squeeze()
         additional_noise_counts_per_gene = (noise_targets_per_gene
