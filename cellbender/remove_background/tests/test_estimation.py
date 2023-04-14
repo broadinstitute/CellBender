@@ -263,7 +263,7 @@ def test_cdf(log_prob_coo):
     np.testing.assert_array_equal(out_per_m, log_prob_coo['cdfs'])
 
 
-@pytest.mark.parametrize('min_chunks', [None, 2], ids=['0chunks', '2chunks'])
+@pytest.mark.parametrize('n_chunks', [1, 2], ids=['1chunk', '2chunks'])
 @pytest.mark.parametrize('n_cells, target, truth, truth_mat',
                          ([1, np.zeros(8), np.array([0, 1, 2, 0, 0, 0, 0, 1]), None],
                           [1, np.ones(8), np.array([0, 1, 2, 1, 1, 1, 1, 1]), None],
@@ -277,7 +277,7 @@ def test_cdf(log_prob_coo):
                               '4_cell_target_0',
                               '4_cell_target_4',
                               '4_cell_target_9'])
-def test_mckp(mckp_log_prob_coo, n_cells, target, truth, truth_mat, min_chunks):
+def test_mckp(mckp_log_prob_coo, n_cells, target, truth, truth_mat, n_chunks):
     """Test the multiple choice knapsack problem estimator"""
 
     offset_dict = mckp_log_prob_coo['offsets']
@@ -295,7 +295,7 @@ def test_mckp(mckp_log_prob_coo, n_cells, target, truth, truth_mat, min_chunks):
         noise_offsets=offset_dict,
         noise_targets_per_gene=target,
         verbose=True,
-        min_chunks=min_chunks,
+        n_chunks=n_chunks,
     )
 
     assert noise_csr.shape == (converter.total_n_cells, converter.total_n_genes)
