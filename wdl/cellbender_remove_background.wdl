@@ -30,6 +30,8 @@ task run_cellbender_remove_background_gpu {
         # Method configuration inputs
         Int? expected_cells
         Int? total_droplets_included
+        Float? force_cell_umi_prior
+        Float? force_empty_umi_prior
         String? model
         Int? low_count_threshold
         String? fpr  # in quotes: floats separated by whitespace: the output false positive rate(s)
@@ -132,6 +134,8 @@ task run_cellbender_remove_background_gpu {
             ~{"--model " + model} \
             ~{"--low-count-threshold " + low_count_threshold} \
             ~{"--epochs " + epochs} \
+            ~{"--force-cell-umi-prior " + force_cell_umi_prior} \
+            ~{"--force-empty-umi-prior " + force_empty_umi_prior} \
             ~{"--z-dim " + z_dim} \
             ~{"--z-layers " + z_layers} \
             ~{"--empty-drop-training-fraction " + empty_drop_training_fraction} \
