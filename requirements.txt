@@ -2,7 +2,7 @@ numpy
 scipy
 tables
 pandas
-pyro-ppl>=0.3.2
+pyro-ppl>=1.8.4
 torch
 matplotlib
 anndata>=0.7

@@ -1,8 +1,8 @@
 # Start from nvidia-docker image with drivers pre-installed to use a GPU
 FROM nvcr.io/nvidia/cuda:11.7.1-base-ubuntu18.04
 
-# Copy the local cellbender repo
-ADD . /software/cellbender
+# Specify a certain commit of CellBender via branch, tag, or sha
+ARG GIT_SHA
 
 LABEL maintainer="Stephen Fleming <sfleming@broadinstitute.org>"
 ENV DOCKER=true \
@@ -13,7 +13,7 @@ ENV DOCKER=true \
     GIT_SHA=$GIT_SHA
 ENV PATH="$CONDA_DIR/bin:$GCLOUD_DIR/google-cloud-sdk/bin:$PATH"
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates sudo \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates sudo git \
  && apt-get clean \
  && sudo rm -rf /var/lib/apt/lists/* \
 # get miniconda
@@ -30,6 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 # get compiled crcmod for gsutil
  && conda install -y -c conda-forge crcmod \
 # install cellbender and its dependencies
- && yes | pip install /software/cellbender/ \
+ && yes | pip install --no-cache-dir -U git+https://github.com/broadinstitute/CellBender.git@$GIT_SHA \
  && conda clean -yaf \
  && sudo rm -rf ~/.cache/pip
