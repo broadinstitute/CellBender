@@ -34,7 +34,7 @@ run_notebook_str = lambda file: \
 to_html_str = lambda file, output: \
     f'jupyter nbconvert ' \
     f'--to html ' \
-    f'--no-input ' \
+    f'--TemplateExporter.exclude_input=True ' \
     f'{file}'
 
 
@@ -520,7 +520,10 @@ def assess_learning_curve(adata,
     tracking_trace = windowed_cumsum(adata.uns['learning_curve_train_elbo'][1:]
                                      - adata.uns['learning_curve_train_elbo'][:-1],
                                      n=windowsize)
-    backtracking = (tracking_trace.min() < -50)
+    big_dip = -1 * (adata.uns['learning_curve_train_elbo'][-1]
+                    - adata.uns['learning_curve_train_elbo'][5]) / 10
+    print(big_dip)
+    backtracking = (tracking_trace.min() < big_dip)
     backtracking_ind = np.argmin(tracking_trace) + windowsize
 
     halftest = len(adata.uns['learning_curve_test_elbo']) // 2
