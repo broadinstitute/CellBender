@@ -246,6 +246,8 @@ class MultipleChoiceKnapsack(EstimationMethod):
                 noise_targets_per_gene=noise_targets_per_gene,
                 verbose=verbose,
             )
+            if i == 0:
+                logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
             logger.debug(f'{timestamp()} Estimator chunk {i}: shape is {chunk_csr.shape}')
             csr_matrices.append(chunk_csr)
 

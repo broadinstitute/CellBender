@@ -1,5 +1,4 @@
 """Single run of remove-background, given input arguments."""
-# separated from CLI due to import dependency issues
 
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
@@ -112,6 +111,7 @@ def run_remove_background(args: argparse.Namespace):
             inferred_model=inferred_model,
             args=args,
         )
+        logger.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S\n'))
 
         # Save output plots.
         save_output_plots(
