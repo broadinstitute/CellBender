@@ -522,7 +522,6 @@ def assess_learning_curve(adata,
                                      n=windowsize)
     big_dip = -1 * (adata.uns['learning_curve_train_elbo'][-1]
                     - adata.uns['learning_curve_train_elbo'][5]) / 10
-    print(big_dip)
     backtracking = (tracking_trace.min() < big_dip)
     backtracking_ind = np.argmin(tracking_trace) + windowsize
 
