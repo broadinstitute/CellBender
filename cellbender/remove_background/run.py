@@ -767,7 +767,7 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                           'steps_per_epoch': minibatches_per_epoch,
                           'epochs': total_epochs,
                           'optim_args': optimizer_args}
-        scheduler = pyro.optim.OneCycleLR(scheduler_args)
+        scheduler = pyro.optim.lr_scheduler.PyroLRScheduler(scheduler_constructor=torch.optim.lr_scheduler.OneCycleLR, optim_args=scheduler_args)
         if args.constant_learning_rate:
             logger.info('Using ClippedAdam --constant-learning-rate rather than '
                         'the OneCycleLR schedule. This is not usually recommended.')
