@@ -13,7 +13,11 @@ import cellbender.remove_background.consts as consts
 import torch
 import torch.utils.data
 
+import logging
 from typing import Tuple, List, Optional, Callable
+
+
+logger = logging.getLogger('cellbender')
 
 
 class SparseDataset(torch.utils.data.Dataset):
@@ -98,6 +102,7 @@ class DataLoader:
         self.use_cuda = use_cuda
         if self.use_cuda:
             self.device = 'cuda'
+        self._length = None
         self._reset()
 
     @torch.no_grad()
@@ -126,16 +131,31 @@ class DataLoader:
     def reset_ptr(self):
         self.ptr = 0
 
+    @property
+    def length(self):
+        if self._length is None:
+            self._length = self._get_length()
+        return self._length
+
+    def _get_length(self):
+        # avoid the potential for an off-by-one error by just going through it
+        i = 0
+        for _ in self:
+            i += 1
+        return i
+
     def __len__(self):
-        return int(self.ind_list.size *
-                   (1 + (self.fraction_empties / (1 - self.fraction_empties))))  # ...ish
+        return self.length
 
     def __iter__(self):
         return self
 
     def __next__(self):
         # Skip last batch if the size is < smallest allowed batch
-        if (self.ind_list.size - self.ptr) < consts.SMALLEST_ALLOWED_BATCH:
+        remaining_cells = self.ind_list.size - self.ptr
+        if remaining_cells < consts.SMALLEST_ALLOWED_BATCH:
+            if remaining_cells > 0:
+                logger.debug(f'Dropped last minibatch of {remaining_cells} cells')
             self._reset()
             raise StopIteration()
 

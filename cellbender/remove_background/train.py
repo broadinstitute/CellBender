@@ -60,19 +60,19 @@ def train_epoch(svi: SVI,
         epoch_loss += svi.step(x_cell_batch)
         normalizer_train += x_cell_batch.size(0)
 
-        # Despite this being the "wrong" place to step the scheduler in general
-        # (see https://docs.pyro.ai/en/stable/_modules/pyro/optim/lr_scheduler.html#PyroLRScheduler)
-        # it ends up producing the right learning rate schedule for the OneCycleLR scheduler
-        # (see https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html)
         if is_scheduler(svi.optim):
-            svi.optim.step(epoch=epoch)  # for LR scheduling
+            svi.optim.step()  # for LR scheduling
 
     # Return epoch loss.
     total_epoch_loss_train = epoch_loss / normalizer_train
 
     if is_scheduler(svi.optim):
-        logger.debug(f'Learning rate scheduler: LR = '
-                     f'{list(svi.optim.optim_objs.values())[0].get_last_lr()[0]:.2e}')
+        try:
+            logger.debug(f'Learning rate scheduler: LR = '
+                         f'{list(svi.optim.optim_objs.values())[0].get_last_lr()[0]:.2e}')
+        except IndexError:
+            logger.debug('No values being optimized')
+            pass
 
     return total_epoch_loss_train
 
@@ -153,6 +153,7 @@ def run_training(model: RemoveBackgroundPyroModel,
     # Initialize train and tests ELBO with empty lists.
     train_elbo = []
     test_elbo = []
+    lr = []
     epoch_checkpoint_freq = 1000  # a large number... it will be recalculated
 
     # Run training loop.  Use try to allow for keyboard interrupt.
@@ -177,10 +178,18 @@ def run_training(model: RemoveBackgroundPyroModel,
             total_epoch_loss_train = train_epoch(svi, train_loader)
 
             train_elbo.append(-total_epoch_loss_train)
+            try:
+                last_learning_rate = list(svi.optim.optim_objs.values())[0].get_last_lr()[0]
+            except AttributeError:
+                # not a scheduler
+                last_learning_rate = args.learning_rate
+            lr.append(last_learning_rate)
 
             if model is not None:
                 model.loss['train']['epoch'].append(epoch)
                 model.loss['train']['elbo'].append(-total_epoch_loss_train)
+                model.loss['learning_rate']['epoch'].append(epoch)
+                model.loss['learning_rate']['value'].append(last_learning_rate)
 
             if epoch == start_epoch + 1:
                 time_per_epoch = time.time() - t

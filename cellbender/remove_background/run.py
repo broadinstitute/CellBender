@@ -608,6 +608,44 @@ def write_cell_barcodes_csv(bc_file_name: str, cell_barcodes: np.ndarray):
     logger.info(f"Saved cell barcodes in {bc_file_name}")
 
 
+def get_optimizer(n_batches: int,
+                  batch_size: int,
+                  epochs: int,
+                  learning_rate: float,
+                  constant_learning_rate: bool,
+                  total_epochs_for_testing_only: Optional[int] = None) \
+        -> Union[pyro.optim.PyroOptim, pyro.optim.lr_scheduler.PyroLRScheduler]:
+    """Get optimizer or learning rate scheduler (if using one)"""
+
+    # Set up the optimizer.
+    optimizer = pyro.optim.clipped_adam.ClippedAdam  # just ClippedAdam does not work
+    optimizer_args = {'lr': learning_rate, 'clip_norm': 10.}
+
+    # Set up a learning rate scheduler.
+    # minibatches_per_epoch = int(np.ceil(n_batches / batch_size).item())
+    # minibatches_per_epoch = int(np.ceil(n_batches // batch_size).item()) + 1
+    # total_epochs = epochs if (total_epochs_for_testing_only is None) else total_epochs_for_testing_only
+    if total_epochs_for_testing_only is not None:
+        total_steps = n_batches * total_epochs_for_testing_only
+    else:
+        total_steps = n_batches * epochs
+    scheduler_args = {'optimizer': optimizer,
+                      'max_lr': learning_rate * 10,
+                      # 'steps_per_epoch': minibatches_per_epoch,
+                      # 'epochs': total_epochs,
+                      'total_steps': total_steps,
+                      'optim_args': optimizer_args}
+    scheduler = pyro.optim.OneCycleLR(scheduler_args)
+
+    # Constant learning rate overrides the above and uses no scheduler.
+    if constant_learning_rate:
+        logger.info('Using ClippedAdam --constant-learning-rate rather than '
+                    'the OneCycleLR schedule. This is not usually recommended.')
+        scheduler = ClippedAdam(optimizer_args)
+
+    return scheduler
+
+
 def run_inference(dataset_obj: SingleCellRNACountsDataset,
                   args: argparse.Namespace,
                   output_checkpoint_tarball: str = consts.CHECKPOINT_FILE_NAME,
@@ -745,10 +783,6 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         # # TODO
         # logger.info("Pre-training complete.")
 
-        # Set up the optimizer.
-        optimizer = pyro.optim.clipped_adam.ClippedAdam  # just ClippedAdam does not work
-        optimizer_args = {'lr': args.learning_rate, 'clip_norm': 10.}
-
         # Set up dataloaders.
         train_loader, test_loader = \
             prep_data_for_training(dataset=count_matrix,
@@ -759,19 +793,15 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                                    shuffle=True,
                                    use_cuda=args.use_cuda)
 
-        # Set up a learning rate scheduler.
-        minibatches_per_epoch = int(np.ceil(len(train_loader) / train_loader.batch_size).item())
-        total_epochs = args.epochs if (total_epochs_for_testing_only is None) else total_epochs_for_testing_only
-        scheduler_args = {'optimizer': optimizer,
-                          'max_lr': args.learning_rate * 10,
-                          'steps_per_epoch': minibatches_per_epoch,
-                          'epochs': total_epochs,
-                          'optim_args': optimizer_args}
-        scheduler = pyro.optim.OneCycleLR(scheduler_args)
-        if args.constant_learning_rate:
-            logger.info('Using ClippedAdam --constant-learning-rate rather than '
-                        'the OneCycleLR schedule. This is not usually recommended.')
-            scheduler = ClippedAdam(optimizer_args)
+        # Set up optimizer (optionally wrapped in a learning rate scheduler).
+        scheduler = get_optimizer(
+            n_batches=len(train_loader),
+            batch_size=train_loader.batch_size,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            constant_learning_rate=args.constant_learning_rate,
+            total_epochs_for_testing_only=total_epochs_for_testing_only,
+        )
 
     # Determine the loss function.
     if args.use_jit:

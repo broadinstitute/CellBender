@@ -38,25 +38,14 @@ def calculate_lambda(model_type: str,
         lam = epsilon.unsqueeze(-1) * d_empty.unsqueeze(-1) * chi_ambient
 
     elif model_type == "swapping":
-        # lam = (rho.unsqueeze(-1) * y.unsqueeze(-1)
-        #        * epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1)
-        #        + d_empty.unsqueeze(-1)) * chi_bar
-        # lam = (rho.unsqueeze(-1) * y.unsqueeze(-1) * d_cell.unsqueeze(-1)
-        #        + d_empty.unsqueeze(-1)) * chi_bar * epsilon.unsqueeze(-1)
         lam = (rho.unsqueeze(-1) * chi_bar * epsilon.unsqueeze(-1) *
                (y.unsqueeze(-1) * d_cell.unsqueeze(-1) + d_empty.unsqueeze(-1)))
 
     elif model_type == "full":
-        # lam = ((1. - rho.unsqueeze(-1))
-        #        * epsilon.unsqueeze(-1) * d_empty.unsqueeze(-1) * chi_ambient
-        #        + rho.unsqueeze(-1) * chi_bar *
-        #        (y.unsqueeze(-1) * d_cell.unsqueeze(-1) + d_empty.unsqueeze(-1)))
-        # TODO: epsilon should multiply all terms
         lam = (epsilon.unsqueeze(-1)
                * ((1. - rho.unsqueeze(-1)) * chi_ambient * d_empty.unsqueeze(-1)
                   + rho.unsqueeze(-1) * chi_bar * (y.unsqueeze(-1) * d_cell.unsqueeze(-1)
                                                    + d_empty.unsqueeze(-1))))
-        # TODO: try going back and removing epsilon from the rho term
     else:
         raise NotImplementedError(f"model_type was set to {model_type}, "
                                   f"which is not implemented.")
@@ -152,7 +141,8 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.decoder = decoder
         self.use_exact_log_prob = use_exact_log_prob
         self.loss = {'train': {'epoch': [], 'elbo': []},
-                     'test': {'epoch': [], 'elbo': []}}
+                     'test': {'epoch': [], 'elbo': []},
+                     'learning_rate': {'epoch': [], 'value': []}}
         self.empty_UMI_threshold = empty_UMI_threshold
         self.counts_crossover = np.exp(log_counts_crossover)
 
@@ -286,29 +276,6 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 scale=self.d_cell_scale_prior)
                                  .expand_by([x.size(0)]))
 
-            # # TODO: mods ===========
-            #
-            # d_chi = self.decoder.forward(z)
-            # d_cell = d_chi.sum(dim=-1)
-            # chi = d_chi / d_cell.unsqueeze(-1)
-            #
-            # # Posterior regularization for d_cell.
-            # # py_logit = pyro.sample("p_passback", NullDist(torch.ones_like(d_cell)))  # get cell probs from posterior
-            # counts = x.sum(dim=-1, keepdim=False)
-            # not_surely_empty_mask = (counts > self.empty_UMI_threshold).bool().to(self.device)
-            # with poutine.mask(mask=not_surely_empty_mask):
-            #     with poutine.scale(scale=1.):
-            #         # pyro.sample("d_cell_post_reg",
-            #         #             dist.LogNormal(loc=self.d_cell_loc_prior,
-            #         #                            scale=self.d_cell_scale_prior)
-            #         #             .expand_by([x.size(0)]),
-            #         #             obs=d_cell)
-            #         pyro.sample("d_cell_post_reg",
-            #                     dist.Normal(loc=counts, scale=100.),
-            #                     obs=d_cell)
-            #
-            # # TODO: ================
-
             # Sample swapping fraction rho.
             if self.include_rho:
                 rho = pyro.sample("rho", dist.Beta(self.rho_alpha_prior,
@@ -322,8 +289,6 @@ class RemoveBackgroundPyroModel(nn.Module):
                                   dist.Gamma(concentration=self.epsilon_prior,
                                              rate=self.epsilon_prior)
                                   .expand_by([x.size(0)]))
-
-            # print(f'epsilon.mean() is {epsilon.mean()}')
 
             # If modelling empty droplets:
             if self.include_empties:
@@ -427,18 +392,11 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
 
-                # empties_inferred_cells_mask = (torch.where(p_logit_posterior >= 0,
-                #                                            torch.ones_like(counts),
-                #                                            torch.zeros_like(counts))
-                #                                .bool().to(self.device) & surely_empty_mask)
-                #
-                # cells_inferred_empties_mask = (torch.where(((counts >= self.d_cell_loc_prior.exp())
-                #                                             & (p_logit_posterior <= 0)),
-                #                                            torch.ones_like(counts),
-                #                                            torch.zeros_like(counts))
-                #                                .bool().to(self.device))
                 empties_inferred_cells_mask = (surely_empty_mask & (p_logit_posterior >= 0)).bool().to(self.device)
                 cells_inferred_empties_mask = (surely_cell_mask & (p_logit_posterior <= 0)).bool().to(self.device)
+
+                # TODO: change these next two to factors with big penalties
+                # TODO: make it impossible for it to go off the rails
 
                 # For empties where our inference is currently wrong, impose a big penalty.
                 with poutine.mask(mask=empties_inferred_cells_mask):
@@ -587,7 +545,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                                       .expand_by([x.size(0)]))
 
                 enc = self.encoder(x=x,
-                                   chi_ambient=chi_ambient.detach(),  # TODO added 20220512
+                                   chi_ambient=chi_ambient.detach(),
                                    cell_prior_log=self.d_cell_loc_prior)
 
             else:
@@ -607,7 +565,6 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # Sample the Bernoulli y from encoded p(y).
                 y = pyro.sample("y", dist.Bernoulli(logits=enc['p_y']))
 
-                # TODO: mod ==========
                 # Gate d_cell_loc so empty droplets do not give big gradients.
                 prob = enc['p_y'].sigmoid()  # Logits to probability
                 d_cell_loc_gated = (prob * enc['d_loc'] + (1 - prob)
@@ -634,7 +591,6 @@ class RemoveBackgroundPyroModel(nn.Module):
 
             else:
 
-                # TODO: mod ==========
                 # Sample d based on the encoding.
                 pyro.sample("d_cell", dist.LogNormal(loc=enc['d_loc'], scale=d_cell_scale))
 
@@ -683,24 +639,6 @@ class RemoveBackgroundPyroModel(nn.Module):
             # Empirical estimate for d_cell.
             d_cell = x.sum(dim=-1, keepdim=True) - self.d_empty_loc_prior.exp()
 
-            # # TODO: mod ==============
-            # d_chi = self.decoder(z)
-            # d_cell = d_chi.sum(dim=-1, keepdim=True)
-            # chi = d_chi / d_cell
-
-            # with poutine.scale(scale=1.):
-            #     pyro.sample("d_cell_post_reg",
-            #                 dist.LogNormal(loc=self.d_cell_loc_prior,
-            #                                scale=self.d_cell_scale_prior)
-            #                 .expand_by([x.size(0)]),
-            #                 obs=d_cell.squeeze())
-            #
-            #     pyro.sample("d_cell_post_reg",
-            #                 dist.Normal(loc=x.sum(dim=-1).squeeze(),
-            #                             scale=self.d_empty_loc_prior),
-            #                 obs=d_cell.squeeze())
-            # # TODO: ===================
-
             # If modelling empty droplets:
             if self.include_empties:
 
@@ -714,8 +652,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 d_empty = None
 
             # Calculate the mean gene expression counts (for each barcode).
-            mu_cell = chi * d_cell  # TODO
-            # mu_cell = d_chi
+            mu_cell = chi * d_cell
 
             # Calculate the background rate parameter (for each barcode).
             if self.include_empties:
