@@ -829,7 +829,8 @@ def soft_constraint_function(loc: float, scale: float, lower_bound: bool, invert
     inversion_sign = -1 if invert else 1
 
     def _fun(x: torch.Tensor) -> torch.Tensor:
-        return inversion_sign * torch.clamp((sign * (x - loc) * scale).exp() - 1., min=0.)
+        return inversion_sign * (sign * (x - loc) * scale).exp()
+        # return inversion_sign * torch.clamp((sign * (x - loc) * scale).exp() - 1., min=0.)
 
     return _fun
 
