@@ -33,8 +33,7 @@ def is_scheduler(optim):
 
 
 def train_epoch(svi: SVI,
-                train_loader: DataLoader,
-                epoch: Optional[int] = None) -> float:
+                train_loader: DataLoader) -> float:
     """Train a single epoch.
 
     Args:
