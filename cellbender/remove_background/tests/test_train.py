@@ -5,14 +5,13 @@ import pyro.distributions as dist
 import pyro.infer.trace_elbo
 import pytest
 import scipy.sparse as sp
-import numpy as np
 from pyro.infer.svi import SVI
 import unittest.mock
 
 from cellbender.remove_background.run import get_optimizer
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training \
     as prep_data_for_training
-from cellbender.remove_background.train import train_epoch
+from cellbender.remove_background.train import train_epoch, evaluate_epoch
 from .conftest import USE_CUDA
 
 
@@ -30,6 +29,7 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
     n_cells = 3580
     n_empties = 50000
     n_genes = 100
+    learning_rate = 1e-4
     batch_size = 512
     if dropped_minibatch:
         n_cells += 2
@@ -58,7 +58,7 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
         n_batches=len(train_loader),
         batch_size=train_loader.batch_size,
         epochs=epochs,
-        learning_rate=1e-4,
+        learning_rate=learning_rate,
         constant_learning_rate=False,
         total_epochs_for_testing_only=None,
     )
@@ -67,18 +67,38 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
     def _model(x):
         y_mean = pyro.param("y_mean", torch.zeros(1))
         pyro.sample("y_obs", dist.Normal(loc=y_mean, scale=1), obs=x.sum())
+
     def _guide(x):
         pass
+
     svi = SVI(model=_model,
               guide=_guide,
               optim=scheduler,
               loss=pyro.infer.trace_elbo.Trace_ELBO())
 
     # Looking for a RuntimeError raised by the scheduler trying to step too much
-    for i in range(epochs):
-        train_epoch(svi=svi, train_loader=train_loader, epoch=i)
-        for sched in svi.optim.optim_objs.values():
-            print(f'lr = {list(svi.optim.optim_objs.values())[0].get_last_lr()[0]:.2e}')
+    lr = []
+    for _ in range(epochs):
+        train_epoch(svi=svi, train_loader=train_loader)
+        lr.append(list(svi.optim.optim_objs.values())[0].get_last_lr()[0])
+
+    print('learning rates at each epoch:')
+    print('\n'.join([f'[{i + 1:03d}]  {rate:.2e}' for i, rate in enumerate(lr)]))
+
+    # Ensure learning rates are numerically correct
+    # scheduler args include 'max_lr': learning_rate * 10
+    max_lr = 10 * learning_rate
+    initial_lr = max_lr / 25
+    final_lr = initial_lr / 1e4
+    # https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
+    assert lr[len(lr) // 2] > lr[0], 'Cosine LR schedule should have middle > start'
+    assert lr[len(lr) // 2] > lr[-1], 'Cosine LR schedule should have middle > end'
+    torch.testing.assert_close(lr[0], initial_lr + (max_lr - initial_lr) / epochs), \
+        'Starting learning rate for scheduler seems off'
+    torch.testing.assert_close(lr[-1], final_lr), \
+        'Final learning rate for scheduler seems off'
+    # scheduler args include 'max_lr': learning_rate * 10
+    torch.testing.assert_close(max(lr), max_lr), 'Max learning rate in scheduler seems off'
 
     # And one more step ought to raise the error
     with pytest.raises(ValueError,
