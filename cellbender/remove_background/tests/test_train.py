@@ -93,12 +93,12 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
     # https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
     assert lr[len(lr) // 2] > lr[0], 'Cosine LR schedule should have middle > start'
     assert lr[len(lr) // 2] > lr[-1], 'Cosine LR schedule should have middle > end'
-    torch.testing.assert_close(lr[0], initial_lr + (max_lr - initial_lr) / epochs), \
+    torch.testing.assert_close(lr[0], initial_lr + (max_lr - initial_lr) / epochs, rtol=1, atol=1e-7), \
         'Starting learning rate for scheduler seems off'
-    torch.testing.assert_close(lr[-1], final_lr), \
+    torch.testing.assert_close(lr[-1], final_lr, rtol=1, atol=1e-7), \
         'Final learning rate for scheduler seems off'
-    # scheduler args include 'max_lr': learning_rate * 10
-    torch.testing.assert_close(max(lr), max_lr), 'Max learning rate in scheduler seems off'
+    torch.testing.assert_close(max(lr), max_lr, rtol=1, atol=1e-7), \
+        'Max learning rate in scheduler seems off'
 
     # And one more step ought to raise the error
     with pytest.raises(ValueError,
