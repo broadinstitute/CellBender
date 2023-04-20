@@ -824,10 +824,12 @@ class Posterior:
                                                       batch_size=500,
                                                       shuffle=False)
 
-        z = np.zeros((len(data_loader), self.vi_model.encoder['z'].output_dim))
-        d = np.zeros(len(data_loader))
-        p = np.zeros(len(data_loader))
-        epsilon = np.zeros(len(data_loader))
+        n_analyzed = data_loader.dataset.shape[0]
+
+        z = np.zeros((n_analyzed, self.vi_model.encoder['z'].output_dim))
+        d = np.zeros(n_analyzed)
+        p = np.zeros(n_analyzed)
+        epsilon = np.zeros(n_analyzed)
 
         phi_loc = pyro.param('phi_loc')
         phi_scale = pyro.param('phi_scale')
@@ -836,23 +838,27 @@ class Posterior:
         else:
             chi_ambient = None
 
+        start = 0
         for i, data in enumerate(data_loader):
+
+            end = start + data.shape[0]
 
             enc = self.vi_model.encoder(x=data,
                                         chi_ambient=chi_ambient,
                                         cell_prior_log=self.vi_model.d_cell_loc_prior)
-            ind = i * data_loader.batch_size
-            z[ind:(ind + data.shape[0]), :] = enc['z']['loc'].detach().cpu().numpy()
+            z[start:end, :] = enc['z']['loc'].detach().cpu().numpy()
 
-            d[ind:(ind + data.shape[0])] = \
+            d[start:end] = \
                 dist.LogNormal(loc=enc['d_loc'],
                                scale=pyro.param('d_cell_scale')).mean.detach().cpu().numpy()
 
-            p[ind:(ind + data.shape[0])] = enc['p_y'].sigmoid().detach().cpu().numpy()
+            p[start:end] = enc['p_y'].sigmoid().detach().cpu().numpy()
 
-            epsilon[ind:(ind + data.shape[0])] = \
+            epsilon[start:end] = \
                 dist.Gamma(enc['epsilon'] * self.vi_model.epsilon_prior,
                            self.vi_model.epsilon_prior).mean.detach().cpu().numpy()
+
+            start = end
 
         self._latents = {'z': z,
                          'd': d,
