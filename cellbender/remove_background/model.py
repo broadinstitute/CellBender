@@ -20,7 +20,7 @@ from cellbender.remove_background.distributions.NegativeBinomialPoissonConvAppro
 from cellbender.remove_background.distributions.NullDist import NullDist
 from cellbender.remove_background.exceptions import NanException
 
-from typing import Optional, Union, Dict
+from typing import Optional, Union, Dict, Callable
 from numbers import Number
 
 
@@ -392,33 +392,30 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
 
-                empties_inferred_cells_mask = ((surely_empty_mask & (p_logit_posterior >= 0))
-                                               .bool().to(self.device))
-                cells_inferred_empties_mask = ((surely_cell_mask & (p_logit_posterior <= 0))
-                                               .bool().to(self.device))
+                # empties_inferred_cells_mask = ((surely_empty_mask & (p_logit_posterior >= 0))
+                #                                .bool().to(self.device))
+                # cells_inferred_empties_mask = ((surely_cell_mask & (p_logit_posterior <= 0))
+                #                                .bool().to(self.device))
+
+                empty_constraint = soft_constraint_function(loc=-2, scale=2, lower_bound=False)
+                cell_constraint = soft_constraint_function(loc=2, scale=2, lower_bound=True)
 
                 # TODO: change these next two to factors with big penalties
                 # TODO: make it impossible for it to go off the rails
 
                 # For empties where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=empties_inferred_cells_mask):
+                with poutine.mask(mask=surely_empty_mask):
 
                     # Semi-supervision of cell probabilities.
-                    with poutine.scale(scale=consts.REG_SCALE_EMPTY_PROB):
-
-                        pyro.sample("obs_empty_incorrect_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=consts.REG_LOGIT_SCALE),
-                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                    pyro.factor("obs_empty_incorrect_y",
+                                log_factor=empty_constraint(p_logit_posterior))
 
                 # For cells where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=cells_inferred_empties_mask):
+                with poutine.mask(mask=surely_cell_mask):
 
                     # Semi-supervision of cell probabilities.
-                    with poutine.scale(scale=consts.REG_SCALE_CELL_PROB):
-
-                        pyro.sample("obs_cell_incorrect_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=consts.REG_LOGIT_SCALE),
-                                    obs=torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                    pyro.factor("obs_cell_incorrect_y",
+                                log_factor=cell_constraint(p_logit_posterior))
 
                 # Softer semi-supervision to encourage cell probabilities to do the right thing.
                 probably_empty_mask = (counts < self.counts_crossover).bool().to(self.device)
@@ -807,6 +804,34 @@ class RemoveBackgroundPyroModel(nn.Module):
     #                                                     self.epsilon_prior))
     #
     #     return {'y': y, 'p_logit_y': enc['p_y'], 'd_cell': d_cell, 'epsilon': epsilon}
+
+
+def soft_constraint_function(loc: float, scale: float, lower_bound: bool, invert: bool = True) \
+        -> Callable[[torch.Tensor], torch.Tensor]:
+    """Return a function which implements an exponential soft constraint:
+    max(0, exp((1 - 2 * lower_bound) * (x - loc) * scale) - 1)
+
+    NOTE: if lower_bound, then if x > loc, this function returns 0, and if
+    lower_bound = False, then if x < loc, this function returns 0
+
+    Args:
+        loc: value where constraint turns on
+        scale: how fast the constraint blows up. 1 is exponential blow up.
+        lower_bound: True to turn on constraint when x < loc, False to turn on
+            constraint when x > loc
+        invert: True to emit negative values as penalties
+
+    Returns:
+        Function that maps a value to a log prob factor that represents a
+        soft constraint
+    """
+    sign = 1 - 2 * lower_bound
+    inversion_sign = -1 if invert else 1
+
+    def _fun(x: torch.Tensor) -> torch.Tensor:
+        return inversion_sign * torch.clamp((sign * (x - loc) * scale).exp() - 1., min=0.)
+
+    return _fun
 
 
 def get_rho() -> Optional[np.ndarray]:
