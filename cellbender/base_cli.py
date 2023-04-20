@@ -36,13 +36,15 @@ class AbstractCLI(ABC):
         """Return the command-line name of the tool."""
         pass
 
+    @staticmethod
     @abstractmethod
-    def validate_args(self, parser: argparse):
+    def validate_args(parser: argparse) -> argparse.Namespace:
         """Do tool-specific argument validation, returning args."""
         pass
 
+    @staticmethod
     @abstractmethod
-    def run(self, args):
+    def run(args):
         """Run the tool using the parsed arguments."""
         pass
 

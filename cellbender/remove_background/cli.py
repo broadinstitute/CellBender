@@ -10,6 +10,7 @@ from cellbender.remove_background.run import run_remove_background
 import logging
 import os
 import sys
+import argparse
 
 
 class CLI(AbstractCLI):
@@ -22,7 +23,8 @@ class CLI(AbstractCLI):
     def get_name(self) -> str:
         return self.name
 
-    def validate_args(self, args):
+    @staticmethod
+    def validate_args(args) -> argparse.Namespace:
         """Validate parsed arguments."""
 
         # Ensure that if there's a tilde for $HOME in the file path, it works.
@@ -172,11 +174,10 @@ class CLI(AbstractCLI):
             assert args.cdf_threshold_q is not None, \
                 'Input argument --q must be specified when using --estimator cdf'
 
-        self.args = args
-
         return args
 
-    def run(self, args):
+    @staticmethod
+    def run(args):
         """Run the main tool functionality on parsed arguments."""
 
         # Run the tool.
