@@ -514,7 +514,7 @@ class Posterior:
             ind += data.shape[0]  # Same as data_loader.batch_size
 
         # Convert the lists to numpy arrays.
-        log_probs = np.array(log_probs, dtype=np.float)
+        log_probs = np.array(log_probs, dtype=float)
         c = np.array(c, dtype=np.uint32)
         barcodes = np.array(bcs, dtype=np.uint64)  # uint32 is too small!
         genes = np.array(genes, dtype=np.uint64)  # use same as above for IndexConverter
