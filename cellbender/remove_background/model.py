@@ -392,8 +392,10 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
 
-                empties_inferred_cells_mask = (surely_empty_mask & (p_logit_posterior >= 0)).bool().to(self.device)
-                cells_inferred_empties_mask = (surely_cell_mask & (p_logit_posterior <= 0)).bool().to(self.device)
+                empties_inferred_cells_mask = ((surely_empty_mask & (p_logit_posterior >= 0))
+                                               .bool().to(self.device))
+                cells_inferred_empties_mask = ((surely_cell_mask & (p_logit_posterior <= 0))
+                                               .bool().to(self.device))
 
                 # TODO: change these next two to factors with big penalties
                 # TODO: make it impossible for it to go off the rails
