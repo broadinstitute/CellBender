@@ -406,14 +406,14 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # For empties where our inference is currently wrong, impose a big penalty.
                 with poutine.mask(mask=surely_empty_mask):
 
-                    # Semi-supervision of cell probabilities.
+                    # Supervision of empty probabilities.
                     pyro.factor("obs_empty_incorrect_y",
                                 log_factor=empty_constraint(p_logit_posterior))
 
                 # For cells where our inference is currently wrong, impose a big penalty.
                 with poutine.mask(mask=surely_cell_mask):
 
-                    # Semi-supervision of cell probabilities.
+                    # Supervision of cell probabilities.
                     pyro.factor("obs_cell_incorrect_y",
                                 log_factor=cell_constraint(p_logit_posterior))
 
@@ -424,22 +424,22 @@ class RemoveBackgroundPyroModel(nn.Module):
                 with poutine.mask(mask=probably_empty_mask):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_empty_y",
-                                    dist.Normal(loc=p_logit_posterior,
+                                    dist.Normal(loc=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
-                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                                    obs=p_logit_posterior)
 
-                with poutine.mask(mask=surely_empty_mask):
-                    with poutine.scale(scale=consts.REG_SCALE_EMPTY_PROB):
-                        pyro.sample("obs_empty_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=1.0),
-                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                # with poutine.mask(mask=surely_empty_mask):
+                #     with poutine.scale(scale=consts.REG_SCALE_EMPTY_PROB):
+                #         pyro.sample("obs_empty_y",
+                #                     dist.Normal(loc=p_logit_posterior, scale=1.0),
+                #                     obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
 
                 with poutine.mask(mask=probably_cell_mask):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_cell_y",
-                                    dist.Normal(loc=p_logit_posterior,
+                                    dist.Normal(loc=torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
-                                    obs=torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                                    obs=p_logit_posterior)
 
         # Regularization of epsilon.mean()
         # Do it in two batches to reduce the likelihood of compensatory effects in different cell types.
