@@ -4,7 +4,8 @@ import numpy as np
 import torch
 
 from cellbender.remove_background.sparse_utils import todense_fill, \
-    zero_out_csr_rows, dense_to_sparse_op_torch, log_prob_sparse_to_dense
+    csr_set_rows_to_zero, dense_to_sparse_op_torch, log_prob_sparse_to_dense, \
+    overwrite_matrix_with_columns_from_another
 from cellbender.remove_background.data.dataprep import DataLoader
 from .conftest import sparse_matrix_equal
 
@@ -127,3 +128,76 @@ def test_log_prob_sparse_to_dense():
     np.testing.assert_array_equal(mat, truth(-np.inf))
     np.testing.assert_array_equal(mat_nan, truth(np.nan))
     np.testing.assert_array_equal(mat_8, truth(8.))
+
+
+@pytest.mark.parametrize('mat1, mat2, col_inds',
+                         [(sp.csc_matrix([[1, 2], [3, 4]]),
+                           sp.csc_matrix([[0, 0], [0, 0]]),
+                           [0]),
+                          (sp.csc_matrix([[1, 2], [3, 4], [5, 6]]),
+                           sp.csc_matrix([[0, 0], [0, 0], [0, 0]]),
+                           [1]),
+                          (sp.csc_matrix(np.random.poisson(lam=2., size=(10, 10))),
+                           sp.csc_matrix(np.random.poisson(lam=2., size=(10, 10))),
+                           [0, 1, 2, 3])])
+def test_overwrite_matrix_with_columns_from_another(mat1: sp.csc_matrix,
+                                                    mat2: sp.csc_matrix,
+                                                    col_inds: np.ndarray):
+    """test overwrite_matrix_with_columns_from_another()"""
+
+    out = overwrite_matrix_with_columns_from_another(mat1=mat1, mat2=mat2, column_inds=col_inds)
+    excluded_col_inds = [i for i in range(mat1.shape[1]) if i not in col_inds]
+
+    print('col_inds')
+    print(col_inds)
+    print('mat1')
+    print(mat1.todense())
+    print('mat2')
+    print(mat2.todense())
+    print('out')
+    print(out.todense())
+
+    print('assertion')
+    print(out[:, excluded_col_inds].todense())
+    print(mat2[:, excluded_col_inds].todense())
+
+    print('assertion')
+    print(out[:, col_inds].todense())
+    print(mat1[:, col_inds].todense())
+
+    # excluded columns should be replaced with new values
+    assert sparse_matrix_equal(out[:, excluded_col_inds], mat2[:, excluded_col_inds])
+
+    # included columns should be left alone
+    assert sparse_matrix_equal(out[:, col_inds], mat1[:, col_inds])
+
+
+@pytest.mark.parametrize('mat, row_inds',
+                         [(sp.csc_matrix([[1, 2], [3, 4]]),
+                           [0]),
+                          (sp.csc_matrix([[1, 2], [3, 4], [5, 6]]),
+                           [1]),
+                          (sp.csc_matrix(np.random.poisson(lam=2., size=(10, 10))),
+                           [0, 1, 2, 3])])
+def test_csr_set_rows_to_zero(mat: sp.csr_matrix, row_inds: np.ndarray):
+    """test csr_set_rows_to_zero()"""
+
+    out = csr_set_rows_to_zero(csr=mat, row_inds=row_inds)
+    other_row_inds = [i for i in range(mat.shape[0]) if i not in row_inds]
+
+    print('row_inds')
+    print(row_inds)
+    print('mat')
+    print(mat.todense())
+    print('out')
+    print(out.todense())
+
+    print('assertion')
+    print(out[other_row_inds, :].todense())
+    print(mat[other_row_inds, :].todense())
+
+    # other rows should be left alone
+    assert sparse_matrix_equal(out[other_row_inds, :], mat[other_row_inds, :])
+
+    # specified rows should be all zero
+    assert out[row_inds, :].sum() == 0

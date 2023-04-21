@@ -11,9 +11,12 @@ from cellbender.remove_background.data.priors import get_priors, \
     get_cell_count_given_expected_cells, \
     get_empty_count_given_expected_cells_and_total_droplets, \
     compute_crossover_surely_empty_and_stds
+from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero, \
+    overwrite_matrix_with_columns_from_another
 
 from typing import Dict, List, Optional, Iterable, Callable
 import logging
+import argparse
 
 
 logger = logging.getLogger('cellbender')
@@ -521,7 +524,7 @@ class SingleCellRNACountsDataset:
         """
 
         # Rescue the raw data for ignored features.
-        out = _overwrite_matrix_with_columns_from_another(
+        out = overwrite_matrix_with_columns_from_another(
             mat1=inferred_count_matrix,
             mat2=self.data['matrix'],
             column_inds=self.analyzed_gene_inds)
@@ -530,9 +533,28 @@ class SingleCellRNACountsDataset:
         cell_probabilities_all_bcs = np.zeros(out.shape[0])
         cell_probabilities_all_bcs[self.analyzed_barcode_inds] = cell_probabilities_analyzed_bcs
         empty_inds = np.where(cell_probabilities_all_bcs <= consts.CELL_PROB_CUTOFF)[0]
-        out = _csr_set_rows_to_zero(csr=out.tocsr(), row_inds=empty_inds)
+        out = csr_set_rows_to_zero(csr=out.tocsr(), row_inds=empty_inds)
 
         return out.tocsc()
+
+
+def get_dataset_obj(args: argparse.Namespace) -> SingleCellRNACountsDataset:
+    """Helper function that uses the argparse namespace"""
+
+    return SingleCellRNACountsDataset(
+        input_file=args.input_file,
+        expected_cell_count=args.expected_cell_count,
+        total_droplet_barcodes=args.total_droplets,
+        force_cell_umi_prior=args.force_cell_umi_prior,
+        force_empty_umi_prior=args.force_empty_umi_prior,
+        fraction_empties=args.fraction_empties,
+        model_name=args.model,
+        gene_blacklist=args.blacklisted_genes,
+        exclude_features=args.exclude_features,
+        low_count_threshold=args.low_count_threshold,
+        ambient_counts_in_cells_low_limit=args.ambient_counts_in_cells_low_limit,
+        fpr=args.fpr,
+    )
 
 
 # def estimate_cell_count_from_dataset(dataset: SingleCellRNACountsDataset) -> int:
@@ -640,51 +662,6 @@ class SingleCellRNACountsDataset:
 #     chi_bar = torch.tensor(gene_expression_total / np.sum(gene_expression_total))
 #
 #     return chi_ambient_init, chi_bar
-
-
-def _overwrite_matrix_with_columns_from_another(mat1: sp.csc_matrix,
-                                                mat2: sp.csc_matrix,
-                                                column_inds: np.ndarray) -> sp.csc_matrix:
-    """Given two sparse matrices of the same shape, replace columns that are not
-    in `column_inds` in `mat1` with the entries from `mat2`.
-    """
-    column_inds = set(column_inds)
-
-    mat1 = mat1.copy().tocsr()
-    mat2 = mat2.copy().tocsr()  # failure to copy could overwrite actual count data
-
-    # Zero out values in mat2 that are in the specified columns.
-    inds = np.where([i in column_inds for i in mat2.indices])[0]
-    mat2.data[inds] = 0
-    mat2.eliminate_zeros()
-
-    # Zero out values in mat1 that are not in the specified columns.
-    inds = np.where([i not in column_inds for i in mat1.indices])[0]
-    mat1.data[inds] = 0
-    mat1.eliminate_zeros()
-
-    # Put in the new values by addition.
-    output = mat1 + mat2
-
-    return output.tocsc()
-
-
-def _csr_set_rows_to_zero(csr: sp.csr_matrix, row_inds: Iterable[int]):
-    """Set all nonzero elements in rows "row_inds" to zero.
-    Happens in-place, although output is returned as well.
-
-    https://stackoverflow.com/questions/12129948/scipy-sparse-set-row-to-zeros
-    """
-
-    if not isinstance(csr, sp.csr_matrix):
-        try:
-            csr = csr.tocsr()
-        except Exception:
-            raise ValueError('Matrix given must be of CSR format.')
-    for row in row_inds:
-        csr.data[csr.indptr[row]:csr.indptr[row + 1]] = 0
-    csr.eliminate_zeros()
-    return csr
 
 
 def pca_2d(mat: np.ndarray) -> torch.Tensor:

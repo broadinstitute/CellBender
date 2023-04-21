@@ -10,8 +10,11 @@ from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
 
 from abc import ABC, abstractmethod
 from functools import partial
+from itertools import repeat
 import multiprocessing as mp
+import concurrent.futures
 import time
+from datetime import datetime
 import logging
 from typing import Callable, Union, Dict, Generator, Tuple, List, Optional
 
@@ -66,13 +69,20 @@ class EstimationMethod(ABC):
             noise_csr: Noise point estimate, as a CSR sparse matrix.
 
         """
-        row, col = self.index_converter.get_ng_indices(m_inds=m)
-        if noise_offsets is not None:
-            data = data + np.array([noise_offsets[i] for i in m])
-        coo = sp.coo_matrix((data.astype(dtype), (row.astype(dtype), col.astype(dtype))),
-                            shape=self.index_converter.matrix_shape, dtype=dtype)
-        coo.sum_duplicates()
-        return coo.tocsr()
+        return _estimation_array_to_csr(
+            index_converter=self.index_converter,
+            data=data,
+            m=m,
+            noise_offsets=noise_offsets,
+            dtype=dtype,
+        )
+        # row, col = self.index_converter.get_ng_indices(m_inds=m)
+        # if noise_offsets is not None:
+        #     data = data + np.array([noise_offsets[i] for i in m])
+        # coo = sp.coo_matrix((data.astype(dtype), (row.astype(dtype), col.astype(dtype))),
+        #                     shape=self.index_converter.matrix_shape, dtype=dtype)
+        # coo.sum_duplicates()
+        # return coo.tocsr()
 
 
 class SingleSample(EstimationMethod):
@@ -203,6 +213,219 @@ class ThresholdCDF(EstimationMethod):
                                              noise_offsets=noise_offsets)
 
 
+def _estimation_array_to_csr(index_converter,
+                             data: np.ndarray,
+                             m: np.ndarray,
+                             noise_offsets: Optional[Dict[int, int]],
+                             dtype=np.int64) -> sp.csr_matrix:
+    """Say you have point estimates for each count matrix element (data) and
+    you have the 'm'-indices for each value (m). This returns a CSR matrix
+    that has the shape of the count matrix, where duplicate entries have
+    been summed.
+
+    Args:
+        data: Point estimates for each nonzero entry of the count matrix, in
+            a flat format, indexed by 'm'.
+        m: Array of the same length as data, where each entry is an m-index.
+        noise_offsets: Noise count offset values keyed by 'm'.
+        dtype: Data type for sparse matrix. Int32 is too small for 'm' indices.
+
+    Results:
+        noise_csr: Noise point estimate, as a CSR sparse matrix.
+
+    """
+    row, col = index_converter.get_ng_indices(m_inds=m)
+    if noise_offsets is not None:
+        data = data + np.array([noise_offsets[i] for i in m])
+    coo = sp.coo_matrix((data.astype(dtype), (row.astype(dtype), col.astype(dtype))),
+                        shape=index_converter.matrix_shape, dtype=dtype)
+    coo.sum_duplicates()
+    return coo.tocsr()
+
+
+def _mckp_chunk_estimate_noise(
+        noise_log_prob_coo: sp.coo_matrix,
+        index_and_logic: Tuple[int, np.ndarray],
+        noise_offsets: Dict[int, int],
+        noise_targets_per_gene: np.ndarray,
+        index_converter: 'IndexConverter',
+        n_chunks: int,
+        verbose: bool = False) -> sp.csr_matrix:
+    """Given the full probabilistic posterior, compute noise counts. This is
+    to be run for a given chunk of genes at a time.
+
+    Args:
+        noise_log_prob_coo: The noise log prob data structure: log prob
+            values in a (m, c) COO matrix.  One chunk.
+        index_and_logic: (chunk_index, logical_coo_indexer) from the chunked
+            iterator, as you would get from enumerate()
+        noise_targets_per_gene: Integer noise count target for each gene
+        noise_offsets: Noise count offset values keyed by 'm'.
+        index_converter: IndexConverter to go from 'm' to (n, g)
+        n_chunks: Total chunks, for logging purposes only
+        verbose: True to print lots of intermediate information (for tests)
+
+    Returns:
+        noise_count_csr: Estimated noise count matrix.
+    """
+
+    i = index_and_logic[0]
+
+    if i == 0:
+        tt = time.time()
+
+    coo = _subset_coo(noise_log_prob_coo, index_and_logic[1])
+
+    assert noise_targets_per_gene.size == index_converter.total_n_genes, \
+        f'The number of noise count targets ({noise_targets_per_gene.size}) ' \
+        f'must match the number of genes ({index_converter.total_n_genes})'
+
+    # First we need to compute the MAP to find out which direction to go.
+    t = time.time()
+    map_dict = apply_function_dense_chunks(
+        noise_log_prob_coo=coo,
+        fun=MAP.torch_argmax,
+        device='cpu',
+    )
+    map_csr = _estimation_array_to_csr(
+        data=map_dict['result'],
+        m=map_dict['m'],
+        noise_offsets=noise_offsets,
+        index_converter=index_converter,
+    )
+    logger.debug(f'{timestamp()} Computed initial MAP estimate')
+    logger.debug(f'{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec')
+    map_noise_counts_per_gene = np.array(map_csr.sum(axis=0)).squeeze()
+    additional_noise_counts_per_gene = (noise_targets_per_gene
+                                        - map_noise_counts_per_gene).astype(int)
+    set_positive_genes = set(np.where(additional_noise_counts_per_gene > 0)[0])
+    set_negative_genes = set(np.where(additional_noise_counts_per_gene < 0)[0])  # leave out exact matches
+    abs_additional_noise_counts_per_gene = np.abs(additional_noise_counts_per_gene)
+
+    # Determine which genes need to add and which need to subtract noise counts.
+    n, g = index_converter.get_ng_indices(m_inds=coo.row)
+    df = pd.DataFrame(data={'m': coo.row,
+                            'n': n,
+                            'g': g,
+                            'c': coo.col,
+                            'log_prob': coo.data})
+    logger.debug(f'{timestamp()} Computing step directions')
+    df['positive_step_gene'] = df['g'].apply(lambda gene: gene in set_positive_genes)
+    df['negative_step_gene'] = df['g'].apply(lambda gene: gene in set_negative_genes)
+    df['step_direction'] = (df['positive_step_gene'].astype(int)
+                            - df['negative_step_gene'].astype(int))  # -1 or 1
+    logger.debug(f'{timestamp()} Step directions done')
+
+    if verbose:
+        pd.set_option('display.width', 120)
+        pd.set_option('display.max_columns', 20)
+        print(df, end='\n\n')
+
+    # Remove all 'm' entries corresponding to genes where target is met by MAP.
+    df = df[df['step_direction'] != 0]
+
+    # Now we mask out log probs (-np.inf) that represent steps in the wrong direction.
+    logger.debug(f'{timestamp()} Masking')
+    lookup_map_from_m = dict(zip(map_dict['m'], map_dict['result']))
+    df['map'] = df['m'].apply(lambda x: lookup_map_from_m[x])
+    df['mask'] = ((df['negative_step_gene'] & (df['c'] > df['map']))
+                  | (df['positive_step_gene'] & (df['c'] < df['map'])))  # keep MAP
+    df.loc[df['mask'], 'log_prob'] = -np.inf
+    logger.debug(f'{timestamp()} Masking done')
+
+    # And we remove those entries.
+    df = df[~df['mask']]
+    df = df[[c for c in df.columns if (c != 'mask')]]
+
+    # Sort
+    logger.debug(f'{timestamp()} Sorting')
+    df = df.sort_values(by=['m', 'c'])
+    logger.debug(f'{timestamp()} Sorting done')
+
+    if verbose:
+        print(df, end='\n\n')
+
+    # Do diff for positive and negative separately, without grouping (faster)
+    df_positive_steps = df[df['step_direction'] == 1].copy()
+    df_negative_steps = df[df['step_direction'] == -1].copy()
+
+    logger.debug(f'{timestamp()} Computing deltas')
+    if len(df_positive_steps > 0):
+        df_positive_steps.loc[:, 'delta'] = df_positive_steps['log_prob'].diff(periods=1).apply(np.abs)
+        df_positive_steps.loc[df_positive_steps['c'] == df_positive_steps['map'], 'delta'] = np.nan
+    if len(df_negative_steps > 0):
+        df_negative_steps.loc[:, 'delta'] = df_negative_steps['log_prob'].diff(periods=-1).apply(np.abs)
+        df_negative_steps.loc[df_negative_steps['c'] == df_negative_steps['map'], 'delta'] = np.nan
+    df = pd.concat([df_positive_steps, df_negative_steps], axis=0)
+    logger.debug(f'{timestamp()} Computing deltas done')
+
+    if verbose:
+        print(df, end='\n\n')
+
+    # if this is an empty dataframe, we are not doing anything here beyond MAP
+    if len(df) == 0:
+        return map_csr
+
+    # Remove irrelevant entries: those with infinite delta.
+    df = df[df['delta'].apply(np.isfinite)]
+
+    # if this is an empty dataframe, we are not doing anything here beyond MAP
+    if len(df) == 0:
+        return map_csr
+
+    # How many additional noise counts ("steps") we will need for each gene.
+    logger.debug(f'{timestamp()} Computing nsmallest')
+    df['topk'] = df['g'].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
+
+    if verbose:
+        print(df, end='\n\n')
+
+    # Now we want the smallest additional_noise_counts_per_gene deltas for each gene.
+    # https://stackoverflow.com/questions/55179493/
+    df_out = df[['m', 'g', 'delta', 'topk']].groupby('g', group_keys=False).apply(
+        lambda x: x.nsmallest(x['topk'].iat[0], columns='delta')
+    )
+    logger.debug(f'{timestamp()} Computing nsmallest done')
+
+    if verbose:
+        print(df_out, end='\n\n')
+
+    # if this is an empty dataframe, we are not doing anything here beyond MAP
+    if len(df_out) == 0:
+        return map_csr
+
+    # And the number by which to increment noise counts per entry 'm' is
+    # now the number of times that each m value appears in this dataframe.
+    logger.debug(f'{timestamp()} Summarizing steps')
+    vc = df_out['m'].value_counts()
+    vc_df = pd.DataFrame(data={'m': vc.index, 'steps': vc.values})
+    step_direction_lookup_from_m = dict(zip(df['m'], df['step_direction']))
+    vc_df['step_direction'] = vc_df['m'].apply(lambda x: step_direction_lookup_from_m[x])
+    vc_df['counts'] = vc_df['steps'] * vc_df['step_direction']
+    steps_csr = _estimation_array_to_csr(
+        data=vc_df['counts'],
+        m=vc_df['m'],
+        noise_offsets=None,
+        index_converter=index_converter,
+    )
+    logger.debug(f'{timestamp()} Summarizing steps done')
+
+    if verbose:
+        print(vc_df, end='\n\n')
+        print('MAP:')
+        print(map_csr.todense())
+
+    logger.info(f'Completed chunk ({i + 1} / {n_chunks})')
+    print(f'Completed chunk ({i + 1} / {n_chunks})')  # because logging from a process does not work right
+    if i == 0:
+        logger.info(f'    [single chunk took {(time.time() - tt):.2f} mins]')
+        print(f'    [single chunk took {(time.time() - tt):.2f} mins]')
+
+    # The final output is those tabulated steps added to the MAP.
+    # The MAP already has the noise offsets, so they are not added to steps_csr.
+    return map_csr + steps_csr
+
+
 class MultipleChoiceKnapsack(EstimationMethod):
     """Noise estimation via solving a constrained multiple choice knapsack problem"""
 
@@ -212,6 +435,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
                        noise_targets_per_gene: np.ndarray,
                        verbose: bool = False,
                        n_chunks: Optional[int] = None,
+                       use_multiple_processes: bool = False,
                        **kwargs) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts
 
@@ -222,42 +446,98 @@ class MultipleChoiceKnapsack(EstimationMethod):
             noise_offsets: Noise count offset values keyed by 'm'.
             verbose: True to print lots of intermediate information (for tests)
             n_chunks: Target number of chunks over which to split estimation.
-                If None, targets about 1000 genes per chunk.
+                If None, targets about 5000 genes per chunk.
+            use_multiple_processes: True to use multiprocessing. Seems faster
+                without using it, not entirely clear why
 
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
         if n_chunks is None:
-            n_chunks = self.index_converter.total_n_genes // 1000
+            n_chunks = max(1, self.index_converter.total_n_genes // 5000)
             logger.debug(f'Running MCKP estimator in {n_chunks} chunks')
 
-        t = time.time()
-        csr_matrices = []
-        for i, noise_coo_chunk in enumerate(
+        t0 = time.time()
+
+        if use_multiple_processes:
+
+            logger.info('Dividing dataset into chunks of genes')
+            chunk_logic_list = list(
                 self._gene_chunk_iterator(
                     noise_log_prob_coo=noise_log_prob_coo,
                     n_chunks=n_chunks,
                 )
-        ):
-            logger.info(f'Working on chunk ({i + 1}/{n_chunks})')
-            chunk_csr = self._chunk_estimate_noise(
-                noise_log_prob_coo=noise_coo_chunk,
-                noise_offsets=noise_offsets,
-                noise_targets_per_gene=noise_targets_per_gene,
-                verbose=verbose,
             )
-            if i == 0:
-                logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
-            logger.debug(f'{timestamp()} Estimator chunk {i}: shape is {chunk_csr.shape}')
-            csr_matrices.append(chunk_csr)
 
-        logger.debug(f'{timestamp()} Total MCKP estimation time = {(time.time() - t):.2f} sec')
+            logger.info('Computing the output in asynchronous chunks in parallel...')
+
+            # with mp.get_context('spawn').Pool(processes=mp.cpu_count()) as pool:
+            #     csr_matrices = pool.starmap(
+            #         _mckp_chunk_estimate_noise,
+            #         zip(
+            #             repeat(noise_log_prob_coo),
+            #             enumerate(chunk_logic_list),
+            #             repeat(noise_offsets),
+            #             repeat(noise_targets_per_gene),
+            #             repeat(self.index_converter),
+            #             repeat(n_chunks),
+            #             repeat(False),  # verbose
+            #         ),
+            #     )
+
+            futures = []
+            with concurrent.futures.ProcessPoolExecutor(
+                    max_workers=mp.cpu_count(),
+                    mp_context=mp.get_context('spawn')) as executor:
+                for i, logic in enumerate(chunk_logic_list):
+                    kwargs = {
+                        'noise_log_prob_coo': noise_log_prob_coo,
+                        'index_and_logic': (i, logic),
+                        'noise_offsets': noise_offsets,
+                        'noise_targets_per_gene': noise_targets_per_gene,
+                        'index_converter': self.index_converter,
+                        'n_chunks': n_chunks,
+                        'verbose': False,
+                    }
+                    future = executor.submit(_mckp_chunk_estimate_noise, **kwargs)
+                    futures.append(future)
+
+                done, not_done = concurrent.futures.wait(
+                    futures,
+                    return_when=concurrent.futures.ALL_COMPLETED,
+                )
+                csr_matrices = [f.result() for f in futures]
+
+        else:
+
+            t = time.time()
+
+            csr_matrices = []
+            for i, logic in enumerate(
+                    self._gene_chunk_iterator(
+                        noise_log_prob_coo=noise_log_prob_coo,
+                        n_chunks=n_chunks,
+                    )
+            ):
+                logger.info(f'Working on chunk ({i + 1}/{n_chunks})')
+                chunk_csr = self._chunk_estimate_noise(
+                    noise_log_prob_coo=_subset_coo(noise_log_prob_coo, logic),
+                    noise_offsets=noise_offsets,
+                    noise_targets_per_gene=noise_targets_per_gene,
+                    verbose=verbose,
+                )
+                csr_matrices.append(chunk_csr)
+                if i == 0:
+                    logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
+                logger.debug(f'{timestamp()} Estimator chunk {i}: shape is {chunk_csr.shape}')
+
+        logger.info(f'{timestamp()} Total MCKP estimation time = {(time.time() - t0):.2f} sec')
         return sum(csr_matrices)
 
     def _gene_chunk_iterator(self,
                              noise_log_prob_coo: sp.coo_matrix,
                              n_chunks: int) \
-            -> Generator[sp.coo_matrix, None, None]:
+            -> Generator[np.ndarray, None, None]:
         """Yields chunks of the posterior that can be treated as independent,
         from the standpoint of MCKP count estimation.  That is, they contain all
         matrix entries for any genes they include.
@@ -267,42 +547,60 @@ class MultipleChoiceKnapsack(EstimationMethod):
             n_chunks: For testing, force this many chunks
 
         Yields:
-            coo posterior for the chunk
+            Logical array which indexes elements of coo posterior for the chunk
         """
 
         # approximate number of entries in a chunk
-        approx_chunk_entries = (noise_log_prob_coo.data.size - 1) // n_chunks
+        # approx_chunk_entries = (noise_log_prob_coo.data.size - 1) // n_chunks
 
         # get gene annotations
         _, genes = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
+        genes_series = pd.Series(genes)
 
         # things we need to keep track of for each chunk
-        current_chunk_genes = []
-        entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
+        # current_chunk_genes = []
+        # entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
 
-        def _subset_coo(coo: sp.coo_matrix, logic: np.ndarray) -> sp.coo_matrix:
-            return sp.coo_matrix((coo.data[logic], (coo.row[logic], coo.col[logic])))
+        # TODO eliminate for loop to speed this up
+        # take the list of genes from the coo, sort it, and divide it evenly
+        # somehow break ties for genes overlapping boundaries of divisions
+        sorted_genes = np.sort(genes)
+        gene_arrays = np.array_split(sorted_genes, n_chunks)
+        last_gene_set = {}
+        for gene_array in gene_arrays:
+            gene_set = set(gene_array)
+            gene_set = gene_set.difference(last_gene_set)  # only the new stuff
+            # if there is a second chunk, make sure there is a gene unique to it
+            if (n_chunks > 1) and (len(gene_set) == len(set(genes))):  # all genes in first set
+                # this mainly exists for tests
+                gene_set = gene_set - {gene_arrays[-1][-1]}
+            last_gene_set = gene_set
+            entry_logic = genes_series.isin(gene_set).values
+            if sum(entry_logic) > 0:
+                yield entry_logic
 
-        # go through all genes
-        for g in np.unique(genes):
-
-            # append current gene
-            current_chunk_genes.append(g)
-            entry_logic = entry_logic | (genes == g)
-
-            # figure out when to send out a chunk
-            if entry_logic.sum() >= approx_chunk_entries:
-                logger.debug(f'{timestamp()} New gene chunk being processed by MCKP')
-                yield _subset_coo(noise_log_prob_coo, entry_logic)
-
-                # keep track and reset stuff
-                entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
-                current_chunk_genes = []
-
-        # last bit
-        if entry_logic.sum() > 0:
-            logger.debug(f'{timestamp()} New gene chunk being processed by MCKP')
-            yield _subset_coo(noise_log_prob_coo, entry_logic)
+        # # go through all genes
+        # for g in np.unique(genes):
+        #
+        #     # append current gene
+        #     current_chunk_genes.append(g)
+        #     entry_logic = entry_logic | (genes == g)
+        #
+        #     # figure out when to send out a chunk
+        #     if entry_logic.sum() >= approx_chunk_entries:
+        #         logger.debug(f'{timestamp()} New gene chunk being processed by MCKP')
+        #         print(entry_logic)
+        #         yield entry_logic  # _subset_coo(noise_log_prob_coo, entry_logic)
+        #
+        #         # keep track and reset stuff
+        #         entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
+        #         current_chunk_genes = []
+        #
+        # # last bit
+        # if entry_logic.sum() > 0:
+        #     logger.debug(f'{timestamp()} New gene chunk being processed by MCKP')
+        #     print(entry_logic)
+        #     yield entry_logic  # _subset_coo(noise_log_prob_coo, entry_logic)
 
     def _chunk_estimate_noise(self,
                               noise_log_prob_coo: sp.coo_matrix,
@@ -606,5 +904,9 @@ def _parallel_pandas_apply(df_grouped: pd.core.groupby.DataFrameGroupBy,
     return np.array(groupby_val), np.array(output_list)
 
 
+def _subset_coo(coo: sp.coo_matrix, logic: np.ndarray) -> sp.coo_matrix:
+    return sp.coo_matrix((coo.data[logic], (coo.row[logic], coo.col[logic])))
+
+
 def timestamp() -> str:
-    return f'({time.strftime("%H:%M:%S", time.gmtime())})'
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')

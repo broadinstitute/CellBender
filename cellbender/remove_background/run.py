@@ -1,7 +1,8 @@
 """Single run of remove-background, given input arguments."""
 
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
-from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
+from cellbender.remove_background.data.dataset import get_dataset_obj, \
+    SingleCellRNACountsDataset
 from cellbender.remove_background.vae.decoder import Decoder
 from cellbender.remove_background.vae.encoder \
     import EncodeZ, CompositeEncoder, EncodeNonZLatents
@@ -16,7 +17,7 @@ from cellbender.remove_background.posterior import Posterior, PRq, PRmu, \
 from cellbender.remove_background.estimation import MultipleChoiceKnapsack, \
     MAP, Mean, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
-from cellbender.remove_background.sparse_utils import zero_out_csr_rows
+from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 from cellbender.remove_background.report import run_notebook_make_html
 
@@ -46,7 +47,7 @@ import matplotlib.pyplot as plt  # This needs to be after matplotlib.use('Agg')
 logger = logging.getLogger('cellbender')
 
 
-def run_remove_background(args: argparse.Namespace):
+def run_remove_background(args: argparse.Namespace) -> Posterior:
     """The full script for the command line tool to remove background RNA.
 
     Args:
@@ -74,19 +75,7 @@ def run_remove_background(args: argparse.Namespace):
 
     # Load data from file and choose barcodes and genes to analyze.
     try:
-        dataset_obj = \
-            SingleCellRNACountsDataset(input_file=args.input_file,
-                                       expected_cell_count=args.expected_cell_count,
-                                       total_droplet_barcodes=args.total_droplets,
-                                       force_cell_umi_prior=args.force_cell_umi_prior,
-                                       force_empty_umi_prior=args.force_empty_umi_prior,
-                                       fraction_empties=args.fraction_empties,
-                                       model_name=args.model,
-                                       gene_blacklist=args.blacklisted_genes,
-                                       exclude_features=args.exclude_features,
-                                       low_count_threshold=args.low_count_threshold,
-                                       ambient_counts_in_cells_low_limit=args.ambient_counts_in_cells_low_limit,
-                                       fpr=args.fpr)
+        dataset_obj = get_dataset_obj(args=args)
 
     except OSError:
         logger.error(f"OSError: Unable to open file {args.input_file}.")
@@ -140,6 +129,8 @@ def run_remove_background(args: argparse.Namespace):
 
         logger.info("Completed remove-background.")
         logger.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S\n'))
+
+        return posterior
 
     # The exception allows user to end inference prematurely with CTRL-C.
     except KeyboardInterrupt:
@@ -294,9 +285,8 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
         count_matrix = posterior.dataset_obj.data['matrix']  # all barcodes
         cell_inds = posterior.dataset_obj.analyzed_barcode_inds[posterior.latents_map['p']
                                                                 > consts.CELL_PROB_CUTOFF]
-        non_cell_row_logic = np.array([i not in cell_inds
-                                       for i in range(count_matrix.shape[0])])
-        cell_counts = zero_out_csr_rows(csr=count_matrix, row_logic=non_cell_row_logic)
+        empty_inds = set(range(count_matrix.shape[0])) - set(cell_inds)
+        cell_counts = csr_set_rows_to_zero(csr=count_matrix, row_inds=empty_inds)
 
         noise_target_fun_per_cell = compute_mean_target_removal_as_function(
             noise_count_posterior_coo=posterior._noise_count_posterior_coo,
@@ -351,6 +341,7 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
             q=args.cdf_threshold_q,
             alpha=args.prq_alpha,
             device='cuda' if args.use_cuda else 'cpu',
+            use_multiple_processes=args.use_multiprocessing_estimation,
         )
 
         # Restore eliminated features in cells.

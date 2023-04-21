@@ -119,7 +119,7 @@ def generate_summary_plots(input_file: str,
     print(adata)
 
     # bit of pre-compute
-    cells = (adata.obs['cell_probability'] > 0.5)
+    cells = (adata.obs['cell_probability'] > consts.CELL_PROB_CUTOFF)
     adata.var['n_removed'] = adata.var[f'n_{input_layer_key}'] - adata.var[f'n_{out_key}']
     adata.var['fraction_removed'] = adata.var['n_removed'] / (adata.var[f'n_{input_layer_key}'] + 1e-5)
     adata.var['fraction_remaining'] = adata.var[f'n_{out_key}'] / (adata.var[f'n_{input_layer_key}'] + 1e-5)
@@ -741,17 +741,27 @@ def assess_count_removal_per_gene(adata, raw_full_adata,
 
 
 def plot_counts_and_probs_per_cell(adata, input_layer_key='raw'):
-    in_counts = np.array(adata.layers[input_layer_key].sum(axis=1)).squeeze()
+
+    limit_to_features_analyzed = True
+
+    if limit_to_features_analyzed:
+        var_logic = adata.var['cellbender_analyzed']
+    else:
+        var_logic = ...
+
+    in_counts = np.array(adata.layers[input_layer_key][:, var_logic].sum(axis=1)).squeeze()
+    cellbender_counts = np.array(adata.layers['cellbender'][:, var_logic].sum(axis=1)).squeeze()
     order = np.argsort(in_counts)[::-1]
-    plt.semilogy(in_counts[order], label=input_layer_key)
-    plt.semilogy(np.array(adata.layers['cellbender'].sum(axis=1)).squeeze()[order],
-                 '.:', alpha=0.5, label='cellbender')
+    plt.semilogy(cellbender_counts[order], '.:', ms=3, color='lightgray', alpha=0.5, label='cellbender')
+    plt.semilogy(in_counts[order], 'k-', lw=1, label=input_layer_key)
     plt.xlabel('Sorted barcode ID')
-    plt.ylabel('Unique UMI counts')
-    plt.legend()
+    plt.ylabel('Unique UMI counts' + ('\n(for features analyzed by CellBender)'
+                                      if limit_to_features_analyzed else ''))
+    plt.legend(loc='lower left', title='UMI counts')
     plt.gca().twinx()
-    plt.plot(adata.obs['cell_probability'][order].values, '.:', alpha=0.3, color='red')
+    plt.plot(adata.obs['cell_probability'][order].values, '.', ms=2, alpha=0.2, color='red')
     plt.ylabel('Inferred cell probability', color='red')
+    plt.yticks([0, 0.25, 0.5, 0.75, 1.0], color='red')
     plt.ylim([-0.05, 1.05])
     plt.show()
 
