@@ -6,6 +6,7 @@ import cellbender
 from cellbender.base_cli import AbstractCLI, get_version
 from cellbender.remove_background.checkpoint import create_workflow_hashcode
 from cellbender.remove_background.run import run_remove_background
+from cellbender.remove_background.posterior import Posterior
 
 import logging
 import os
@@ -177,11 +178,11 @@ class CLI(AbstractCLI):
         return args
 
     @staticmethod
-    def run(args):
+    def run(args) -> Posterior:
         """Run the main tool functionality on parsed arguments."""
 
         # Run the tool.
-        main(args)
+        return main(args)
 
 
 def setup_and_logging(args):
@@ -194,7 +195,7 @@ def setup_and_logging(args):
     logger = logging.getLogger('cellbender')  # name of the logger
     logger.setLevel(logging.INFO if not args.debug else logging.DEBUG)
     formatter = logging.Formatter('cellbender:remove-background: %(message)s')
-    file_handler = logging.FileHandler(filename=log_file, mode='w')
+    file_handler = logging.FileHandler(filename=log_file, mode='w', encoding='UTF-8')
     console_handler = logging.StreamHandler()
     file_handler.setFormatter(formatter)  # set the file format
     console_handler.setFormatter(formatter)  # use the same format for stdout
@@ -220,11 +221,13 @@ def setup_and_logging(args):
     return args, file_handler
 
 
-def main(args):
+def main(args) -> Posterior:
     """Take command-line input, parse arguments, and run tests or tool."""
 
     args, file_handler = setup_and_logging(args)
 
     # Run the tool.
-    run_remove_background(args)
+    posterior = run_remove_background(args)
     file_handler.close()
+
+    return posterior
