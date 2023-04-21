@@ -14,7 +14,7 @@ from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.estimation import EstimationMethod, \
     MultipleChoiceKnapsack, Mean, MAP, apply_function_dense_chunks
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
-    log_prob_sparse_to_dense, zero_out_csr_rows
+    log_prob_sparse_to_dense, csr_set_rows_to_zero
 from cellbender.remove_background.checkpoint import load_from_checkpoint, \
     unpack_tarball, make_tarball
 
@@ -276,8 +276,8 @@ class Posterior:
         count_matrix = self.dataset_obj.data['matrix']  # all barcodes
         cell_inds = self.dataset_obj.analyzed_barcode_inds[self.latents_map['p']
                                                            > consts.CELL_PROB_CUTOFF]
-        non_cell_row_logic = np.array([i not in cell_inds for i in range(count_matrix.shape[0])])
-        cell_counts = zero_out_csr_rows(csr=count_matrix, row_logic=non_cell_row_logic)
+        empty_inds = set(range(count_matrix.shape[0])) - set(cell_inds)
+        cell_counts = csr_set_rows_to_zero(csr=count_matrix, row_inds=empty_inds)
         denoised_counts = cell_counts - noise_csr
 
         return denoised_counts.tocsc()
@@ -1427,11 +1427,9 @@ class PRmu(PosteriorRegularization):
         # Compute target removal for MAP estimate using regularized posterior.
         n, g = index_converter.get_ng_indices(m_inds=posterior_subset_coo.row)
         included_cells = set(np.unique(n))
-        zero_out_logic = np.array([i not in included_cells
-                                   for i in range(raw_count_matrix.shape[0])])
-        # print(zero_out_logic)
-        raw_count_csr_for_cells = zero_out_csr_rows(csr=raw_count_matrix,
-                                                    row_logic=zero_out_logic)
+        excluded_barcode_inds = set(range(raw_count_matrix.shape[0])) - included_cells
+        raw_count_csr_for_cells = csr_set_rows_to_zero(csr=raw_count_matrix,
+                                                       row_inds=excluded_barcode_inds)
         # print(raw_count_csr_for_cells)
         logger.debug('Computing target removal')
         target_fun = compute_mean_target_removal_as_function(
