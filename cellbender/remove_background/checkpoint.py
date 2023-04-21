@@ -2,6 +2,10 @@
 
 from cellbender.remove_background import consts
 from cellbender.remove_background.data.dataprep import DataLoader
+from cellbender.remove_background.data.dataset import get_dataset_obj, \
+    SingleCellRNACountsDataset
+from cellbender.remove_background.model import RemoveBackgroundPyroModel
+from cellbender.remove_background.posterior import Posterior
 
 import torch
 import numpy as np
@@ -176,6 +180,24 @@ def save_checkpoint(filebase: str,
         return False
 
 
+def restore_all_from_checkpoint(tarball_name: str, input_file: str) \
+        -> Tuple[SingleCellRNACountsDataset, RemoveBackgroundPyroModel, Posterior]:
+    """Convenience function not used by the codebase"""
+
+    d = load_checkpoint(filebase=None, tarball_name=tarball_name)
+    d.update(load_from_checkpoint(filebase=None, tarball_name=tarball_name, to_load=['posterior']))
+    d['args'].input_file = input_file
+
+    dataset_obj = get_dataset_obj(args=d['args'])
+
+    posterior = Posterior(
+        dataset_obj=dataset_obj,
+        vi_model=d['model'],
+    )
+    posterior.load(file=d['posterior_file'])
+    return dataset_obj, d['model'], posterior
+
+
 def load_checkpoint(filebase: Optional[str],
                     tarball_name: str = consts.CHECKPOINT_FILE_NAME,
                     force_device: Optional[str] = None)\
@@ -185,7 +207,7 @@ def load_checkpoint(filebase: Optional[str],
     out = load_from_checkpoint(
         filebase=filebase,
         tarball_name=tarball_name,
-        to_load=['model', 'optim', 'param_store' ,'dataloader', 'args', 'random_state'],
+        to_load=['model', 'optim', 'param_store', 'dataloader', 'args', 'random_state'],
         force_device=force_device,
     )
     out.update({'loaded': True})
