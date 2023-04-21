@@ -20,7 +20,7 @@ from cellbender.remove_background.distributions.NegativeBinomialPoissonConvAppro
 from cellbender.remove_background.distributions.NullDist import NullDist
 from cellbender.remove_background.exceptions import NanException
 
-from typing import Optional, Union, Dict
+from typing import Optional, Union, Dict, Callable
 from numbers import Number
 
 
@@ -258,7 +258,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                                          self.phi_rate_prior))
 
         # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.shape[0], #self.n_droplets,
+        with pyro.plate("data", x.shape[0],
                         use_cuda=self.use_cuda, device=self.device):
 
             # Sample z from prior.
@@ -392,33 +392,22 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
 
-                empties_inferred_cells_mask = ((surely_empty_mask & (p_logit_posterior >= 0))
-                                               .bool().to(self.device))
-                cells_inferred_empties_mask = ((surely_cell_mask & (p_logit_posterior <= 0))
-                                               .bool().to(self.device))
-
-                # TODO: change these next two to factors with big penalties
-                # TODO: make it impossible for it to go off the rails
+                empty_constraint = soft_constraint_function(loc=-2, scale=2, lower_bound=False)
+                cell_constraint = soft_constraint_function(loc=2, scale=2, lower_bound=True)
 
                 # For empties where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=empties_inferred_cells_mask):
+                with poutine.mask(mask=surely_empty_mask):
 
-                    # Semi-supervision of cell probabilities.
-                    with poutine.scale(scale=consts.REG_SCALE_EMPTY_PROB):
-
-                        pyro.sample("obs_empty_incorrect_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=consts.REG_LOGIT_SCALE),
-                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                    # Supervision of empty probabilities.
+                    pyro.factor("obs_surely_empty_y",
+                                log_factor=empty_constraint(p_logit_posterior))
 
                 # For cells where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=cells_inferred_empties_mask):
+                with poutine.mask(mask=surely_cell_mask):
 
-                    # Semi-supervision of cell probabilities.
-                    with poutine.scale(scale=consts.REG_SCALE_CELL_PROB):
-
-                        pyro.sample("obs_cell_incorrect_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=consts.REG_LOGIT_SCALE),
-                                    obs=torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                    # Supervision of cell probabilities.
+                    pyro.factor("obs_surely_cell_y",
+                                log_factor=cell_constraint(p_logit_posterior))
 
                 # Softer semi-supervision to encourage cell probabilities to do the right thing.
                 probably_empty_mask = (counts < self.counts_crossover).bool().to(self.device)
@@ -427,25 +416,18 @@ class RemoveBackgroundPyroModel(nn.Module):
                 with poutine.mask(mask=probably_empty_mask):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_empty_y",
-                                    dist.Normal(loc=p_logit_posterior,
+                                    dist.Normal(loc=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
-                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
-
-                with poutine.mask(mask=surely_empty_mask):
-                    with poutine.scale(scale=consts.REG_SCALE_EMPTY_PROB):
-                        pyro.sample("obs_empty_y",
-                                    dist.Normal(loc=p_logit_posterior, scale=1.0),
-                                    obs=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                                    obs=p_logit_posterior)
 
                 with poutine.mask(mask=probably_cell_mask):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_cell_y",
-                                    dist.Normal(loc=p_logit_posterior,
+                                    dist.Normal(loc=torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
-                                    obs=torch.ones_like(y) * consts.REG_LOGIT_MEAN)
+                                    obs=p_logit_posterior)
 
         # Regularization of epsilon.mean()
-        # Do it in two batches to reduce the likelihood of compensatory effects in different cell types.
         if surely_cell_mask.sum() >= 2:
             epsilon_mean = epsilon[surely_cell_mask].mean()
             with poutine.scale(scale=surely_cell_mask.sum() / 10.):
@@ -529,7 +511,7 @@ class RemoveBackgroundPyroModel(nn.Module):
         pyro.sample("phi", dist.Gamma(phi_conc, phi_rate))
 
         # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.shape[0], #self.n_droplets,
+        with pyro.plate("data", x.shape[0],
                         use_cuda=self.use_cuda, device=self.device):
 
             # Sample swapping fraction rho.
@@ -588,8 +570,6 @@ class RemoveBackgroundPyroModel(nn.Module):
 
                     epsilon = pyro.sample("epsilon", dist.Gamma(epsilon_gated * self.epsilon_prior,
                                                                 self.epsilon_prior))
-                    # TODO: mod =======
-                    # epsilon = pyro.sample("epsilon", dist.Delta(enc['epsilon']))
 
             else:
 
@@ -600,213 +580,34 @@ class RemoveBackgroundPyroModel(nn.Module):
                 pyro.sample("z", dist.Normal(loc=enc['z']['loc'], scale=enc['z']['scale'])
                             .to_event(1))
 
-    def vae_model(self, x: torch.Tensor):
-        """Simplified model intended to pre-train the VAE
 
-            Args:
-                x: Mini-batch of data. Barcodes are rows, genes are columns.
+def soft_constraint_function(loc: float, scale: float, lower_bound: bool, invert: bool = True) \
+        -> Callable[[torch.Tensor], torch.Tensor]:
+    """Return a function which implements an exponential soft constraint:
+    exp((1 - 2 * lower_bound) * (x - loc) * scale)
 
-        """
+    NOTE: if lower_bound, then if x > loc, this function returns 0, and if
+    lower_bound = False, then if x < loc, this function returns 0
 
-        # Register the decoder with pyro.
-        pyro.module("decoder", self.decoder)
+    Args:
+        loc: value where constraint turns on
+        scale: how fast the constraint blows up. 1 is exponential blow up.
+        lower_bound: True to turn on constraint when x < loc, False to turn on
+            constraint when x > loc
+        invert: True to emit negative values as penalties
 
-        # Register the hyperparameter for ambient gene expression.
-        if self.include_empties:
-            chi_ambient = pyro.param("chi_ambient",
-                                     self.chi_ambient_init *
-                                     torch.ones(torch.Size([])).to(self.device),
-                                     constraint=constraints.simplex).detach()
-        else:
-            chi_ambient = None
+    Returns:
+        Function that maps a value to a log prob factor that represents a
+        soft constraint
+    """
+    sign = 1 - 2 * lower_bound
+    inversion_sign = -1 if invert else 1
 
-        # Sample phi from Gamma prior, and do not train it.
-        phi = pyro.sample("phi",
-                          dist.Gamma(self.phi_conc_prior,
-                                     self.phi_rate_prior)).detach()
+    def _fun(x: torch.Tensor) -> torch.Tensor:
+        return inversion_sign * (sign * (x - loc) * scale).exp()
+        # return inversion_sign * torch.clamp((sign * (x - loc) * scale).exp() - 1., min=0.)
 
-        # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.size(0),
-                        use_cuda=self.use_cuda, device=self.device):
-
-            # Sample z from prior.
-            z = pyro.sample("z",
-                            dist.Normal(loc=self.z_loc_prior,
-                                        scale=self.z_scale_prior)
-                            .expand_by([x.size(0)]).to_event(1))
-
-            # Decode the latent code z to get fractional gene expression, chi.
-            chi = self.decoder(z)
-
-            # Empirical estimate for d_cell.
-            d_cell = x.sum(dim=-1, keepdim=True) - self.d_empty_loc_prior.exp()
-
-            # If modelling empty droplets:
-            if self.include_empties:
-
-                # Sample d_empty based on priors.
-                d_empty = pyro.sample("d_empty",
-                                      dist.LogNormal(loc=self.d_empty_loc_prior,
-                                                     scale=self.d_empty_scale_prior)
-                                      .expand_by([x.size(0)]))
-
-            else:
-                d_empty = None
-
-            # Calculate the mean gene expression counts (for each barcode).
-            mu_cell = chi * d_cell
-
-            # Calculate the background rate parameter (for each barcode).
-            if self.include_empties:
-                lam = chi_ambient * d_empty.unsqueeze(-1)
-            else:
-                lam = torch.zeros([self.n_genes]).to(self.device)
-
-            # Sample data
-            r = 1. / phi
-            logit = torch.log((mu_cell + lam) * phi)
-            pyro.sample("obs", dist.NegativeBinomial(total_count=r,
-                                                     logits=logit).to_event(1),
-                        obs=x.reshape(-1, self.n_genes))
-
-    def vae_guide(self, x):
-        """Simplified model intended to pre-train the VAE
-
-            Args:
-                x: Mini-batch of data. Barcodes are rows, genes are columns.
-
-        """
-
-        # Register the z encoder with pyro.
-        pyro.module("encoder_z", self.encoder['z'])
-
-        # Initialize variational parameters for d_cell.
-        d_cell_scale = pyro.param("d_cell_scale",
-                                  self.d_cell_scale_prior *
-                                  torch.ones(torch.Size([])).to(self.device),
-                                  constraint=constraints.positive)
-
-        # Initialize variational parameters for phi.
-        phi_loc = pyro.param("phi_loc",
-                             self.phi_loc_prior *
-                             torch.ones(torch.Size([])).to(self.device),
-                             constraint=constraints.positive)
-        phi_scale = pyro.param("phi_scale",
-                               self.phi_scale_prior *
-                               torch.ones(torch.Size([])).to(self.device),
-                               constraint=constraints.positive)
-
-        # Sample phi from a Gamma distribution (after re-parameterization).
-        phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
-        phi_rate = phi_loc / phi_scale.pow(2)
-        pyro.sample("phi", dist.Gamma(phi_conc, phi_rate))
-
-        if self.include_empties:
-
-            # Initialize variational parameters for d_empty.
-            d_empty_loc = pyro.param("d_empty_loc",
-                                     self.d_empty_loc_prior *
-                                     torch.ones(torch.Size([])).to(self.device),
-                                     constraint=constraints.positive)
-            d_empty_scale = pyro.param("d_empty_scale",
-                                       self.d_empty_scale_prior *
-                                       torch.ones(torch.Size([]))
-                                       .to(self.device),
-                                       constraint=constraints.positive)
-
-            # Register the hyperparameter for ambient gene expression.
-            chi_ambient = pyro.param("chi_ambient",
-                                     self.chi_ambient_init *
-                                     torch.ones(torch.Size([])).to(self.device),
-                                     constraint=constraints.simplex)
-
-        # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.size(0),
-                        use_cuda=self.use_cuda, device=self.device):
-
-            # Encode the latent variables from the input gene expression counts.
-            if self.include_empties:
-
-                # Sample d_empty, which doesn't depend on y.
-                pyro.sample("d_empty", dist.LogNormal(loc=d_empty_loc, scale=d_empty_scale)
-                            .expand_by([x.size(0)]))
-
-                enc = self.encoder['z'](x=x, chi_ambient=chi_ambient)
-
-            else:
-                enc = self.encoder['z'](x=x, chi_ambient=None)
-
-            # Code specific to models with empty droplets.
-            if self.include_empties:
-
-                # Sample latent code z for the barcodes containing cells.
-                pyro.sample("z", dist.Normal(loc=enc['loc'], scale=enc['scale']).to_event(1))
-
-            else:
-
-                # Sample latent code z for each cell.
-                pyro.sample("z", dist.Normal(loc=enc['loc'], scale=enc['scale']).to_event(1))
-
-    # @config_enumerate
-    # def d_eps_model(self, x, ebayes_map_estimate) -> Dict[str, torch.Tensor]:
-    #     """Simplified model intended to pre-train d and epsilon
-    #
-    #         Args:
-    #             x: Mini-batch of data. Barcodes are rows, genes are columns.
-    #
-    #     """
-    #
-    #     d_w = ebayes_map_estimate['weight']
-    #     d_loc = ebayes_map_estimate['loc']
-    #     d_scale = ebayes_map_estimate['scale']
-    #
-    #     with pyro.plate('droplet', x.shape[0]):
-    #
-    #         # Sample the cell sizes d
-    #         membership = pyro.sample('d_mode', dist.Categorical(d_w / d_w.sum()))
-    #         d = pyro.sample('d', dist.Normal(loc=d_loc[membership], scale=d_scale[membership]))
-    #
-    #         # Sample the efficiency factors epsilon
-    #         eps = pyro.sample('eps', dist.Gamma(concentration=self.epsilon_prior,
-    #                                             rate=self.epsilon_prior))
-    #
-    #         # Compare observed sizes to data.
-    #         samples = pyro.sample('obs', dist.LogNormal(loc=d * eps, scale=0.01), obs=x.sum(dim=-1))
-    #
-    #     return {'d': d, 'samples': samples, 'eps': eps}
-    #
-    # def d_eps_guide(self, x, ebayes_map_estimate) -> Dict[str, torch.Tensor]:
-    #     """Simplified model intended to pre-train d and epsilon
-    #
-    #         Args:
-    #             x: Mini-batch of data. Barcodes are rows, genes are columns.
-    #
-    #     """
-    #
-    #     # Register the encoder with pyro.
-    #     pyro.module("encoder_other", self.encoder['other'])
-    #
-    #     enc = self.encoder.forward(x=x,
-    #                                chi_ambient=self.chi_ambient_init.detach(),
-    #                                cell_prior_log=self.d_cell_loc_prior.detach())
-    #
-    #     with pyro.plate('droplet', x.shape[0]):
-    #
-    #         # Sample the Bernoulli y from encoded p(y).
-    #         y = pyro.sample("y", dist.Bernoulli(logits=enc['p_y'])).detach()
-    #
-    #         # Mask out empty droplets for d.
-    #         with poutine.mask(mask=y.bool()):
-    #
-    #             # Sample d based on the encoding.
-    #             d_cell = pyro.sample("d_cell", dist.LogNormal(loc=enc['d_loc'],
-    #                                                           scale=consts.D_CELL_SCALE_INIT))
-    #
-    #         # Sample epsilon.
-    #         epsilon = pyro.sample("epsilon", dist.Gamma(enc['epsilon'] * self.epsilon_prior,
-    #                                                     self.epsilon_prior))
-    #
-    #     return {'y': y, 'p_logit_y': enc['p_y'], 'd_cell': d_cell, 'epsilon': epsilon}
+    return _fun
 
 
 def get_rho() -> Optional[np.ndarray]:
