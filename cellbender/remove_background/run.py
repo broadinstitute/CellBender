@@ -741,39 +741,6 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         frac = args.training_fraction  # Fraction of barcodes to use for training
         batch_size = int(min(consts.MAX_BATCH_SIZE, frac * dataset_obj.analyzed_barcode_inds.size / 2))
 
-        # pretrain_loader = DataLoader(dataset=count_matrix[np.array(count_matrix.sum(axis=1)).squeeze() >
-        #                                                   np.exp(dataset_obj.priors['log_counts_crossover']), :],
-        #                              empty_drop_dataset=None,
-        #                              batch_size=int(min(100, batch_size)),
-        #                              fraction_empties=0.,
-        #                              shuffle=True,
-        #                              use_cuda=args.use_cuda)
-        #
-        # Set up the optimizer for pre-training.
-        # adam_args = {'lr': args.learning_rate}
-        # pretrain_optimizer = ClippedAdam(adam_args)
-        #
-        # # Set up the inference process.
-        # pretrain_svi = SVI(model.vae_model, model.vae_guide, pretrain_optimizer, loss=Trace_ELBO())
-        #
-        # # Pre-train z autoencoder.
-        # logger.info("Pre-training VAE...")
-        # run_training(model=None,  # because I don't want to keep track of the loss # TODO: refactor?
-        #              args=args,
-        #              svi=pretrain_svi,
-        #              train_loader=pretrain_loader,
-        #              test_loader=None,
-        #              epochs=max(10, int(100000 / dataset_obj.priors['n_cells'])),
-        #              output_filename=checkpoint_filename,
-        #              checkpoint_freq=0)
-        # logger.info("Pre-training of VAE complete.")
-
-        # # Pre-train d and epsilon encoders.
-        # logger.info("Pre-training cell and droplet size inference...")
-        # # GMM inference using UMI count histogram.  # TODO: to dataset.py
-        # # TODO
-        # logger.info("Pre-training complete.")
-
         # Set up dataloaders.
         train_loader, test_loader = \
             prep_data_for_training(dataset=count_matrix,
