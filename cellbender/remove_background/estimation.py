@@ -10,8 +10,11 @@ from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
 
 from abc import ABC, abstractmethod
 from functools import partial
+from itertools import repeat
 import multiprocessing as mp
+import concurrent.futures
 import time
+from datetime import datetime
 import logging
 from typing import Callable, Union, Dict, Generator, Tuple, List, Optional
 
@@ -242,10 +245,10 @@ def _estimation_array_to_csr(index_converter,
 
 def _mckp_chunk_estimate_noise(
         noise_log_prob_coo: sp.coo_matrix,
-        index_and_logic,#: sp.coo_matrix,
+        index_and_logic: Tuple[int, np.ndarray],
         noise_offsets: Dict[int, int],
         noise_targets_per_gene: np.ndarray,
-        index_converter,
+        index_converter: 'IndexConverter',
         n_chunks: int,
         verbose: bool = False) -> sp.csr_matrix:
     """Given the full probabilistic posterior, compute noise counts. This is
@@ -254,8 +257,12 @@ def _mckp_chunk_estimate_noise(
     Args:
         noise_log_prob_coo: The noise log prob data structure: log prob
             values in a (m, c) COO matrix.  One chunk.
+        index_and_logic: (chunk_index, logical_coo_indexer) from the chunked
+            iterator, as you would get from enumerate()
         noise_targets_per_gene: Integer noise count target for each gene
         noise_offsets: Noise count offset values keyed by 'm'.
+        index_converter: IndexConverter to go from 'm' to (n, g)
+        n_chunks: Total chunks, for logging purposes only
         verbose: True to print lots of intermediate information (for tests)
 
     Returns:
@@ -408,8 +415,11 @@ def _mckp_chunk_estimate_noise(
         print('MAP:')
         print(map_csr.todense())
 
+    logger.info(f'Completed chunk ({i + 1} / {n_chunks})')
+    print(f'Completed chunk ({i + 1} / {n_chunks})')  # because logging from a process does not work right
     if i == 0:
-        logger.info(f'Single chunk took {(time.time() - tt):.2f} mins')
+        logger.info(f'    [single chunk took {(time.time() - tt):.2f} mins]')
+        print(f'    [single chunk took {(time.time() - tt):.2f} mins]')
 
     # The final output is those tabulated steps added to the MAP.
     # The MAP already has the noise offsets, so they are not added to steps_csr.
@@ -425,6 +435,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
                        noise_targets_per_gene: np.ndarray,
                        verbose: bool = False,
                        n_chunks: Optional[int] = None,
+                       use_multiple_processes: bool = False,
                        **kwargs) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts
 
@@ -435,98 +446,92 @@ class MultipleChoiceKnapsack(EstimationMethod):
             noise_offsets: Noise count offset values keyed by 'm'.
             verbose: True to print lots of intermediate information (for tests)
             n_chunks: Target number of chunks over which to split estimation.
-                If None, targets about 1000 genes per chunk.
+                If None, targets about 5000 genes per chunk.
+            use_multiple_processes: True to use multiprocessing. Seems faster
+                without using it, not entirely clear why
 
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
         if n_chunks is None:
-            n_chunks = self.index_converter.total_n_genes // 5000
+            n_chunks = max(1, self.index_converter.total_n_genes // 5000)
             logger.debug(f'Running MCKP estimator in {n_chunks} chunks')
 
         t0 = time.time()
 
-        # csr_matrices = [
-        #     self._chunk_estimate_noise(
-        #         noise_log_prob_coo=_subset_coo(noise_log_prob_coo, logic),
-        #         noise_offsets=noise_offsets,
-        #         noise_targets_per_gene=noise_targets_per_gene,
-        #         verbose=verbose,
-        #     )
-        #     for logic in self._gene_chunk_iterator(
-        #         noise_log_prob_coo=noise_log_prob_coo,
-        #         n_chunks=n_chunks,
-        #     )
-        # ]
+        if use_multiple_processes:
 
-
-        # # def _eval_chunk(i: int, coo: sp.coo_matrix) -> sp.csr_matrix:
-        # #     if i == 0:
-        # #         t = time.time()
-        # #     csr = self._chunk_estimate_noise(
-        # #         noise_log_prob_coo=coo,
-        # #         noise_offsets=noise_offsets,
-        # #         noise_targets_per_gene=noise_targets_per_gene,
-        # #         verbose=verbose,
-        # #     )
-        # #     logger.info(f'Completed chunk ({i + 1}/{n_chunks})')
-        # #     if i == 0:
-        # #         logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
-        # #     return csr
-
-
-        logger.info('Dividing dataset into chunks of genes')
-        chunk_logic_list = list(
-            self._gene_chunk_iterator(
-                noise_log_prob_coo=noise_log_prob_coo,
-                n_chunks=n_chunks,
+            logger.info('Dividing dataset into chunks of genes')
+            chunk_logic_list = list(
+                self._gene_chunk_iterator(
+                    noise_log_prob_coo=noise_log_prob_coo,
+                    n_chunks=n_chunks,
+                )
             )
-        )
-        print(f'chunk_logic_list is {chunk_logic_list}')
 
-        logger.info('Computing the output in asynchronous chunks in parallel...')
+            logger.info('Computing the output in asynchronous chunks in parallel...')
 
-        from itertools import repeat
-        with mp.get_context('spawn').Pool(processes=mp.cpu_count()) as pool:
-            csr_matrices = pool.starmap(
-                _mckp_chunk_estimate_noise,
-                zip(
-                    repeat(noise_log_prob_coo),
-                    enumerate(chunk_logic_list),
-                    repeat(noise_offsets),
-                    repeat(noise_targets_per_gene),
-                    repeat(self.index_converter),
-                    repeat(n_chunks),
-                    repeat(False),  # verbose
-                ),
-            )
-        #
-        # import concurrent.futures
-        # futures = []
-        # with concurrent.futures.ProcessPoolExecutor(
-        #         max_workers=mp.cpu_count(),
-        #         mp_context=mp.get_context('spawn')) as executor:
-        #     for i, logic in enumerate(chunk_logic_list):
-        #         kwargs = {
-        #             'noise_log_prob_coo': noise_log_prob_coo,
-        #             'index_and_logic': (i, logic),
-        #             'noise_offsets': noise_offsets,
-        #             'noise_targets_per_gene': noise_targets_per_gene,
-        #             'index_converter': self.index_converter,
-        #             'n_chunks': n_chunks,
-        #             'verbose': False,
-        #         }
-        #         future = executor.submit(_mckp_chunk_estimate_noise, **kwargs)
-        #         futures.append(future)
-        #
-        #     done, not_done = concurrent.futures.wait(
-        #         futures,
-        #         return_when=concurrent.futures.ALL_COMPLETED,
-        #     )
-        #     csr_matrices = [f.result() for f in futures]
-        #
-        logger.debug(f'{timestamp()} Total MCKP estimation time = {(time.time() - t0):.2f} sec')
-        print([csr.todense() for csr in csr_matrices])
+            # with mp.get_context('spawn').Pool(processes=mp.cpu_count()) as pool:
+            #     csr_matrices = pool.starmap(
+            #         _mckp_chunk_estimate_noise,
+            #         zip(
+            #             repeat(noise_log_prob_coo),
+            #             enumerate(chunk_logic_list),
+            #             repeat(noise_offsets),
+            #             repeat(noise_targets_per_gene),
+            #             repeat(self.index_converter),
+            #             repeat(n_chunks),
+            #             repeat(False),  # verbose
+            #         ),
+            #     )
+
+            futures = []
+            with concurrent.futures.ProcessPoolExecutor(
+                    max_workers=mp.cpu_count(),
+                    mp_context=mp.get_context('spawn')) as executor:
+                for i, logic in enumerate(chunk_logic_list):
+                    kwargs = {
+                        'noise_log_prob_coo': noise_log_prob_coo,
+                        'index_and_logic': (i, logic),
+                        'noise_offsets': noise_offsets,
+                        'noise_targets_per_gene': noise_targets_per_gene,
+                        'index_converter': self.index_converter,
+                        'n_chunks': n_chunks,
+                        'verbose': False,
+                    }
+                    future = executor.submit(_mckp_chunk_estimate_noise, **kwargs)
+                    futures.append(future)
+
+                done, not_done = concurrent.futures.wait(
+                    futures,
+                    return_when=concurrent.futures.ALL_COMPLETED,
+                )
+                csr_matrices = [f.result() for f in futures]
+
+        else:
+
+            t = time.time()
+
+            csr_matrices = []
+            for i, logic in enumerate(
+                    self._gene_chunk_iterator(
+                        noise_log_prob_coo=noise_log_prob_coo,
+                        n_chunks=n_chunks,
+                    )
+            ):
+                logger.info(f'Working on chunk ({i + 1}/{n_chunks})')
+                chunk_csr = self._chunk_estimate_noise(
+                    noise_log_prob_coo=_subset_coo(noise_log_prob_coo, logic),
+                    noise_offsets=noise_offsets,
+                    noise_targets_per_gene=noise_targets_per_gene,
+                    verbose=verbose,
+                )
+                csr_matrices.append(chunk_csr)
+                if i == 0:
+                    logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
+                logger.debug(f'{timestamp()} Estimator chunk {i}: shape is {chunk_csr.shape}')
+
+        logger.info(f'{timestamp()} Total MCKP estimation time = {(time.time() - t0):.2f} sec')
         return sum(csr_matrices)
 
     def _gene_chunk_iterator(self,
@@ -904,4 +909,4 @@ def _subset_coo(coo: sp.coo_matrix, logic: np.ndarray) -> sp.coo_matrix:
 
 
 def timestamp() -> str:
-    return f'({time.strftime("%H:%M:%S", time.gmtime())})'
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')

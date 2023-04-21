@@ -341,6 +341,7 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
             q=args.cdf_threshold_q,
             alpha=args.prq_alpha,
             device='cuda' if args.use_cuda else 'cpu',
+            use_multiple_processes=args.use_multiprocessing_estimation,
         )
 
         # Restore eliminated features in cells.
