@@ -2,10 +2,7 @@
 
 from cellbender.remove_background import consts
 from cellbender.remove_background.data.dataprep import DataLoader
-from cellbender.remove_background.data.dataset import get_dataset_obj, \
-    SingleCellRNACountsDataset
-from cellbender.remove_background.model import RemoveBackgroundPyroModel
-from cellbender.remove_background.posterior import Posterior
+from cellbender.remove_background.data.dataset import get_dataset_obj
 
 import torch
 import numpy as np
@@ -181,7 +178,7 @@ def save_checkpoint(filebase: str,
 
 
 def restore_all_from_checkpoint(tarball_name: str, input_file: str) \
-        -> Tuple[SingleCellRNACountsDataset, RemoveBackgroundPyroModel, Posterior]:
+        -> Tuple['SingleCellRNACountsDataset', 'RemoveBackgroundPyroModel', 'Posterior']:
     """Convenience function not used by the codebase"""
 
     d = load_checkpoint(filebase=None, tarball_name=tarball_name)
