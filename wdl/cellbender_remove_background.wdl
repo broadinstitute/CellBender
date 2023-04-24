@@ -49,6 +49,7 @@ task run_cellbender_remove_background_gpu {
         Int? num_training_tries
         Float? learning_rate_retry_mult
         Int? posterior_batch_size
+        Boolean? estimator_multiple_cpu
         Boolean? constant_learning_rate
         Boolean? debug
 
@@ -149,6 +150,7 @@ task run_cellbender_remove_background_gpu {
             ~{"--num-training-tries " + num_training_tries} \
             ~{"--learning-rate-retry-mult " + learning_rate_retry_mult} \
             ~{"--posterior-batch-size " + posterior_batch_size} \
+            ~{true="--estimator-multiple-cpu " false=" " estimator_multiple_cpu} \
             ~{true="--constant-learning-rate " false=" " constant_learning_rate} \
             ~{true="--debug " false=" " debug} \
             ~{"--truth " + truth_file}
