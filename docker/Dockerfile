@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && apt-get clean \
  && sudo rm -rf /var/lib/apt/lists/* \
 # get miniconda
- && curl -so $HOME/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py37_23.1.0-1-Linux-x86_64.sh \
+ && curl -so $HOME/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py38_23.1.0-1-Linux-x86_64.sh \
  && chmod +x $HOME/miniconda.sh \
  && $HOME/miniconda.sh -b -p $CONDA_DIR \
  && rm $HOME/miniconda.sh \
@@ -30,6 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 # get compiled crcmod for gsutil
  && conda install -y -c conda-forge crcmod \
 # install cellbender and its dependencies
- && yes | pip install /software/cellbender/ \
+ && yes | pip install -e /software/cellbender/ \
  && conda clean -yaf \
  && sudo rm -rf ~/.cache/pip

@@ -45,8 +45,8 @@ CellBender can be installed via
 
   $ pip install cellbender
 
-(and we recommend installing in its own ``conda`` environment to prevent
-conflicts with other software).
+(and we recommend installing in its own ``conda`` environment, using python 3.8,
+to prevent conflicts with other software).
 
 CellBender is run as a command-line tool, as in
 
@@ -98,7 +98,7 @@ Create a conda environment and activate it:
 
 .. code-block:: console
 
-  $ conda create -n cellbender python=3.7
+  $ conda create -n cellbender python=3.8
   $ conda activate cellbender
 
 Install the `pytables <https://www.pytables.org>`_ module:
