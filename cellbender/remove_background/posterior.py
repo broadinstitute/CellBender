@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 import logging
 import argparse
 import tempfile
+import time
 import os
 
 
@@ -448,10 +449,17 @@ class Posterior:
         c_offset = []  # noise count offsets from zero
         log_probs = []
         ind = 0
+        n_minibatches = len(cell_data_loader)
 
-        logger.info('Computing posterior noise count probabilities in mini-batches...')
+        logger.info('Computing posterior noise count probabilities in mini-batches.')
 
-        for data in cell_data_loader:
+        for i, data in enumerate(cell_data_loader):
+
+            if i == 0:
+                t = time.time()
+            elif i == 1:
+                logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
+            logger.info(f'Working on chunk ({i + 1}/{n_minibatches})')
 
             if self.debug:
                 logger.debug(f'Posterior minibatch starting with droplet {ind}')
