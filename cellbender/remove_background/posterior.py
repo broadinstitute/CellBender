@@ -210,6 +210,7 @@ class Posterior:
         # TODO: this can choke (out of memory) on very large datasets... not sure why
         # TODO: is it the compression?  should I save uncompressed and then compress myself?
         try:
+            logger.info(f'Writing full posterior to {file}')
             np.savez_compressed(file=file, **d)
             if verbose:
                 logger.info(f'Saved posterior as {file}')
