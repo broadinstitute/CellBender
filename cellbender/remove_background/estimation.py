@@ -136,10 +136,11 @@ class Mean(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-        c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
+        # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
         def _torch_mean(x):
-            return torch.matmul(x.exp(), c)
+            c = torch.arange(x.shape[1], dtype=float)
+            return torch.matmul(x.exp(), c.t())
 
         result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
                                              fun=_torch_mean,
@@ -787,11 +788,12 @@ def chunked_iterator(coo: sp.coo_matrix,
         logic = (coo.row >= i) & (coo.row < (i + batch_size))
         # Map these row values to a compact set of unique integers
         unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
+        unique_col_values, cols = np.unique(coo.col[logic], return_inverse=True)
         chunk_coo = sp.coo_matrix(
-            (coo.data[logic], (rows, coo.col[logic])),
-            shape=(len(unique_row_values), coo.shape[1]),
+            (coo.data[logic], (rows, cols)),
+            shape=(len(unique_row_values), len(unique_col_values)),
         )
-        yield (chunk_coo, unique_row_values)
+        yield (chunk_coo, unique_row_values, unique_col_values)
 
 
 def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
@@ -827,7 +829,7 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
     out = np.zeros(array_length)
     a = 0
 
-    for coo, row in chunked_iterator(coo=noise_log_prob_coo):
+    for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
         dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
         s = fun(dense_tensor, **kwargs)
         if s.ndim == 0:
