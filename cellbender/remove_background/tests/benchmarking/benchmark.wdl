@@ -11,7 +11,7 @@ import "cellbender_remove_background.wdl" as cellbender
 
 workflow run_cellbender_benchmark {
     input {
-        String git_hash
+        String? git_hash
     }
 
     call cellbender.run_cellbender_remove_background_gpu as cb {

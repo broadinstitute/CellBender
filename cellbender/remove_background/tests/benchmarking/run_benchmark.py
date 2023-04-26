@@ -27,10 +27,13 @@ def get_parser() -> argparse.ArgumentParser:
 
     parser.add_argument('-g', '--git',
                         type=str,
-                        required=True,
+                        required=False,
+                        default=None,
                         dest='git_hash',
                         help='Specific github commit from the CellBender repo: '
-                             'can be a tag, a branch, or a commit sha')
+                             'can be a tag, a branch, or a commit sha. Not '
+                             'including the flag will run using the base '
+                             'docker image specified in benchmark_inputs.json')
     parser.add_argument('-i', '--input',
                         type=str,
                         required=True,
@@ -190,7 +193,10 @@ if __name__ == '__main__':
         ))
 
         # run cromshell submit
-        alias = '_'.join(['cellbender', args.sample, args.git_hash])
+        if args.git_hash is not None:
+            alias = '_'.join(['cellbender', args.sample, args.git_hash])
+        else:
+            alias = '_'.join(['cellbender', args.sample])
         workflow_id, alias = cromshell_submit(
             wdl=os.path.join(this_dir, 'benchmark.wdl'),
             inputs=inputs_json,
