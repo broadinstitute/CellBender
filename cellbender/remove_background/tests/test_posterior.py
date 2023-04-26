@@ -365,3 +365,60 @@ def test_compute_mean_target_removal_as_function(log_prob_coo, fpr, per_gene, cu
 
     # assert False
     # TODO: this has not been tested out
+
+
+def test_save_and_load(tmpdir_factory):
+    """Test that a round trip through save and load gives the same thing"""
+
+    tmp_dir = tmpdir_factory.mktemp('posterior')
+    filename = tmp_dir.join('posterior.h5')
+
+    m = 1000
+    n = 20
+
+    posterior = Posterior(dataset_obj=None, vi_model=None)  # blank
+
+    posterior_coo = sp.random(m, n, density=0.1, format='coo', dtype=float)
+    posterior_coo2 = sp.random(m, n, density=0.08, format='coo', dtype=float)
+    noise_offsets = dict(zip(np.random.randint(low=0, high=(m - 1), size=10),
+                             np.random.randint(low=1, high=5, size=10)))
+    kwargs = {'a': 'b', 'c': 1}
+    kwargs2 = {'a': 'method', 'c': 1}
+
+    # jam in fake values
+    posterior._noise_count_posterior_coo = posterior_coo
+    posterior._noise_count_posterior_coo_offsets = noise_offsets
+    posterior._noise_count_posterior_kwargs = kwargs
+    posterior._noise_count_regularized_posterior_coo = posterior_coo2
+    posterior._noise_count_regularized_posterior_kwargs = kwargs2
+    posterior._latents = {'p': np.random.randn(100), 'd': np.random.randn(100)}
+    posterior.index_converter = IndexConverter(total_n_cells=1000, total_n_genes=1000)
+
+    # save
+    posterior.save(file=str(filename), verbose=True)
+
+    # load
+    posterior2 = Posterior(dataset_obj=None, vi_model=None)  # blank
+    posterior2.load(file=str(filename))
+
+    # check
+    for attr in ['_noise_count_posterior_coo', '_noise_count_posterior_coo_offsets',
+                 '_noise_count_posterior_kwargs', '_noise_count_regularized_posterior_coo',
+                 '_noise_count_regularized_posterior_kwargs', '_latents']:
+        val1 = getattr(posterior, attr)
+        val2 = getattr(posterior2, attr)
+        print(f'{attr} ===================')
+        print('saved:')
+        print(val1)
+        print('loaded')
+        print(val2)
+        err_msg = f'Posterior attribute {attr} not preserved after saving and loading'
+        if type(val1) == sp.coo_matrix:
+            assert sparse_matrix_equal(val1, val2), err_msg
+        elif type(val1) == np.ndarray:
+            np.testing.assert_equal(val1, val2)
+        elif (type(val1) == dict) and (type(list(val1.values())[0]) == np.ndarray):
+            for k in val1.keys():
+                np.testing.assert_equal(val1[k], val2[k])
+        else:
+            assert val1 == val2, err_msg
