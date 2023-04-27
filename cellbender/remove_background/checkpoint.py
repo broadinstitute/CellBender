@@ -243,7 +243,7 @@ def load_from_checkpoint(filebase: Optional[str],
             logger.debug(f'Looking for files with base name matching {filebase}*')
             if not os.path.exists(filebase + '_model.torch'):
                 logger.info('Workflow hash does not match that of checkpoint.')
-                raise ValueError
+                raise ValueError('Workflow hash does not match that of checkpoint.')
         else:
             filebase = (glob.glob(os.path.join(tmp_dir, '*_model.torch'))[0]
                         .replace('_model.torch', ''))

@@ -102,9 +102,16 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         posterior_batch_size=args.posterior_batch_size,
         debug=args.debug,
     )
-    ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
-                                          filebase=args.checkpoint_filename,
-                                          to_load=['posterior'])
+    try:
+        ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
+                                              filebase=args.checkpoint_filename,
+                                              to_load=['posterior'])
+    except ValueError:
+        # input checkpoint tarball was not a match for this workflow
+        # but we still may have saved a new tarball
+        ckpt_posterior = load_from_checkpoint(tarball_name=consts.CHECKPOINT_FILE_NAME,
+                                              filebase=args.checkpoint_filename,
+                                              to_load=['posterior'])
     if os.path.exists(ckpt_posterior.get('posterior_file', 'does_not_exist')):
         # Load posterior if it was saved in the checkpoint.
         posterior.load(file=ckpt_posterior['posterior_file'])
