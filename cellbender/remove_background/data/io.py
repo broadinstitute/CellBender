@@ -279,10 +279,11 @@ def write_posterior_coo_to_h5(
         extras = f.create_group("/", "metadata", "Posterior metadata")
         f.create_carray(extras, "barcode_inds", obj=barcode_inds, filters=filters)
         f.create_carray(extras, "feature_inds", obj=feature_inds, filters=filters)
-        f.create_carray(extras, "noise_count_offsets_keys",
-                        obj=list(noise_count_offsets.keys()), filters=filters)
-        f.create_carray(extras, "noise_count_offsets_values",
-                        obj=list(noise_count_offsets.values()), filters=filters)
+        if noise_count_offsets != {}:
+            f.create_carray(extras, "noise_count_offsets_keys",
+                            obj=list(noise_count_offsets.keys()), filters=filters)
+            f.create_carray(extras, "noise_count_offsets_values",
+                            obj=list(noise_count_offsets.values()), filters=filters)
 
         # posterior COO
         group = f.create_group("/", "posterior_noise_log_prob", "Posterior noise count log probabilities")
@@ -350,9 +351,12 @@ def load_posterior_from_h5(filename: str) -> Dict[str, Union[sp.coo_matrix, np.n
         # read metadata
         barcode_inds = getattr(f.root.metadata, 'barcode_inds').read()
         feature_inds = getattr(f.root.metadata, 'barcode_inds').read()
-        noise_count_offsets_keys = getattr(f.root.metadata, 'noise_count_offsets_keys').read()
-        noise_count_offsets_values = getattr(f.root.metadata, 'noise_count_offsets_values').read()
-        noise_count_offsets = dict(zip(noise_count_offsets_keys, noise_count_offsets_values))
+        if hasattr(f.root.metadata, 'noise_count_offsets_keys'):
+            noise_count_offsets_keys = getattr(f.root.metadata, 'noise_count_offsets_keys').read()
+            noise_count_offsets_values = getattr(f.root.metadata, 'noise_count_offsets_values').read()
+            noise_count_offsets = dict(zip(noise_count_offsets_keys, noise_count_offsets_values))
+        else:
+            noise_count_offsets = {}
 
         def _read_coo(group: tables.Group) -> sp.coo_matrix:
             data = getattr(group, 'log_prob').read()
@@ -373,11 +377,8 @@ def load_posterior_from_h5(filename: str) -> Dict[str, Union[sp.coo_matrix, np.n
         def _read_as_dict(group: tables.Group) -> Dict:
             d = {}
             for n in group._f_walknodes('Leaf'):
-                print('entered loop')
                 val = n.read()
-                print(val)
                 if (type(val) == np.ndarray) and ('S' in val.dtype.kind):
-                    print('here')
                     val = val.item().decode()
                 d.update({n.name: val})
             return d

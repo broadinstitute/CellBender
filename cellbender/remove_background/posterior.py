@@ -116,14 +116,14 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         _do_posterior_regularization(posterior)
 
         # Save posterior and add it to checkpoint tarball.
-        saved = posterior.save(file=args.output_file[:-3] + '_posterior.npz')
+        saved = posterior.save(file=args.output_file[:-3] + '_posterior.h5')
         success = False
         if saved:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball,
                                           directory=tmp_dir)
                 if unpacked:
-                    posterior.save(file=os.path.join(tmp_dir, 'posterior.npz'), verbose=False)
+                    posterior.save(file=os.path.join(tmp_dir, 'posterior.h5'), verbose=False)
                     all_ckpt_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
                                       if os.path.isfile(os.path.join(tmp_dir, f))]
                     success = make_tarball(files=all_ckpt_files,

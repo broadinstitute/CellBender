@@ -367,7 +367,8 @@ def test_compute_mean_target_removal_as_function(log_prob_coo, fpr, per_gene, cu
     # TODO: this has not been tested out
 
 
-def test_save_and_load(tmpdir_factory):
+@pytest.mark.parametrize('blank_noise_offsets', [False, True], ids=['', 'no_noise_offsets'])
+def test_save_and_load(tmpdir_factory, blank_noise_offsets):
     """Test that a round trip through save and load gives the same thing"""
 
     tmp_dir = tmpdir_factory.mktemp('posterior')
@@ -380,8 +381,11 @@ def test_save_and_load(tmpdir_factory):
 
     posterior_coo = sp.random(m, n, density=0.1, format='coo', dtype=float)
     posterior_coo2 = sp.random(m, n, density=0.08, format='coo', dtype=float)
-    noise_offsets = dict(zip(np.random.randint(low=0, high=(m - 1), size=10),
-                             np.random.randint(low=1, high=5, size=10)))
+    if blank_noise_offsets:
+        noise_offsets = {}
+    else:
+        noise_offsets = dict(zip(np.random.randint(low=0, high=(m - 1), size=10),
+                                 np.random.randint(low=1, high=5, size=10)))
     kwargs = {'a': 'b', 'c': 1}
     kwargs2 = {'a': 'method', 'c': 1}
 
@@ -417,7 +421,7 @@ def test_save_and_load(tmpdir_factory):
             assert sparse_matrix_equal(val1, val2), err_msg
         elif type(val1) == np.ndarray:
             np.testing.assert_equal(val1, val2)
-        elif (type(val1) == dict) and (type(list(val1.values())[0]) == np.ndarray):
+        elif (type(val1) == dict) and (val1 != {}) and (type(list(val1.values())[0]) == np.ndarray):
             for k in val1.keys():
                 np.testing.assert_equal(val1[k], val2[k])
         else:
