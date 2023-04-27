@@ -831,6 +831,9 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
 
     for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
         dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
+        if torch.numel(dense_tensor) == 0:
+            # github issue 207
+            continue
         s = fun(dense_tensor, **kwargs)
         if s.ndim == 0:
             # avoid "TypeError: len() of a 0-d tensor"
