@@ -782,10 +782,16 @@ def chunked_iterator(coo: sp.coo_matrix,
 
     """
     n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4  # torch float32 is 4 bytes
-    batch_size = int(np.floor(n_elements_in_batch / coo.shape[1]))
+    batch_size = max(1, int(np.floor(n_elements_in_batch / coo.shape[1])))
 
-    for i in range(0, coo.row.max(), batch_size):
-        logic = (coo.row >= i) & (coo.row < (i + batch_size))
+    # COO rows are not necessarily contiguous or in order
+    unique_m_values = np.unique(coo.row)
+    n_chunks = max(1, len(unique_m_values) // batch_size)
+    row_m_value_chunks = np.array_split(unique_m_values, n_chunks)
+    coo_row_series = pd.Series(coo.row)
+
+    for row_m_values in row_m_value_chunks:
+        logic = coo_row_series.isin(set(row_m_values))
         # Map these row values to a compact set of unique integers
         unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
         unique_col_values, cols = np.unique(coo.col[logic], return_inverse=True)
