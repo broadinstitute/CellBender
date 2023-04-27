@@ -139,7 +139,7 @@ class Mean(EstimationMethod):
         # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
         def _torch_mean(x):
-            c = torch.arange(x.shape[1], dtype=float)
+            c = torch.arange(x.shape[1], dtype=float).to(x.device)
             return torch.matmul(x.exp(), c.t())
 
         result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
