@@ -989,7 +989,7 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
     s = plt.scatter(x=adata.obsm['X_pca'][:, 0][cells][sizeorder],
                     y=adata.obsm['X_pca'][:, 1][cells][sizeorder],
                     c=np.log10(adata.obs['cell_size'][cells][sizeorder]),
-                    s=3,
+                    s=2,
                     cmap='brg',
                     alpha=0.5)
     plt.title('Gene expression embedding\ncolored by log10 inferred cell size $d_n$')
