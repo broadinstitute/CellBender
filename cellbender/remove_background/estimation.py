@@ -136,10 +136,11 @@ class Mean(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-        c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
+        # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
         def _torch_mean(x):
-            return torch.matmul(x.exp(), c)
+            c = torch.arange(x.shape[1], dtype=float).to(x.device)
+            return torch.matmul(x.exp(), c.t())
 
         result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
                                              fun=_torch_mean,
@@ -236,7 +237,7 @@ def _estimation_array_to_csr(index_converter,
     """
     row, col = index_converter.get_ng_indices(m_inds=m)
     if noise_offsets is not None:
-        data = data + np.array([noise_offsets[i] for i in m])
+        data = data + np.array([noise_offsets.get(i, 0) for i in m])
     coo = sp.coo_matrix((data.astype(dtype), (row.astype(dtype), col.astype(dtype))),
                         shape=index_converter.matrix_shape, dtype=dtype)
     coo.sum_duplicates()
@@ -781,17 +782,24 @@ def chunked_iterator(coo: sp.coo_matrix,
 
     """
     n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4  # torch float32 is 4 bytes
-    batch_size = int(np.floor(n_elements_in_batch / coo.shape[1]))
+    batch_size = max(1, int(np.floor(n_elements_in_batch / coo.shape[1])))
 
-    for i in range(0, coo.row.max(), batch_size):
-        logic = (coo.row >= i) & (coo.row < (i + batch_size))
+    # COO rows are not necessarily contiguous or in order
+    unique_m_values = np.unique(coo.row)
+    n_chunks = max(1, len(unique_m_values) // batch_size)
+    row_m_value_chunks = np.array_split(unique_m_values, n_chunks)
+    coo_row_series = pd.Series(coo.row)
+
+    for row_m_values in row_m_value_chunks:
+        logic = coo_row_series.isin(set(row_m_values))
         # Map these row values to a compact set of unique integers
         unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
+        unique_col_values, cols = np.unique(coo.col[logic], return_inverse=True)
         chunk_coo = sp.coo_matrix(
-            (coo.data[logic], (rows, coo.col[logic])),
-            shape=(len(unique_row_values), coo.shape[1]),
+            (coo.data[logic], (rows, cols)),
+            shape=(len(unique_row_values), len(unique_col_values)),
         )
-        yield (chunk_coo, unique_row_values)
+        yield (chunk_coo, unique_row_values, unique_col_values)
 
 
 def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
@@ -827,8 +835,11 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
     out = np.zeros(array_length)
     a = 0
 
-    for coo, row in chunked_iterator(coo=noise_log_prob_coo):
+    for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
         dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
+        if torch.numel(dense_tensor) == 0:
+            # github issue 207
+            continue
         s = fun(dense_tensor, **kwargs)
         if s.ndim == 0:
             # avoid "TypeError: len() of a 0-d tensor"

@@ -427,8 +427,8 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     print('\n'.join([str(t) for t in w1]))
 
     # train in two parts: part 1
-    create_random_state_blank_slate(0)
     pyro.clear_param_store()
+    create_random_state_blank_slate(0)
     args.epochs = epochs
     initial_model, scheduler, train_loader, test_loader = \
         run_inference(dataset_obj=dataset_obj, args=args,

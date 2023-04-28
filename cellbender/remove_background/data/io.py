@@ -221,6 +221,202 @@ def write_matrix_to_cellranger_h5(
     return True
 
 
+def write_posterior_coo_to_h5(
+        output_file: str,
+        posterior_coo: sp.coo_matrix,
+        noise_count_offsets: Dict[int, int],
+        latents: Dict[str, np.ndarray],
+        feature_inds: np.ndarray,
+        barcode_inds: np.ndarray,
+        regularized_posterior_coo: Optional[sp.coo_matrix] = None,
+        posterior_kwargs: Optional[Dict] = None,
+        regularized_posterior_kwargs: Optional[Dict] = None) -> bool:
+    """Write sparse COO matrix to an HDF5 file, using compression.
+
+    NOTE: COO matrix is indexed by rows 'm' which each map to a unique
+    (cell, feature).  The cell and feature are denoted in the barcode_inds
+    and feature_inds arrays.  The column indices for the COO matrix are the
+    number of noise counts for each entry in count matrix, starting with zero,
+    except these noise count values get added to noise_count_offsets, which is
+    length m.
+
+    Args:
+        output_file: Path to output .h5 file (e.g., 'output.h5').
+        posterior_coo: Posterior to be written to file, in sparse COO [m, c]
+            format.  Rows are 'm'-index, columns are number of noise counts.
+        noise_count_offsets: The number of noise counts at which each 'm' starts.
+            Absence of an 'm'-index from the keys of this dict means that the
+            corresponding 'm'-index starts at 0 noise counts.
+        latents: MAP values of latent variables for each analyzed barcode.
+        barcode_inds: Index of each barcode (row of input count matrix).
+        feature_inds: Index of each feature (column of input count matrix).
+        regularized_posterior_coo: Regularized posterior.
+        posterior_kwargs: Keyword arguments used to generate posterior (for
+            caching)
+        regularized_posterior_kwargs: Keyword arguments used to generate
+            posterior (for caching)
+
+    """
+
+    assert isinstance(posterior_coo, sp.coo_matrix), \
+        "The posterior must be coo_matrix format in order to write to HDF5."
+
+    assert barcode_inds.size == posterior_coo.row.size, \
+        "len(barcode_inds) must match the number of entries in the posterior COO"
+
+    assert feature_inds.size == posterior_coo.row.size, \
+        "len(feature_inds) must match the number of entries in the posterior COO"
+
+    # Write to output file.
+    filters = tables.Filters(complevel=1, complib='zlib', shuffle=True)
+    with tables.open_file(
+            output_file,
+            "w",
+            title="CellBender remove-background posterior noise count probabilities"
+    ) as f:
+
+        # metadata
+        extras = f.create_group("/", "metadata", "Posterior metadata")
+        f.create_carray(extras, "barcode_inds", obj=barcode_inds, filters=filters)
+        f.create_carray(extras, "feature_inds", obj=feature_inds, filters=filters)
+        if noise_count_offsets != {}:
+            f.create_carray(extras, "noise_count_offsets_keys",
+                            obj=list(noise_count_offsets.keys()), filters=filters)
+            f.create_carray(extras, "noise_count_offsets_values",
+                            obj=list(noise_count_offsets.values()), filters=filters)
+
+        # posterior COO
+        group = f.create_group("/", "posterior_noise_log_prob", "Posterior noise count log probabilities")
+        f.create_carray(group, "log_prob", obj=posterior_coo.data, filters=filters)
+        f.create_carray(group, "m_index", obj=posterior_coo.row, filters=filters)
+        f.create_carray(group, "noise_count", obj=posterior_coo.col, filters=filters)
+        f.create_carray(group, "shape", atom=tables.Int32Atom(),
+                        obj=np.array(posterior_coo.shape, dtype=np.int32), filters=filters)
+
+        # regularized posterior COO
+        if regularized_posterior_coo is not None:
+            group = f.create_group("/", "regularized_posterior_noise_log_prob",
+                                   "Regularized posterior noise count log probabilities")
+            f.create_carray(group, "log_prob", obj=regularized_posterior_coo.data, filters=filters)
+            f.create_carray(group, "m_index", obj=regularized_posterior_coo.row, filters=filters)
+            f.create_carray(group, "noise_count", obj=regularized_posterior_coo.col, filters=filters)
+            f.create_carray(group, "shape", atom=tables.Int32Atom(),
+                            obj=np.array(regularized_posterior_coo.shape, dtype=np.int32), filters=filters)
+
+        # latents
+        droplet_latent_group = f.create_group("/", "droplet_latents_map", "Latent variables per droplet")
+        for key, value in latents.items():
+            if value is not None:
+                f.create_carray(droplet_latent_group, key, obj=value, filters=filters)
+
+        # kwargs
+        if posterior_kwargs is not None:
+            kwargs_group = f.create_group("/", "kwargs", "Function arguments for posterior")
+            for key, value in posterior_kwargs.items():
+                for k, v in unravel_dict(key, value).items():
+                    if type(v) == str:
+                        v = np.array([v], dtype=str)
+                    f.create_array(kwargs_group, k, v)
+            reg_kwargs_group = f.create_group("/", "kwargs_regularized",
+                                              "Function arguments for regularized posterior")
+        if regularized_posterior_kwargs is not None:
+            for key, value in regularized_posterior_kwargs.items():
+                for k, v in unravel_dict(key, value).items():
+                    if type(v) == str:
+                        v = np.array([v], dtype=str)
+                    f.create_array(reg_kwargs_group, k, v)
+
+    logger.info(f"Succeeded in writing posterior to file {output_file}")
+
+    return True
+
+
+def load_posterior_from_h5(filename: str) -> Dict[str, Union[sp.coo_matrix, np.ndarray]]:
+    """Load a posterior noise count COO from an h5 file.
+
+    Args:
+        filename: string path to .h5 file that contains the raw gene
+            barcode matrices
+
+    Returns:
+        Dict with ['coo', 'noise_count_offsets', 'barcode_inds', 'feature_inds']
+            Posterior noise count COO
+            Noise count offsets for COO rows
+            Droplet indices for COO rows
+            Feature indices for COO rows
+    """
+
+    with tables.open_file(filename, 'r') as f:
+
+        # read metadata
+        barcode_inds = getattr(f.root.metadata, 'barcode_inds').read()
+        feature_inds = getattr(f.root.metadata, 'barcode_inds').read()
+        if hasattr(f.root.metadata, 'noise_count_offsets_keys'):
+            noise_count_offsets_keys = getattr(f.root.metadata, 'noise_count_offsets_keys').read()
+            noise_count_offsets_values = getattr(f.root.metadata, 'noise_count_offsets_values').read()
+            noise_count_offsets = dict(zip(noise_count_offsets_keys, noise_count_offsets_values))
+        else:
+            noise_count_offsets = {}
+
+        def _read_coo(group: tables.Group) -> sp.coo_matrix:
+            data = getattr(group, 'log_prob').read()
+            row = getattr(group, 'm_index').read()
+            col = getattr(group, 'noise_count').read()
+            shape = getattr(group, 'shape').read()
+            return sp.coo_matrix((data, (row, col)), shape=shape)
+
+        # read coo
+        posterior_coo = _read_coo(group=f.root.posterior_noise_log_prob)
+
+        # read regularized coo
+        if hasattr(f.root, 'regularized_posterior_noise_log_prob'):
+            regularized_posterior_coo = _read_coo(group=f.root.regularized_posterior_noise_log_prob)
+        else:
+            regularized_posterior_coo = None
+
+        def _read_as_dict(group: tables.Group) -> Dict:
+            d = {}
+            for n in group._f_walknodes('Leaf'):
+                val = n.read()
+                if (type(val) == np.ndarray) and ('S' in val.dtype.kind):
+                    val = val.item().decode()
+                d.update({n.name: val})
+            return d
+
+        # read latents
+        latents = _read_as_dict(group=f.root.droplet_latents_map)
+
+        # read kwargs
+        if hasattr(f.root, 'kwargs'):
+            kwargs = _read_as_dict(group=f.root.kwargs)
+        else:
+            kwargs = None
+
+        if hasattr(f.root, 'kwargs_regularized'):
+            kwargs_regularized = _read_as_dict(group=f.root.kwargs_regularized)
+        else:
+            kwargs_regularized = None
+
+    # Issue warnings if necessary, based on dimensions matching.
+    if posterior_coo.row.size != barcode_inds.size:
+        logger.warning(f"Number of barcode_inds ({barcode_inds.size}) "
+                       f"in {filename} does not match the number expected from "
+                       f"the sparse COO matrix ({posterior_coo.shape[0]}).")
+    if posterior_coo.row.size != feature_inds.size:
+        logger.warning(f"Number of feature_inds ({feature_inds.size}) "
+                       f"in {filename} does not match the number expected from "
+                       f"the sparse COO matrix ({posterior_coo.shape[0]}).")
+
+    return {'coo': posterior_coo,
+            'kwargs': kwargs,
+            'regularized_coo': regularized_posterior_coo,
+            'kwargs_regularized': kwargs_regularized,
+            'latents': latents,
+            'noise_count_offsets': noise_count_offsets,
+            'feature_inds': feature_inds,
+            'barcode_inds': barcode_inds}
+
+
 def unravel_dict(pref: str, d: Dict) -> Dict:
     """Unravel a nested dict, returning a dict with values that are not dicts"""
 

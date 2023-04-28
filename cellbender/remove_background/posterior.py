@@ -17,6 +17,8 @@ from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, 
     log_prob_sparse_to_dense, csr_set_rows_to_zero
 from cellbender.remove_background.checkpoint import load_from_checkpoint, \
     unpack_tarball, make_tarball
+from cellbender.remove_background.data.io import \
+    write_posterior_coo_to_h5, load_posterior_from_h5
 
 from typing import Tuple, List, Dict, Optional, Union, Callable
 from abc import ABC, abstractmethod
@@ -100,9 +102,16 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         posterior_batch_size=args.posterior_batch_size,
         debug=args.debug,
     )
-    ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
-                                          filebase=args.checkpoint_filename,
-                                          to_load=['posterior'])
+    try:
+        ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
+                                              filebase=args.checkpoint_filename,
+                                              to_load=['posterior'])
+    except ValueError:
+        # input checkpoint tarball was not a match for this workflow
+        # but we still may have saved a new tarball
+        ckpt_posterior = load_from_checkpoint(tarball_name=consts.CHECKPOINT_FILE_NAME,
+                                              filebase=args.checkpoint_filename,
+                                              to_load=['posterior'])
     if os.path.exists(ckpt_posterior.get('posterior_file', 'does_not_exist')):
         # Load posterior if it was saved in the checkpoint.
         posterior.load(file=ckpt_posterior['posterior_file'])
@@ -114,14 +123,14 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         _do_posterior_regularization(posterior)
 
         # Save posterior and add it to checkpoint tarball.
-        saved = posterior.save(file=args.output_file[:-3] + '_posterior.npz')
+        saved = posterior.save(file=args.output_file[:-3] + '_posterior.h5')
         success = False
         if saved:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball,
                                           directory=tmp_dir)
                 if unpacked:
-                    posterior.save(file=os.path.join(tmp_dir, 'posterior.npz'), verbose=False)
+                    posterior.save(file=os.path.join(tmp_dir, 'posterior.h5'), verbose=False)
                     all_ckpt_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
                                       if os.path.isfile(os.path.join(tmp_dir, f))]
                     success = make_tarball(files=all_ckpt_files,
@@ -161,7 +170,7 @@ class Posterior:
     """
 
     def __init__(self,
-                 dataset_obj: 'SingleCellRNACountsDataset',  # Dataset
+                 dataset_obj: Optional['SingleCellRNACountsDataset'],  # Dataset
                  vi_model: Optional['RemoveBackgroundPyroModel'],
                  posterior_batch_size: int = 128,
                  counts_dtype: np.dtype = np.uint32,
@@ -169,7 +178,8 @@ class Posterior:
                  debug: bool = False):
         self.dataset_obj = dataset_obj
         self.vi_model = vi_model
-        self.vi_model.eval()
+        if vi_model is not None:
+            self.vi_model.eval()
         self.use_cuda = (torch.cuda.is_available() if vi_model is None
                          else vi_model.use_cuda)
         self.device = 'cuda' if self.use_cuda else 'cpu'
@@ -189,29 +199,32 @@ class Posterior:
         self._noise_count_regularized_posterior_coo = None
         self._noise_count_regularized_posterior_kwargs = None
         self._latents = None
-        self.index_converter = IndexConverter(
-            total_n_cells=dataset_obj.data['matrix'].shape[0],
-            total_n_genes=dataset_obj.data['matrix'].shape[1],
-        )
+        if dataset_obj is not None:
+            self.index_converter = IndexConverter(
+                total_n_cells=dataset_obj.data['matrix'].shape[0],
+                total_n_genes=dataset_obj.data['matrix'].shape[1],
+            )
 
     def save(self, file: str, verbose: bool = True) -> bool:
-        """Save the full posterior in compressed array .npz format."""
+        """Save the full posterior in HDF5 format."""
 
         if self._noise_count_posterior_coo is None:
             self.cell_noise_count_posterior_coo()
 
-        d = {'posterior_noise_count_log_prob_coo': self._noise_count_posterior_coo,
-             'posterior_noise_count_coo_offsets': self._noise_count_posterior_coo_offsets,
-             'posterior_kwargs': self._noise_count_posterior_kwargs,
-             'regularized_posterior_noise_count_log_prob_coo': self._noise_count_regularized_posterior_coo,
-             'regularized_posterior_kwargs': self._noise_count_regularized_posterior_kwargs,
-             'latents': self.latents_map}
+        n, g = self.index_converter.get_ng_indices(self._noise_count_posterior_coo.row)
 
-        # TODO: this can choke (out of memory) on very large datasets... not sure why
-        # TODO: is it the compression?  should I save uncompressed and then compress myself?
+        d = {'posterior_coo': self._noise_count_posterior_coo,
+             'noise_count_offsets': self._noise_count_posterior_coo_offsets,
+             'posterior_kwargs': self._noise_count_posterior_kwargs,
+             'regularized_posterior_coo': self._noise_count_regularized_posterior_coo,
+             'regularized_posterior_kwargs': self._noise_count_regularized_posterior_kwargs,
+             'latents': self.latents_map,
+             'feature_inds': g,
+             'barcode_inds': n}
+
         try:
             logger.info(f'Writing full posterior to {file}')
-            np.savez_compressed(file=file, **d)
+            write_posterior_coo_to_h5(output_file=file, **d)
             if verbose:
                 logger.info(f'Saved posterior as {file}')
             return True
@@ -224,13 +237,13 @@ class Posterior:
     def load(self, file: str) -> bool:
         """Load a saved posterior in compressed array .npz format."""
 
-        d = np.load(file=file, allow_pickle=True)
-        self._noise_count_posterior_coo = d['posterior_noise_count_log_prob_coo'].item()
-        self._noise_count_posterior_coo_offsets = d['posterior_noise_count_coo_offsets'].item()
-        self._noise_count_posterior_kwargs = d['posterior_kwargs'].item()
-        self._noise_count_regularized_posterior_coo = d['regularized_posterior_noise_count_log_prob_coo'].item()
-        self._noise_count_regularized_posterior_kwargs = d['regularized_posterior_kwargs'].item()
-        self._latents = d['latents'].item()
+        d = load_posterior_from_h5(filename=file)
+        self._noise_count_posterior_coo = d['coo']
+        self._noise_count_posterior_coo_offsets = d['noise_count_offsets']
+        self._noise_count_posterior_kwargs = d['kwargs']
+        self._noise_count_regularized_posterior_coo = d['regularized_coo']
+        self._noise_count_regularized_posterior_kwargs = d['kwargs_regularized']
+        self._latents = d['latents']
         logger.info(f'Loaded pre-computed posterior from {file}')
         return True
 
@@ -537,7 +550,9 @@ class Posterior:
             (log_probs, (m, c)),
             shape=[np.prod(self.count_matrix_shape), n_counts_max],
         )
-        self._noise_count_posterior_coo_offsets = dict(zip(m, noise_count_offsets))
+        noise_offset_dict = dict(zip(m, noise_count_offsets))
+        nonzero_noise_offset_dict = {k: v for k, v in noise_offset_dict.items() if (v > 0)}
+        self._noise_count_posterior_coo_offsets = nonzero_noise_offset_dict
         return self._noise_count_posterior_coo
 
     @torch.no_grad()
@@ -1084,7 +1099,7 @@ class PRq(PosteriorRegularization):
                               .unsqueeze(0)
                               .expand(log_pdf_noise_counts_BC.shape))
             m_indices_for_chunk = unique_rows[(i * chunk_size):((i + 1) * chunk_size)]
-            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets[m]
+            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets.get(m, 0)
                                                              for m in m_indices_for_chunk],
                                                             dtype=torch.float)
                                                .unsqueeze(-1)
@@ -1306,7 +1321,7 @@ class PRmu(PosteriorRegularization):
                               .unsqueeze(0)
                               .expand(log_pdf_noise_counts_BC.shape))
             m_indices_for_chunk = unique_rows[(i * chunk_size):((i + 1) * chunk_size)]
-            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets[m]
+            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets.get(m, 0)
                                                              for m in m_indices_for_chunk],
                                                             dtype=torch.float)
                                                .unsqueeze(-1)

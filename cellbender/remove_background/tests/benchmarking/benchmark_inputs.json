@@ -10,8 +10,10 @@
   "run_cellbender_benchmark.cb.fpr": "FPR",
   "run_cellbender_benchmark.cb.debug": false,
   "run_cellbender_benchmark.cb.checkpoint_mins": 200,
+  "run_cellbender_benchmark.cb.checkpoint_file": null,
   "run_cellbender_benchmark.cb.hardware_preemptible_tries": 0,
   "run_cellbender_benchmark.cb.hardware_cpu_count": 8,
   "run_cellbender_benchmark.cb.hardware_memory_GB": 64,
+  "run_cellbender_benchmark.cb.estimator_multiple_cpu": null,
   "run_cellbender_benchmark.cb.docker_image": "us.gcr.io/broad-dsde-methods/cellbender:0.2.1"
 }

@@ -24,7 +24,7 @@ CELL_PROB_CUTOFF = 0.5
 
 # Default UMI cutoff. Droplets with UMI less than this will be completely
 # excluded from the analysis.
-LOW_UMI_CUTOFF = 15
+LOW_UMI_CUTOFF = 5
 
 # Default total number of droplets to include in the analysis.
 TOTAL_DROPLET_DEFAULT = 25000

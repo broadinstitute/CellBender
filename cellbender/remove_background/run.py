@@ -294,7 +294,7 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
             index_converter=posterior.index_converter,
             raw_count_csr_for_cells=cell_counts,
             n_cells=len(cell_inds),
-            device='cuda' if args.use_cuda else 'cpu',
+            device='cuda' if args.use_cuda else 'cpu',  # TODO check this
             per_gene=True,
         )
         noise_target_fun = lambda x: noise_target_fun_per_cell(x) * len(cell_inds)
