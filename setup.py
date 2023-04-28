@@ -2,7 +2,23 @@
 
 import os
 import setuptools
+import codecs
 from typing import List
+
+
+def read(rel_path):
+    here = os.path.abspath(os.path.dirname(__file__))
+    with codecs.open(os.path.join(here, rel_path), 'r') as fp:
+        return fp.read()
+
+
+def get_version() -> str:
+    for line in read('cellbender/__init__.py').splitlines():
+        if line.startswith('__version__'):
+            delim = '"' if '"' in line else "'"
+            return line.split(delim)[1]
+    else:
+        raise RuntimeError("Unable to find version string.")
 
 
 def readme() -> str:
@@ -26,13 +42,6 @@ def get_requirements() -> List[str]:
 def get_rtd_requirements() -> List[str]:
     requirements = _readlines('requirements-rtd.txt')
     return requirements
-
-
-def get_version() -> str:
-    """Version number is centrally located in the file called VERSION"""
-    with open('VERSION') as f:
-        version = f.read().strip()
-    return version
 
 
 setuptools.setup(

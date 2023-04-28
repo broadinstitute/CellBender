@@ -10,16 +10,25 @@ import argparse
 from abc import ABC, abstractmethod
 from typing import Dict
 import importlib
+import codecs
 
 # New tools should be added to this list.
 TOOL_NAME_LIST = ['remove-background']
 
 
+def read(rel_path):
+    here = os.path.abspath(os.path.dirname(__file__))
+    with codecs.open(os.path.join(here, rel_path), 'r') as fp:
+        return fp.read()
+
+
 def get_version() -> str:
-    """Version number is centrally located in the file called VERSION"""
-    with open(os.path.join(os.path.dirname(__file__), '..', 'VERSION')) as f:
-        version = f.read().strip()
-    return version
+    for line in read('__init__.py').splitlines():
+        if line.startswith('__version__'):
+            delim = '"' if '"' in line else "'"
+            return line.split(delim)[1]
+    else:
+        raise RuntimeError("Unable to find version string.")
 
 
 class AbstractCLI(ABC):
