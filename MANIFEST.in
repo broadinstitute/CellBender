@@ -2,3 +2,4 @@ include README.rst
 include LICENSE
 include requirements.txt
 include requirements-rtd.txt
+include cellbender/remove_background/report.ipynb
