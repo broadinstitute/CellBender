@@ -213,7 +213,7 @@ def setup_and_logging(args):
         args_to_remove=(['output_file', 'fpr', 'input_checkpoint_tarball', 'debug',
                          'posterior_batch_size', 'checkpoint_min', 'truth_file',
                          'posterior_regularization', 'cdf_threshold_q', 'prq_alpha',
-                         'estimator']
+                         'estimator', 'use_multiprocessing_estimation', 'cpu_threads']
                         + (['epochs'] if args.constant_learning_rate else [])),
         args=args)[:10]
     args.checkpoint_filename = hashcode  # store this in args
