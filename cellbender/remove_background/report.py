@@ -653,8 +653,15 @@ def assess_count_removal_per_gene(adata, raw_full_adata,
     if 'approximate_ambient_profile' in adata.uns.keys():
         approximate_ambient_profile = adata.uns['approximate_ambient_profile']
     else:
-        approximate_ambient_profile = np.array(raw_full_adata[(counts > clims[0])
-                                                              & (counts < clims[1])].X.mean(axis=0)).squeeze()
+        empty_count_matrix = raw_full_adata[(counts > clims[0]) & (counts < clims[1])].X
+        if empty_count_matrix.shape[0] > 100:
+            approximate_ambient_profile = np.array(raw_full_adata[(counts > clims[0])
+                                                                  & (counts < clims[1])].X.mean(axis=0)).squeeze()
+        else:
+            # a very rare edge case I've seen once
+            display(Markdown('Having some trouble finding the empty droplets via heuristics. '
+                             'This section about count removal per gene may be inaccurate.'))
+            approximate_ambient_profile = np.array(raw_full_adata[counts < clims[1]].X.mean(axis=0)).squeeze()
         approximate_ambient_profile = approximate_ambient_profile / approximate_ambient_profile.sum()
     y = adata.var['n_removed'] / adata.var['n_removed'].sum()
     maxval = (approximate_ambient_profile / approximate_ambient_profile.sum()).max()
