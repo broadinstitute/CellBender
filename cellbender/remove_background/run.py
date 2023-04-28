@@ -203,8 +203,10 @@ def plot_summary(loss: Dict[str, Dict[str, np.ndarray]],
                      loss['test']['elbo'], 'o:', label='Test')
             plt.legend()
 
-    plt.gca().set_ylim(bottom=max(loss['train']['elbo'][0],
-                                  loss['train']['elbo'][-1] - 2000))
+    ylim_low = max(loss['train']['elbo'][0], loss['train']['elbo'][-1] - 2000)
+    ylim_high = max(max(loss['train']['elbo']), max(loss['test']['elbo']))
+    ylim_high = ylim_high + (ylim_high - ylim_low) / 20
+    plt.gca().set_ylim([ylim_low, ylim_high])
     plt.xlabel('Epoch')
     plt.ylabel('ELBO')
     plt.title('Progress of the training procedure')
