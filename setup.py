@@ -72,5 +72,6 @@ setuptools.setup(
         'console_scripts': ['cellbender=cellbender.base_cli:main'],
     },
     include_package_data=True,
+    package_data={'': ['*.ipynb']},  # include the report template
     zip_safe=False
 )
