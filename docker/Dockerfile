@@ -30,6 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 # get compiled crcmod for gsutil
  && conda install -y -c conda-forge crcmod \
 # install cellbender and its dependencies
- && yes | pip install /software/cellbender/ \
+ && yes | pip install -e /software/cellbender/ \
  && conda clean -yaf \
  && sudo rm -rf ~/.cache/pip
