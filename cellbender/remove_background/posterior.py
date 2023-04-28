@@ -11,12 +11,13 @@ import cellbender.remove_background.consts as consts
 from cellbender.remove_background.model import calculate_mu, calculate_lambda
 from cellbender.monitor import get_hardware_usage
 from cellbender.remove_background.data.dataprep import DataLoader
+from cellbender.remove_background.data.dataset import get_dataset_obj
 from cellbender.remove_background.estimation import EstimationMethod, \
     MultipleChoiceKnapsack, Mean, MAP, apply_function_dense_chunks
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
     log_prob_sparse_to_dense, csr_set_rows_to_zero
 from cellbender.remove_background.checkpoint import load_from_checkpoint, \
-    unpack_tarball, make_tarball
+    unpack_tarball, make_tarball, load_checkpoint
 from cellbender.remove_background.data.io import \
     write_posterior_coo_to_h5, load_posterior_from_h5
 
@@ -25,6 +26,7 @@ from abc import ABC, abstractmethod
 import logging
 import argparse
 import tempfile
+import shutil
 import time
 import os
 
@@ -123,14 +125,15 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         _do_posterior_regularization(posterior)
 
         # Save posterior and add it to checkpoint tarball.
-        saved = posterior.save(file=args.output_file[:-3] + '_posterior.h5')
+        posterior_file = args.output_file[:-3] + '_posterior.h5'
+        saved = posterior.save(file=posterior_file)
         success = False
         if saved:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball,
                                           directory=tmp_dir)
                 if unpacked:
-                    posterior.save(file=os.path.join(tmp_dir, 'posterior.h5'), verbose=False)
+                    shutil.copy(posterior_file, os.path.join(tmp_dir, 'posterior.h5'))
                     all_ckpt_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
                                       if os.path.isfile(os.path.join(tmp_dir, f))]
                     success = make_tarball(files=all_ckpt_files,
@@ -205,7 +208,7 @@ class Posterior:
                 total_n_genes=dataset_obj.data['matrix'].shape[1],
             )
 
-    def save(self, file: str, verbose: bool = True) -> bool:
+    def save(self, file: str) -> bool:
         """Save the full posterior in HDF5 format."""
 
         if self._noise_count_posterior_coo is None:
@@ -224,14 +227,11 @@ class Posterior:
 
         try:
             logger.info(f'Writing full posterior to {file}')
-            write_posterior_coo_to_h5(output_file=file, **d)
-            if verbose:
-                logger.info(f'Saved posterior as {file}')
-            return True
+            return write_posterior_coo_to_h5(output_file=file, **d)
         except MemoryError:
-            logger.warning('Attempting to save the posterior as a compressed NPZ file '
-                           'resulted in an out-of-memory error. This is a known issue '
-                           'but please report it as a github issue.')
+            logger.warning('Attempting to save the posterior as an h5 file '
+                           'resulted in an out-of-memory error. Please report '
+                           'this as a github issue.')
             return False
 
     def load(self, file: str) -> bool:
@@ -1867,3 +1867,21 @@ def torch_binary_search(
             logger.debug(value[value + target_tolerance >= init_range[..., 1]])
 
     return value
+
+
+def restore_from_checkpoint(tarball_name: str, input_file: str) \
+        -> Tuple['SingleCellRNACountsDataset', 'RemoveBackgroundPyroModel', Posterior]:
+    """Convenience function not used by the codebase"""
+
+    d = load_checkpoint(filebase=None, tarball_name=tarball_name)
+    d.update(load_from_checkpoint(filebase=None, tarball_name=tarball_name, to_load=['posterior']))
+    d['args'].input_file = input_file
+
+    dataset_obj = get_dataset_obj(args=d['args'])
+
+    posterior = Posterior(
+        dataset_obj=dataset_obj,
+        vi_model=d['model'],
+    )
+    posterior.load(file=d['posterior_file'])
+    return dataset_obj, d['model'], posterior

@@ -2,7 +2,6 @@
 
 from cellbender.remove_background import consts
 from cellbender.remove_background.data.dataprep import DataLoader
-from cellbender.remove_background.data.dataset import get_dataset_obj
 
 import torch
 import numpy as np
@@ -177,24 +176,6 @@ def save_checkpoint(filebase: str,
         return False
 
 
-def restore_all_from_checkpoint(tarball_name: str, input_file: str) \
-        -> Tuple['SingleCellRNACountsDataset', 'RemoveBackgroundPyroModel', 'Posterior']:
-    """Convenience function not used by the codebase"""
-
-    d = load_checkpoint(filebase=None, tarball_name=tarball_name)
-    d.update(load_from_checkpoint(filebase=None, tarball_name=tarball_name, to_load=['posterior']))
-    d['args'].input_file = input_file
-
-    dataset_obj = get_dataset_obj(args=d['args'])
-
-    posterior = Posterior(
-        dataset_obj=dataset_obj,
-        vi_model=d['model'],
-    )
-    posterior.load(file=d['posterior_file'])
-    return dataset_obj, d['model'], posterior
-
-
 def load_checkpoint(filebase: Optional[str],
                     tarball_name: str = consts.CHECKPOINT_FILE_NAME,
                     force_device: Optional[str] = None)\
@@ -296,11 +277,11 @@ def load_from_checkpoint(filebase: Optional[str],
 
         # Copy the posterior file outside the temp dir so it can be loaded later.
         if 'posterior' in to_load:
-            posterior_file = os.path.join(os.path.dirname(filebase), 'posterior.npz')
+            posterior_file = os.path.join(os.path.dirname(filebase), 'posterior.h5')
             if os.path.exists(posterior_file):
-                shutil.copyfile(posterior_file, 'posterior.npz')
-                out.update({'posterior_file': 'posterior.npz'})
-                logger.debug(f'Copied posterior.npz file from {posterior_file} to posterior.npz')
+                shutil.copyfile(posterior_file, 'posterior.h5')
+                out.update({'posterior_file': 'posterior.h5'})
+                logger.debug(f'Copied posterior file from {posterior_file} to posterior.h5')
             else:
                 logger.debug('Trying to load posterior in load_from_checkpoint(), but posterior '
                              'is not present in checkpoint tarball.')
