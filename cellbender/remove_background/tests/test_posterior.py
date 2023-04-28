@@ -399,7 +399,7 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets):
     posterior.index_converter = IndexConverter(total_n_cells=1000, total_n_genes=1000)
 
     # save
-    posterior.save(file=str(filename), verbose=True)
+    posterior.save(file=str(filename))
 
     # load
     posterior2 = Posterior(dataset_obj=None, vi_model=None)  # blank
