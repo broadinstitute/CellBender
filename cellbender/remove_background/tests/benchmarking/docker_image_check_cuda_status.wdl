@@ -20,6 +20,8 @@ task run_check_pytorch_cuda_status {
         import torch
         assert torch.cuda.is_available()
         CODE
+
+        cellbender remove-background -h
     }
     runtime {
         docker: "${docker_image}"
