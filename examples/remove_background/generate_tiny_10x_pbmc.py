@@ -11,7 +11,7 @@ import operator
 import shutil
 
 dataset_name = "pbmc4k (CellRanger 2.1.0, v2 Chemistry)"
-dataset_url = "http://cf.10xgenomics.com/samples/cell-exp/2.1.0/pbmc4k/pbmc4k_raw_gene_bc_matrices.tar.gz"
+dataset_url = "https://s3-us-west-2.amazonaws.com/10x.files/samples/cell-exp/2.1.0/pbmc4k/pbmc4k_fastqs.tar"
 dataset_local_filename = "pbmc4k_raw_gene_bc_matrices.tar.gz"
 expected_cells = 4000
 num_cell_barcodes_to_keep = 500
