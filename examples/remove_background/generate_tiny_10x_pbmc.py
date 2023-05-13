@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import urllib.request
+import requests
 import sys
 import tarfile
 import os
@@ -20,11 +20,18 @@ num_genes_to_keep = 100
 random_seed = 1984
 rng = np.random.RandomState(random_seed)
 
-print(f"Downloading {dataset_name}...")
 try:
-    urllib.request.urlretrieve(dataset_url, dataset_local_filename)
-except IOError:
-    print(f"Could not retrieve {dataset_name} -- cannot continue!")
+    print(f"Downloading {dataset_name}...")
+    response = requests.get(dataset_url, stream=True)
+    response.raise_for_status()  # Raise an exception in case of HTTP errors
+
+    with open(dataset_local_filename, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=1024): 
+            if chunk:  # Filter out keep-alive new chunks
+                f.write(chunk)
+
+except requests.exceptions.RequestException as err:
+    print(f"Could not retrieve {dataset_name} -- cannot continue! Error: {err}")
     sys.exit()
 
 print(f"Extracting {dataset_name}...")
