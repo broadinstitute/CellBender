@@ -33,3 +33,13 @@ jobs:
 
     - name: 'Check package using twine'
       run: python -m twine check dist/*
+
+    - name: 'Extract branch name'
+      shell: bash
+      run: echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >>$GITHUB_OUTPUT
+      id: extract_branch
+
+    - name: 'Install from github branch and run a test'
+      run: |
+        pip install pytest git+https://github.com/broadinstitute/CellBender@${{ steps.extract_branch.outputs.branch }}
+        cellbender -v
