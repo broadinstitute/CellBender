@@ -65,13 +65,13 @@ task run_cellbender_remove_background_gpu {
 
     }
 
-  # For development only: install a non dockerized version of CellBender
-  Boolean install_from_git = (if defined(dev_git_hash__) then true else false)
+    # For development only: install a non dockerized version of CellBender
+    Boolean install_from_git = (if defined(dev_git_hash__) then true else false)
 
-  # Compute the output bucket directory for this sample: output_bucket_base_directory/sample_name/
-  String output_bucket_directory = (if defined(output_bucket_base_directory)
-                                    then sub(select_first([output_bucket_base_directory]), "/+$", "") + "/${sample_name}/"
-                                    else "")
+    # Compute the output bucket directory for this sample: output_bucket_base_directory/sample_name/
+    String output_bucket_directory = (if defined(output_bucket_base_directory)
+                                      then sub(select_first([output_bucket_base_directory]), "/+$", "") + "/${sample_name}/"
+                                      else "")
 
     command {
 
