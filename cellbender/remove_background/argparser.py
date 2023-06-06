@@ -198,7 +198,7 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            help="Number of times to attempt to train the model.  "
                                 "At each subsequent attempt, the learning rate is "
                                 "multiplied by LEARNING_RATE_RETRY_MULT.")
-    subparser.add_argument("--learning-rate-retry-mult", type=float, default=0.5,
+    subparser.add_argument("--learning-rate-retry-mult", type=float, default=0.2,
                            dest="learning_rate_retry_mult",
                            help="Learning rate is multiplied by this amount each "
                                 "time a new training attempt is made.  (This "
