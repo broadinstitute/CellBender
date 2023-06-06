@@ -382,7 +382,7 @@ class SingleCellRNACountsDataset:
             self.max_UMI_count = umi_counts.max()
 
             # Estimate cell logit probability prior.
-            cell_prob = n_cells / total_droplet_barcodes
+            cell_prob = (n_cells / total_droplet_barcodes) * (1. - self.fraction_empties)
             self.priors['cell_logit'] = np.log(cell_prob) - np.log(1. - cell_prob)
 
             logger.info(f"Using {n_cells} probable cell "
