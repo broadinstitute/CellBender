@@ -222,7 +222,6 @@ def run_training(model: RemoveBackgroundPyroModel,
                         current_diff = max(0., test_elbo[-2] - test_elbo[-1])
                         overall_diff = np.abs(test_elbo[-2] - test_elbo[0])
                         fractional_spike = current_diff / overall_diff
-                        print(fractional_spike)
                         if fractional_spike > epoch_elbo_fail_fraction:
                             raise ElboException(
                                 f'Training failed because test loss moved {current_diff:.2f} '
