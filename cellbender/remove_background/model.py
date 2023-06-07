@@ -144,6 +144,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                      'test': {'epoch': [], 'elbo': []},
                      'learning_rate': {'epoch': [], 'value': []}}
         self.empty_UMI_threshold = empty_UMI_threshold
+        self.log_counts_crossover = log_counts_crossover
         self.counts_crossover = np.exp(log_counts_crossover)
 
         # Determine whether we are working on a GPU.
@@ -300,9 +301,15 @@ class RemoveBackgroundPyroModel(nn.Module):
                                       .expand_by([x.size(0)]))
 
                 # Sample y, the presence of a real cell, based on p_logit_prior.
-                y = pyro.sample("y",
-                                dist.Bernoulli(logits=self.p_logit_prior - 100.)  # TODO
-                                .expand_by([x.size(0)]))
+                # y = pyro.sample("y",
+                #                 dist.Bernoulli(logits=self.p_logit_prior - 100.)  # TODO
+                #                 .expand_by([x.size(0)]))
+                p_logit_prior = get_p_logit_prior(
+                    log_counts=x.sum(dim=-1).log(),
+                    log_cell_prior_counts=self.d_cell_loc_prior,
+                    naive_p_logit_prior=self.p_logit_prior,
+                )
+                y = pyro.sample("y", dist.Bernoulli(logits=p_logit_prior))
 
             else:
                 d_empty = None
@@ -392,8 +399,8 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
 
-                empty_constraint = soft_constraint_function(loc=-2, scale=2, lower_bound=False)
-                cell_constraint = soft_constraint_function(loc=2, scale=2, lower_bound=True)
+                empty_constraint = soft_constraint_function(loc=-5, scale=0.1, lower_bound=False)
+                cell_constraint = soft_constraint_function(loc=5, scale=0.1, lower_bound=True)
 
                 # For empties where our inference is currently wrong, impose a big penalty.
                 with poutine.mask(mask=surely_empty_mask):
@@ -414,14 +421,14 @@ class RemoveBackgroundPyroModel(nn.Module):
                 probably_cell_mask = (counts >= self.counts_crossover).bool().to(self.device)
 
                 with poutine.mask(mask=probably_empty_mask):
-                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
+                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION * x.shape[0]):
                         pyro.sample("obs_probably_empty_y",
                                     dist.Normal(loc=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
                                     obs=p_logit_posterior)
 
                 with poutine.mask(mask=probably_cell_mask):
-                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
+                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION * x.shape[0]):
                         pyro.sample("obs_probably_cell_y",
                                     dist.Normal(loc=torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
@@ -429,11 +436,11 @@ class RemoveBackgroundPyroModel(nn.Module):
 
         # Regularization of epsilon.mean()
         if surely_cell_mask.sum() >= 2:
-            epsilon_mean = epsilon[surely_cell_mask].mean()
+            epsilon_median = epsilon[surely_cell_mask].median()
             with poutine.scale(scale=surely_cell_mask.sum() / 10.):
                 pyro.sample("epsilon_mean",
-                            dist.Normal(loc=epsilon_mean, scale=0.01),
-                            obs=torch.ones_like(epsilon_mean))
+                            dist.Normal(loc=epsilon_median, scale=0.01),
+                            obs=torch.ones_like(epsilon_median))
 
         return {'chi_ambient': chi_ambient, 'z': z,
                 'mu': mu_cell, 'lam': lam, 'alpha': alpha, 'counts': c}
@@ -541,7 +548,8 @@ class RemoveBackgroundPyroModel(nn.Module):
             if self.include_empties:
 
                 # Regularize based on wanting a balanced p_y_logit.
-                pyro.sample("p_logit_reg", dist.Normal(loc=enc['p_y'], scale=consts.P_LOGIT_SCALE))
+                # pyro.sample("p_logit_reg", dist.Normal(loc=enc['p_y'], scale=consts.P_LOGIT_SCALE))
+                pyro.sample("p_logit_reg", dist.Delta(enc['p_y']))
 
                 # Pass back the inferred p_y to the model.
                 pyro.sample("p_passback", NullDist(enc['p_y'].detach()))
@@ -550,7 +558,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 y = pyro.sample("y", dist.Bernoulli(logits=enc['p_y']))
 
                 # Gate d_cell_loc so empty droplets do not give big gradients.
-                prob = enc['p_y'].sigmoid()  # Logits to probability
+                prob = enc['p_y'].sigmoid().detach()  # Logits to probability
                 d_cell_loc_gated = (prob * enc['d_loc'] + (1 - prob)
                                     * self.d_cell_loc_prior)  # NOTE: necessary to pass on sim6
 
@@ -568,8 +576,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                     # Gate epsilon and sample.
                     epsilon_gated = (prob * enc['epsilon'] + (1 - prob) * 1.)
 
-                    epsilon = pyro.sample("epsilon", dist.Gamma(epsilon_gated * self.epsilon_prior,
-                                                                self.epsilon_prior))
+                    epsilon = pyro.sample("epsilon", dist.Delta(epsilon_gated))
 
             else:
 
@@ -579,6 +586,21 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # Sample latent code z for each cell.
                 pyro.sample("z", dist.Normal(loc=enc['z']['loc'], scale=enc['z']['scale'])
                             .to_event(1))
+
+
+def get_p_logit_prior(log_counts: torch.Tensor,
+                      log_cell_prior_counts: float,
+                      naive_p_logit_prior: float) -> torch.Tensor:
+    """Compute the logit cell probability prior per droplet based on counts"""
+    ones = torch.ones_like(log_counts)
+    p_logit_prior = ones * naive_p_logit_prior
+    p_logit_prior = torch.where(log_counts < log_cell_prior_counts,
+                                ones * -100.,
+                                p_logit_prior)
+    p_logit_prior = torch.where(log_counts >= log_cell_prior_counts,
+                                ones * consts.REG_LOGIT_MEAN,
+                                p_logit_prior)
+    return p_logit_prior
 
 
 def soft_constraint_function(loc: float, scale: float, lower_bound: bool, invert: bool = True) \
@@ -604,8 +626,8 @@ def soft_constraint_function(loc: float, scale: float, lower_bound: bool, invert
     inversion_sign = -1 if invert else 1
 
     def _fun(x: torch.Tensor) -> torch.Tensor:
-        return inversion_sign * (sign * (x - loc) * scale).exp()
-        # return inversion_sign * torch.clamp((sign * (x - loc) * scale).exp() - 1., min=0.)
+        # return inversion_sign * (sign * (x - loc) * scale).exp()
+        return inversion_sign * torch.clamp((sign * (x - loc) * scale).exp() - 1., min=0.)
 
     return _fun
 

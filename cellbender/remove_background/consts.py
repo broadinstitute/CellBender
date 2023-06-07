@@ -65,7 +65,7 @@ D_CELL_SCALE_INIT = 0.02
 P_LOGIT_SCALE = 2.
 
 # Hidden layer sizes of non-z latent encoder neural network.
-ENC_HIDDEN_DIMS = [100, 50]
+ENC_HIDDEN_DIMS = [500, 500]
 
 # False to use an approximate log_prob computation which is much faster.
 USE_EXACT_LOG_PROB = False
@@ -81,13 +81,11 @@ POISSON_EPS_SAFEGAURD = 1e-10
 
 # Scale factors for loss function regularization terms: semi-supervision.
 REG_SCALE_AMBIENT_EXPRESSION = 0.01
-REG_SCALE_EMPTY_PROB = 10.0
-REG_SCALE_CELL_PROB = 1.0
 REG_SCALE_SOFT_SUPERVISION = 1.0
 
 # Regularize logit probabilities toward this lognormal distribution.
 REG_LOGIT_MEAN = 5.0
-REG_LOGIT_SCALE = 0.2
+REG_LOGIT_SCALE = 0.1
 REG_LOGIT_SOFT_SCALE = 1.0
 
 # Number of cells used to esitmate posterior regularization lambda. Memory hungry.
@@ -109,7 +107,7 @@ PROB_POSTERIOR_BATCH_SIZE = 128
 CHECKPOINT_FILE_NAME = 'ckpt.tar.gz'
 
 # Whether to create an extended report (for development purposes).
-EXTENDED_REPORT = False
+EXTENDED_REPORT = True
 
 # Maximum batch size
 MAX_BATCH_SIZE = 256

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import pyro
 import numpy as np
 from cellbender.remove_background.vae.base import FullyConnectedNetwork
 
@@ -218,7 +219,9 @@ class EncodeNonZLatents(nn.Module):
                  z_dim: int,
                  hidden_dims: List[int],
                  log_count_crossover: float,  # prior on log counts of smallest cell
-                 prior_log_cell_counts: int,  # prior on counts per cell
+                 prior_log_cell_counts: float,  # prior on counts per cell
+                 empty_log_count_threshold: float,  # largest surely-empty droplet log counts
+                 prior_logit_cell_prob: float,
                  input_transform: Optional[str] = None):
         super(EncodeNonZLatents, self).__init__()
         self.n_genes = n_genes
@@ -230,7 +233,9 @@ class EncodeNonZLatents(nn.Module):
         self.INITIAL_WEIGHT_FOR_LOG_COUNTS = 2.
         self.P_OUTPUT_SCALE = 2.
         self.log_count_crossover = log_count_crossover
+        self.empty_log_count_threshold = empty_log_count_threshold
         self.prior_log_cell_counts = prior_log_cell_counts
+        self.prior_logit_cell_prob = prior_logit_cell_prob
 
         # Values related to epsilon
         self.EPS_OUTPUT_SCALE = 1.  # slows down learning for epsilon
@@ -238,7 +243,7 @@ class EncodeNonZLatents(nn.Module):
 
         # Set up the linear transformations used in fully-connected layers.
 
-        self.linears = nn.ModuleList([nn.Linear(3 + self.n_genes,
+        self.linears = nn.ModuleList([nn.Linear(3 + self.n_genes + 1,
                                                 hidden_dims[0])])
         for i in range(1, len(hidden_dims)):  # Second hidden layer onward
             self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
@@ -256,6 +261,7 @@ class EncodeNonZLatents(nn.Module):
 
         # Set up the initial scaling for values of x.
         self.x_scaling = None
+        self.batchnorm = nn.BatchNorm1d(num_features=self.z_dim)
 
         # Set up initial values for overlap normalization.
         self.overlap_mean = None
@@ -301,13 +307,13 @@ class EncodeNonZLatents(nn.Module):
 
         # Calculate a similarity between expression and ambient.
         if chi_ambient is not None:
-            # counts + 1
-            overlap = self._poisson_log_prob(lam=(counts + 1) * chi_ambient.detach().unsqueeze(0),
+            overlap = self._poisson_log_prob(lam=(pyro.param("d_empty_loc").exp().detach()
+                                                  * chi_ambient.detach().unsqueeze(0)),
                                              value=x).sum(dim=-1, keepdim=True)
             if self.overlap_mean is None:
-                self.overlap_mean = (overlap.max() + overlap.min()) / 2
-                self.overlap_std = overlap.max() - overlap.min()
-            overlap = (overlap - self.overlap_mean) / self.overlap_std * 5
+                self.overlap_mean = overlap.mean()  # (overlap.max() + overlap.min()) / 2
+                self.overlap_std = overlap.std() + 1e-2  # overlap.max() - overlap.min()
+            overlap = (overlap - self.overlap_mean) / self.overlap_std
         else:
             overlap = torch.zeros_like(counts)
 
@@ -334,7 +340,10 @@ class EncodeNonZLatents(nn.Module):
         x_in = torch.cat((log_sum,
                           log_nnz,
                           overlap,
+                          torch.linalg.vector_norm(z, ord=2, dim=-1, keepdim=True),
+                          # self.batchnorm(z),
                           x * self.x_scaling),
+                          # self.batchnorm(x)),
                          dim=-1)
         # print(f'x_in {x_in}')
         # print(f'there are {torch.isnan(x_in).sum()} nans in x_in')
@@ -365,7 +374,9 @@ class EncodeNonZLatents(nn.Module):
             #     self.offset['logit_p'] = torch.quantile(out[cells, 0], q=0.02).item()
             # else:
             #     self.offset['logit_p'] = 0.
-            self.offset['logit_p'] = torch.quantile(out[cells, 0], q=0.25).item()
+            # self.offset['logit_p'] = torch.quantile(out[cells, 0], q=0.25).item()
+            cell_prob = torch.sigmoid(torch.tensor(self.prior_logit_cell_prob)).item()
+            self.offset['logit_p'] = torch.quantile(out[cells, 0], q=cell_prob).item()
 
             # Heuristic for initialization of d.
             self.offset['d'] = out[cells, 1].median().item()
@@ -377,14 +388,23 @@ class EncodeNonZLatents(nn.Module):
 
         p_y_logit = ((out[:, 0] - self.offset['logit_p'])
                      * self.P_OUTPUT_SCALE).squeeze()
-        epsilon = self.softplus((out[:, 2] - self.offset['epsilon']).squeeze()
-                                * self.EPS_OUTPUT_SCALE + self.EPS_OUTPUT_MEAN)
+        # epsilon = self.softplus((out[:, 2] - self.offset['epsilon']).squeeze()
+        #                         * self.EPS_OUTPUT_SCALE + self.EPS_OUTPUT_MEAN)
+        epsilon = (
+                (out[:, 2] - self.offset['epsilon'])
+                * self.EPS_OUTPUT_SCALE
+        ).squeeze().sigmoid() * 2.
+
+        # d_loc = self.softplus(
+        #     out[:, 1]
+        #     - self.offset['d']
+        #     + self.softplus(log_sum.squeeze() - self.log_count_crossover)
+        #     + self.log_count_crossover
+        # ).squeeze()
+        d_loc = (counts.squeeze() / (epsilon + 1e-3)).log1p()
 
         return {'p_y': p_y_logit,
-                'd_loc': self.softplus(out[:, 1] - self.offset['d']
-                                       + self.softplus(log_sum.squeeze()
-                                                       - self.log_count_crossover)
-                                       + self.log_count_crossover).squeeze(),
+                'd_loc': d_loc,
                 'epsilon': epsilon}
 
         # TODO: figure out why the list of droplets in the dataloader is different
