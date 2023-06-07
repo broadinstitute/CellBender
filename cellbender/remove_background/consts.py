@@ -65,7 +65,7 @@ D_CELL_SCALE_INIT = 0.02
 P_LOGIT_SCALE = 2.
 
 # Hidden layer sizes of non-z latent encoder neural network.
-ENC_HIDDEN_DIMS = [500, 500]
+ENC_HIDDEN_DIMS = [100, 50]
 
 # False to use an approximate log_prob computation which is much faster.
 USE_EXACT_LOG_PROB = False
