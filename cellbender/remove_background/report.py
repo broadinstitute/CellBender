@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import scipy.sparse as sp
+import scipy.stats
 from IPython.display import display, Markdown, HTML
 
 import subprocess
@@ -133,7 +134,7 @@ def generate_summary_plots(input_file: str,
                                              / (adata.var[f'n_{input_layer_key}_cells'] + 1e-5))
 
     # this inline command is necessary after cellbender imports
-    plt.rcParams.update({'font.size': 13})
+    plt.rcParams.update({'font.size': 12})
 
     # input UMI curve
     raw_full_adata = plot_input_umi_curve(input_file)
@@ -635,8 +636,10 @@ def plot_learning_curve(adata):
         plt.show()
 
 
-def assess_count_removal_per_gene(adata, raw_full_adata,
-                                  input_layer_key='raw', r_squared_cutoff=0.75,
+def assess_count_removal_per_gene(adata,
+                                  raw_full_adata,
+                                  input_layer_key='raw',
+                                  r_squared_cutoff=0.5,
                                   extended=True):
 
     global warnings
@@ -698,9 +701,16 @@ def assess_count_removal_per_gene(adata, raw_full_adata,
         plt.tight_layout()
         plt.show()
 
-    r_squared = 1. - (np.square(y - approximate_ambient_profile).sum()
-                      / np.square(y - y.mean()).sum())
-    display(Markdown(f'R<sup>2</sup> value for the fit of y=x for removal is {r_squared:.4f}'))
+    cutoff = 1e-6
+    logic = np.logical_not((approximate_ambient_profile < cutoff) | (y < cutoff))
+    r_squared_result = scipy.stats.pearsonr(np.log(approximate_ambient_profile[logic]),
+                                            np.log(y[logic]))
+    if hasattr(r_squared_result, 'statistic'):
+        # scipy version 1.9.0+
+        r_squared = r_squared_result.statistic
+    else:
+        r_squared = r_squared_result[0]
+    display(Markdown(f'Pearson correlation coefficient for the above is {r_squared:.4f}'))
     if r_squared > r_squared_cutoff:
         display(Markdown('This meets expectations.'))
     else:
