@@ -54,6 +54,11 @@ python run_benchmark.py \
     --input "gs://broad-dsde-methods-sfleming/cellbender_test/PCL_human_PV_1817_ls.h5" \
     --sample "pv20k"
 
+python run_benchmark.py \
+    --git $GIT_HASH \
+    --input "gs://broad-dsde-methods-sfleming/cellbender_test/PCL_human_PV_1799_BPV.h5" \
+    --sample "pv15k"
+
 # public data from Caroline Porter, high UMI count cells called empty
 python run_benchmark.py \
     --git $GIT_HASH \
