@@ -317,7 +317,7 @@ def make_tarball(files: List[str], tarball_name: str) -> bool:
     NOTE2: .tmp file is used so that incomplete checkpoint files do not exist
         even temporarily
     """
-    with tarfile.open(tarball_name + '.tmp', 'w:gz') as tar:
+    with tarfile.open(tarball_name + '.tmp', 'w:gz', compresslevel=5) as tar:
         for file in files:
             # without arcname, unpacking results in unpredictable file locations!
             tar.add(file, arcname=os.path.basename(file))
