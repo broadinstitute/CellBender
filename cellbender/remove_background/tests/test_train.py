@@ -26,6 +26,9 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
     # if there is a minibatch so small that it's below consts.SMALLEST_ALLOWED_BATCH
     # then the minibatch gets skipped. make sure this works with the scheduler.
 
+    pyro.clear_param_store()
+    device = 'cuda' if cuda else 'cpu'
+
     n_cells = 3580
     n_empties = 50000
     n_genes = 100
@@ -65,7 +68,7 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
 
     # Set up SVI dummy.
     def _model(x):
-        y_mean = pyro.param("y_mean", torch.zeros(1))
+        y_mean = pyro.param("y_mean", torch.zeros(1).to(device))
         pyro.sample("y_obs", dist.Normal(loc=y_mean, scale=1), obs=x.sum())
 
     def _guide(x):
