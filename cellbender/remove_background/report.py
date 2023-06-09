@@ -157,7 +157,10 @@ def generate_summary_plots(input_file: str,
 
     # plot learning curve
     if out_key == 'cellbender':
-        assess_learning_curve(adata)
+        try:
+            assess_learning_curve(adata)
+        except Exception:
+            pass
     else:
         display(Markdown('Skipping learning curve assessment.'))
 
@@ -663,7 +666,7 @@ def assess_count_removal_per_gene(adata,
         else:
             # a very rare edge case I've seen once
             display(Markdown('Having some trouble finding the empty droplets via heuristics. '
-                             'This section about count removal per gene may be inaccurate.'))
+                             'The "approximate background estimated from empty droplets" may be inaccurate.'))
             approximate_ambient_profile = np.array(raw_full_adata[counts < clims[1]].X.mean(axis=0)).squeeze()
         approximate_ambient_profile = approximate_ambient_profile / approximate_ambient_profile.sum()
     y = adata.var['n_removed'] / adata.var['n_removed'].sum()
@@ -1031,7 +1034,8 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
         def _pca_color(g, layer):
             outcounts = np.array(adata[:, g].layers['cellbender'].todense()).squeeze()
             rawcounts = np.array(adata[:, g].layers[input_layer_key].todense()).squeeze()
-            cmax = 2 * (rawcounts - outcounts)[rawcounts > 0].mean()
+            # cmax = 2 * (rawcounts - outcounts)[rawcounts > 0].mean()
+            cmax = np.percentile(rawcounts[rawcounts > 0], q=50)
             if layer == 'cellbender':
                 counts = outcounts
             else:
@@ -1042,7 +1046,7 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
                             c=counts[cells][order],
                             s=10,
                             vmin=0,
-                            vmax=min(20, max(1, cmax)),
+                            vmax=cmax,  # min(20, max(1, cmax)),
                             cmap='Oranges',
                             alpha=0.25)
             plt.title(f'{g}: {layer}')
