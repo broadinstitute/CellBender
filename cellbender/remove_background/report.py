@@ -1491,7 +1491,7 @@ def mixed_species_plots(adata, input_layer_key='raw', output_layer_key='cellbend
     if 'genome' not in adata.var.keys():
         return
 
-    if ('feature_type' in adata.var.keys()) and ('Gene Expression' in adata.var['feature_types'].values):
+    if ('feature_type' in adata.var.keys()) and ('Gene Expression' in adata.var['feature_type'].values):
         genomes = adata.var[adata.var['feature_type'] == 'Gene Expression']['genome'].unique()
     else:
         genomes = adata.var['genome'].unique()
