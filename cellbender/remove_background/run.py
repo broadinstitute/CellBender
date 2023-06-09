@@ -8,7 +8,8 @@ from cellbender.remove_background.vae.encoder \
     import EncodeZ, CompositeEncoder, EncodeNonZLatents
 from cellbender.remove_background.data.dataprep import \
     prep_sparse_data_for_training as prep_data_for_training
-from cellbender.remove_background.checkpoint import attempt_load_checkpoint
+from cellbender.remove_background.checkpoint import attempt_load_checkpoint, \
+    save_checkpoint
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.train import run_training
@@ -791,6 +792,16 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         logger.info("Zero epochs specified... will only initialize the model.")
         model.guide(train_loader.__next__())
         train_loader.reset_ptr()
+
+        # Even though it's not much of a checkpoint, we still need one for subsequent steps.
+        save_checkpoint(filebase=checkpoint_filename,
+                        tarball_name=output_checkpoint_tarball,
+                        args=args,
+                        model_obj=model,
+                        scheduler=svi.optim,
+                        train_loader=train_loader,
+                        test_loader=test_loader)
+
     else:
         logger.info("Running inference...")
         try:
