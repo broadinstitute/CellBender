@@ -103,7 +103,7 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                                 "correct prior for empty droplet counts "
                                 "in the rare case where empty counts "
                                 "are extremely high (over 200).")
-    subparser.add_argument("--z-dim", type=int, default=100,
+    subparser.add_argument("--z-dim", type=int, default=50,
                            dest="z_dim",
                            help="Dimension of latent variable z.")
     subparser.add_argument("--z-layers", nargs="+", type=int, default=[500],
