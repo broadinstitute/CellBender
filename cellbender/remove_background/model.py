@@ -307,6 +307,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 p_logit_prior = get_p_logit_prior(
                     log_counts=x.sum(dim=-1).log(),
                     log_cell_prior_counts=self.d_cell_loc_prior,
+                    surely_empty_counts=self.empty_UMI_threshold,
                     naive_p_logit_prior=self.p_logit_prior,
                 )
                 y = pyro.sample("y", dist.Bernoulli(logits=p_logit_prior))
@@ -399,8 +400,8 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
 
-                empty_constraint = soft_constraint_function(loc=-5, scale=0.1, lower_bound=False)
-                cell_constraint = soft_constraint_function(loc=5, scale=0.1, lower_bound=True)
+                empty_constraint = soft_constraint_function(loc=-5, scale=0.2, lower_bound=False)
+                cell_constraint = soft_constraint_function(loc=5, scale=0.2, lower_bound=True)
 
                 # For empties where our inference is currently wrong, impose a big penalty.
                 with poutine.mask(mask=surely_empty_mask):
@@ -421,14 +422,14 @@ class RemoveBackgroundPyroModel(nn.Module):
                 probably_cell_mask = (counts >= self.counts_crossover).bool().to(self.device)
 
                 with poutine.mask(mask=probably_empty_mask):
-                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION * x.shape[0]):
+                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_empty_y",
                                     dist.Normal(loc=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
                                     obs=p_logit_posterior)
 
                 with poutine.mask(mask=probably_cell_mask):
-                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION * x.shape[0]):
+                    with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample("obs_probably_cell_y",
                                     dist.Normal(loc=torch.ones_like(y) * consts.REG_LOGIT_MEAN,
                                                 scale=consts.REG_LOGIT_SOFT_SCALE),
@@ -548,8 +549,8 @@ class RemoveBackgroundPyroModel(nn.Module):
             if self.include_empties:
 
                 # Regularize based on wanting a balanced p_y_logit.
-                # pyro.sample("p_logit_reg", dist.Normal(loc=enc['p_y'], scale=consts.P_LOGIT_SCALE))
-                pyro.sample("p_logit_reg", dist.Delta(enc['p_y']))
+                pyro.sample("p_logit_reg", dist.Normal(loc=enc['p_y'], scale=consts.P_LOGIT_SCALE))
+                # pyro.sample("p_logit_reg", dist.Delta(enc['p_y']))
 
                 # Pass back the inferred p_y to the model.
                 pyro.sample("p_passback", NullDist(enc['p_y'].detach()))
@@ -557,14 +558,8 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # Sample the Bernoulli y from encoded p(y).
                 y = pyro.sample("y", dist.Bernoulli(logits=enc['p_y']))
 
-                # Gate d_cell_loc so empty droplets do not give big gradients.
+                # Get cell probabilities for gating.
                 prob = enc['p_y'].sigmoid().detach()  # Logits to probability
-                d_cell_loc_gated = (prob * enc['d_loc'] + (1 - prob)
-                                    * self.d_cell_loc_prior)  # NOTE: necessary to pass on sim6
-
-                # Sample d based on the encoding.
-                d_cell = pyro.sample("d_cell", dist.LogNormal(loc=d_cell_loc_gated,
-                                                              scale=d_cell_scale))
 
                 # Mask out empty droplets.
                 with poutine.mask(mask=y.bool()):
@@ -573,10 +568,17 @@ class RemoveBackgroundPyroModel(nn.Module):
                     z = pyro.sample("z", dist.Normal(loc=enc['z']['loc'], scale=enc['z']['scale'])
                                     .to_event(1))
 
-                    # Gate epsilon and sample.
-                    epsilon_gated = (prob * enc['epsilon'] + (1 - prob) * 1.)
+                # Gate d based and sample.
+                d_cell_loc_gated = (prob * enc['d_loc'] + (1 - prob)
+                                    * self.d_cell_loc_prior)  # NOTE: necessary to pass on sim6
+                d_cell = pyro.sample("d_cell", dist.LogNormal(loc=d_cell_loc_gated,
+                                                              scale=d_cell_scale))
 
-                    epsilon = pyro.sample("epsilon", dist.Delta(epsilon_gated))
+                # Gate epsilon and sample.
+                epsilon_gated = (prob * enc['epsilon'] + (1 - prob) * 1.)
+                epsilon = pyro.sample("epsilon",
+                                      dist.Gamma(concentration=epsilon_gated * self.epsilon_prior,
+                                                 rate=self.epsilon_prior))
 
             else:
 
@@ -590,11 +592,15 @@ class RemoveBackgroundPyroModel(nn.Module):
 
 def get_p_logit_prior(log_counts: torch.Tensor,
                       log_cell_prior_counts: float,
+                      surely_empty_counts: torch.Tensor,
                       naive_p_logit_prior: float) -> torch.Tensor:
     """Compute the logit cell probability prior per droplet based on counts"""
     ones = torch.ones_like(log_counts)
     p_logit_prior = ones * naive_p_logit_prior
-    p_logit_prior = torch.where(log_counts < log_cell_prior_counts,
+    # p_logit_prior = torch.where(log_counts < log_cell_prior_counts,
+    #                             ones * -100.,
+    #                             p_logit_prior)
+    p_logit_prior = torch.where(log_counts <= (surely_empty_counts.log() + log_cell_prior_counts) / 2,
                                 ones * -100.,
                                 p_logit_prior)
     p_logit_prior = torch.where(log_counts >= log_cell_prior_counts,
