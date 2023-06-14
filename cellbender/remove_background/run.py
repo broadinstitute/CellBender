@@ -717,8 +717,9 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                                           log_count_crossover=dataset_obj.priors['log_counts_crossover'],
                                           prior_log_cell_counts=np.log1p(dataset_obj.priors['cell_counts']),
                                           empty_log_count_threshold=np.log1p(dataset_obj.empty_UMI_threshold),
+                                          # empty_log_count_upper=np.log1p(dataset_obj.priors['empty_count_upper_limit']),
                                           prior_logit_cell_prob=dataset_obj.priors['cell_logit'],
-                                          input_transform='log')  # TODO log?
+                                          input_transform='normalize')  # TODO log?
 
         encoder = CompositeEncoder({'z': encoder_z,
                                     'other': encoder_other})
