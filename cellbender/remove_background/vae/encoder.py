@@ -220,18 +220,18 @@ class EncodeNonZLatents(nn.Module):
                  hidden_dims: List[int],
                  log_count_crossover: float,  # prior on log counts of smallest cell
                  prior_log_cell_counts: float,  # prior on counts per cell
-                 empty_log_count_threshold: float,  # largest surely-empty droplet log counts
+                 empty_log_count_threshold: float,
                  prior_logit_cell_prob: float,
                  input_transform: Optional[str] = None):
         super(EncodeNonZLatents, self).__init__()
         self.n_genes = n_genes
         self.z_dim = z_dim
         self.transform = input_transform
-        self.output_dim = 3
+        self.output_dim = 1
 
         # Values related to logit cell probability
-        self.INITIAL_WEIGHT_FOR_LOG_COUNTS = 2.
-        self.P_OUTPUT_SCALE = 2.
+        self.INITIAL_WEIGHT_FOR_LOG_COUNTS = 1.
+        self.P_OUTPUT_SCALE = 5.
         self.log_count_crossover = log_count_crossover
         self.empty_log_count_threshold = empty_log_count_threshold
         self.prior_log_cell_counts = prior_log_cell_counts
@@ -243,11 +243,21 @@ class EncodeNonZLatents(nn.Module):
 
         # Set up the linear transformations used in fully-connected layers.
 
-        self.linears = nn.ModuleList([nn.Linear(3 + self.n_genes + 1,
+        self.linears = nn.ModuleList([nn.Linear(4 + self.n_genes,
                                                 hidden_dims[0])])
         for i in range(1, len(hidden_dims)):  # Second hidden layer onward
             self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
         self.output = nn.Linear(hidden_dims[-1], self.output_dim)
+
+        self.d_eps_network = nn.Sequential(
+            nn.Linear(4 + self.n_genes, 100),
+            nn.BatchNorm1d(num_features=100),
+            nn.Softplus(),
+            nn.Linear(100, 50),
+            nn.BatchNorm1d(num_features=50),
+            nn.Softplus(),
+            nn.Linear(50, 2),
+        )
 
         # Adjust initialization conditions to start with a reasonable output.
         self._weight_init()
@@ -261,7 +271,7 @@ class EncodeNonZLatents(nn.Module):
 
         # Set up the initial scaling for values of x.
         self.x_scaling = None
-        self.batchnorm = nn.BatchNorm1d(num_features=self.z_dim)
+        self.batchnorm = nn.BatchNorm1d(num_features=self.n_genes)
 
         # Set up initial values for overlap normalization.
         self.overlap_mean = None
@@ -276,9 +286,6 @@ class EncodeNonZLatents(nn.Module):
                 linear.weight[0][0] = 1.
         with torch.no_grad():
             self.output.weight[0][0] = self.INITIAL_WEIGHT_FOR_LOG_COUNTS
-            # Prevent a negative weight from starting something inverted.
-            self.output.weight[1][0] = torch.abs(self.output.weight[1][0])
-            self.output.weight[2][0] = torch.abs(self.output.weight[2][0])
 
     def _poisson_log_prob(self, lam, value):
         return (lam.log() * value) - lam - (value + 1).lgamma()
@@ -312,7 +319,7 @@ class EncodeNonZLatents(nn.Module):
                                              value=x).sum(dim=-1, keepdim=True)
             if self.overlap_mean is None:
                 self.overlap_mean = overlap.mean()  # (overlap.max() + overlap.min()) / 2
-                self.overlap_std = overlap.std() + 1e-2  # overlap.max() - overlap.min()
+                self.overlap_std = overlap.std() + 1e-8  # overlap.max() - overlap.min()
             overlap = (overlap - self.overlap_mean) / self.overlap_std
         else:
             overlap = torch.zeros_like(counts)
@@ -323,17 +330,17 @@ class EncodeNonZLatents(nn.Module):
         # print(f'there are {torch.isnan(x).sum()} nans in x')
         # print(f'there are {torch.isnan(x.sum(-1)).sum()} cells with nans in x')
 
-        # Calculate a scale factor (first time through) to control the input variance.
-        if self.x_scaling is None:
-            x_cell = x[(counts > counts.median()).squeeze(), :]
-            n_std_est = 10
-            num = int(x_cell.nelement() / 2)
-            std_estimates = torch.zeros([n_std_est])
-            for i in range(n_std_est):
-                idx = torch.randperm(x_cell.nelement())
-                std_estimates[i] = x_cell.view(-1)[idx][:num].std().item()
-            robust_std = torch.mean(std_estimates[~torch.isnan(std_estimates)]).item() + 1e-2
-            self.x_scaling = (1. / robust_std) / 100.  # Get values on a level field
+        # # Calculate a scale factor (first time through) to control the input variance.
+        # if self.x_scaling is None:
+        #     x_cell = x[(counts > counts.median()).squeeze(), :]
+        #     n_std_est = 10
+        #     num = int(x_cell.nelement() / 2)
+        #     std_estimates = torch.zeros([n_std_est])
+        #     for i in range(n_std_est):
+        #         idx = torch.randperm(x_cell.nelement())
+        #         std_estimates[i] = x_cell.view(-1)[idx][:num].std().item()
+        #     robust_std = torch.mean(std_estimates[~torch.isnan(std_estimates)]).item() + 1e-2
+        #     self.x_scaling = (1. / robust_std) / 100.  # Get values on a level field
 
         # Form a new input by concatenation.
         # Compute the hidden layers and the output.
@@ -341,9 +348,7 @@ class EncodeNonZLatents(nn.Module):
                           log_nnz,
                           overlap,
                           torch.linalg.vector_norm(z, ord=2, dim=-1, keepdim=True),
-                          # self.batchnorm(z),
-                          x * self.x_scaling),
-                          # self.batchnorm(x)),
+                          self.batchnorm(x)),
                          dim=-1)
         # print(f'x_in {x_in}')
         # print(f'there are {torch.isnan(x_in).sum()} nans in x_in')
@@ -360,6 +365,10 @@ class EncodeNonZLatents(nn.Module):
 
         out = self.output(hidden).squeeze(-1)
 
+        d_eps_out = self.d_eps_network(x_in)
+        eps_out = d_eps_out[:, 0]
+        d_out = d_eps_out[:, 1]
+
         if self.offset is None:
 
             self.offset = dict()
@@ -367,41 +376,29 @@ class EncodeNonZLatents(nn.Module):
             # Heuristic for initialization of logit_cell_probability.
             cells = (log_sum > self.log_count_crossover).squeeze()
             assert cells.sum() > 4, "Fewer than 4 cells passed to encoder minibatch"
-            # if (cells.sum() > 0):  # and ((~cells).sum() > 0):
-            #     # cell_median = out[cells, 0].median().item()
-            #     # empty_median = out[~cells, 0].median().item()
-            #     # self.offset['logit_p'] = empty_median + (cell_median - empty_median) * 9. / 10
-            #     self.offset['logit_p'] = torch.quantile(out[cells, 0], q=0.02).item()
-            # else:
-            #     self.offset['logit_p'] = 0.
-            # self.offset['logit_p'] = torch.quantile(out[cells, 0], q=0.25).item()
-            cell_prob = torch.sigmoid(torch.tensor(self.prior_logit_cell_prob)).item()
-            self.offset['logit_p'] = torch.quantile(out[cells, 0], q=cell_prob).item()
+            cell_prob = cells.sum() / x.shape[0]
+            self.offset['logit_p'] = torch.quantile(out, q=1. - cell_prob).item()
 
             # Heuristic for initialization of d.
-            self.offset['d'] = out[cells, 1].median().item()
+            self.offset['d'] = d_out[cells].median().item()
 
             # Heuristic for initialization of epsilon.
-            self.offset['epsilon'] = out[cells, 2].mean().item()
+            # self.offset['epsilon'] = out[cells, 2].mean().item()
+            self.offset['epsilon'] = eps_out[cells].mean().item()
 
             # print(self.offset)
 
-        p_y_logit = ((out[:, 0] - self.offset['logit_p'])
+        p_y_logit = ((out - self.offset['logit_p'])
                      * self.P_OUTPUT_SCALE).squeeze()
-        # epsilon = self.softplus((out[:, 2] - self.offset['epsilon']).squeeze()
-        #                         * self.EPS_OUTPUT_SCALE + self.EPS_OUTPUT_MEAN)
-        epsilon = (
-                (out[:, 2] - self.offset['epsilon'])
-                * self.EPS_OUTPUT_SCALE
-        ).squeeze().sigmoid() * 2.
+        epsilon = self.softplus((eps_out - self.offset['epsilon']).squeeze()
+                                * self.EPS_OUTPUT_SCALE + self.EPS_OUTPUT_MEAN)
 
-        # d_loc = self.softplus(
-        #     out[:, 1]
-        #     - self.offset['d']
-        #     + self.softplus(log_sum.squeeze() - self.log_count_crossover)
-        #     + self.log_count_crossover
-        # ).squeeze()
-        d_loc = (counts.squeeze() / (epsilon + 1e-3)).log1p()
+        d_loc = self.softplus(
+            d_out
+            - self.offset['d']
+            + self.softplus(log_sum.squeeze() - self.log_count_crossover)
+            + self.log_count_crossover
+        ).squeeze()
 
         return {'p_y': p_y_logit,
                 'd_loc': d_loc,
@@ -639,7 +636,7 @@ def transform_input(x: torch.Tensor, transform: str, eps: float = 1e-5) -> torch
     Args:
         x: Input torch.Tensor
         transform: Specifies which transformation to perform.  Must be one of
-            ['log', 'normalize', 'normalize_log'].
+            ['log', 'normalize', 'normalize_log', 'log_normalize'].
         eps: Preclude nan values in case of an input x with zero counts for a cell
 
     Returns:
@@ -661,6 +658,11 @@ def transform_input(x: torch.Tensor, transform: str, eps: float = 1e-5) -> torch
     elif transform == 'normalize_log':
         x = x.log1p()
         x = x / (x.sum(dim=-1, keepdim=True) + eps)
+        return x
+
+    elif transform == 'log_normalize':
+        x = x / (x.sum(dim=-1, keepdim=True) + eps)
+        x = x.log1p()
         return x
 
     else:
