@@ -205,7 +205,10 @@ def plot_summary(loss: Dict[str, Dict[str, np.ndarray]],
             plt.legend()
 
     ylim_low = max(loss['train']['elbo'][0], loss['train']['elbo'][-1] - 2000)
-    ylim_high = max(max(loss['train']['elbo']), max(loss['test']['elbo']))
+    try:
+        ylim_high = max(max(loss['train']['elbo']), max(loss['test']['elbo']))
+    except ValueError:
+        ylim_high = max(loss['train']['elbo'])
     ylim_high = ylim_high + (ylim_high - ylim_low) / 20
     plt.gca().set_ylim([ylim_low, ylim_high])
     plt.xlabel('Epoch')
