@@ -437,11 +437,17 @@ class RemoveBackgroundPyroModel(nn.Module):
 
         # Regularization of epsilon.mean()
         if surely_cell_mask.sum() >= 2:
-            epsilon_median = epsilon[surely_cell_mask].median()
-            with poutine.scale(scale=surely_cell_mask.sum() / 10.):
-                pyro.sample("epsilon_mean",
-                            dist.Normal(loc=epsilon_median, scale=0.01),
-                            obs=torch.ones_like(epsilon_median))
+            epsilon_median = epsilon[probably_cell_mask].median()
+            # with poutine.scale(scale=probably_cell_mask.sum() / 10.):
+            pyro.sample("epsilon_mean",
+                        dist.Normal(loc=epsilon_median, scale=0.01),
+                        obs=torch.ones_like(epsilon_median))
+
+        epsilon_median_empty = epsilon[probably_empty_mask].median()
+        # with poutine.scale(scale=probably_cell_mask.sum() / 10.):
+        pyro.sample("epsilon_empty_mean",
+                    dist.Normal(loc=epsilon_median_empty, scale=0.01),
+                    obs=torch.ones_like(epsilon_median_empty))
 
         return {'chi_ambient': chi_ambient, 'z': z,
                 'mu': mu_cell, 'lam': lam, 'alpha': alpha, 'counts': c}
@@ -562,7 +568,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 prob = enc['p_y'].sigmoid().detach()  # Logits to probability
 
                 # Mask out empty droplets.
-                with poutine.mask(mask=y.bool()):
+                with poutine.mask(mask=y.bool().detach()):
 
                     # Sample latent code z for the barcodes containing cells.
                     z = pyro.sample("z", dist.Normal(loc=enc['z']['loc'], scale=enc['z']['scale'])
