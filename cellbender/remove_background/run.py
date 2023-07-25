@@ -20,7 +20,7 @@ from cellbender.remove_background.estimation import MultipleChoiceKnapsack, \
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
-from cellbender.remove_background.report import run_notebook_make_html
+from cellbender.remove_background.report import run_notebook_make_html, plot_summary
 
 import pyro
 from pyro.infer import SVI, JitTraceEnum_ELBO, JitTrace_ELBO, \
@@ -183,71 +183,6 @@ def save_output_plots(file_dir: str,
         logger.warning("Unable to save all plots.")
         logger.warning(traceback.format_exc())
         return False
-
-
-def plot_summary(loss: Dict[str, Dict[str, np.ndarray]],
-                 umi_counts: np.ndarray,
-                 p: np.ndarray,
-                 z: np.ndarray):
-    """Output summary plot with three panels: training, cells, latent z."""
-
-    fig = plt.figure(figsize=(6, 18))
-
-    # Plot the train error.
-    plt.subplot(3, 1, 1)
-    plt.plot(loss['train']['elbo'], '.--', label='Train')
-
-    # Plot the test error, if there was held-out test data.
-    if 'test' in loss.keys():
-        if len(loss['test']['epoch']) > 0:
-            plt.plot(loss['test']['epoch'],
-                     loss['test']['elbo'], 'o:', label='Test')
-            plt.legend()
-
-    ylim_low = max(loss['train']['elbo'][0], loss['train']['elbo'][-1] - 2000)
-    try:
-        ylim_high = max(max(loss['train']['elbo']), max(loss['test']['elbo']))
-    except ValueError:
-        ylim_high = max(loss['train']['elbo'])
-    ylim_high = ylim_high + (ylim_high - ylim_low) / 20
-    plt.gca().set_ylim([ylim_low, ylim_high])
-    plt.xlabel('Epoch')
-    plt.ylabel('ELBO')
-    plt.title('Progress of the training procedure')
-
-    # Plot the barcodes used, along with the inferred
-    # cell probabilities.
-    plt.subplot(3, 1, 2)
-    count_order = np.argsort(umi_counts)[::-1]
-    plt.semilogy(umi_counts[count_order], color='black')
-    plt.ylabel('UMI counts')
-    plt.xlabel('Barcode index, sorted by UMI count')
-    if p is not None:  # The case of a simple model.
-        plt.gca().twinx()
-        plt.plot(p[count_order], '.:', color='red', alpha=0.3, rasterized=True)
-        plt.ylabel('Cell probability', color='red')
-        plt.ylim([-0.05, 1.05])
-        plt.title('Determination of which barcodes contain cells')
-    else:
-        plt.title('The subset of barcodes used for training')
-
-    plt.subplot(3, 1, 3)
-    if p is None:
-        p = np.ones(z.shape[0])
-
-    # Do PCA on the latent encoding z.
-    A = torch.tensor(z[p >= consts.CELL_PROB_CUTOFF])
-    U, S, V = torch.pca_lowrank(A)
-    z_pca = torch.matmul(A, V[:, :2])
-
-    # Plot the latent encoding via PCA.
-    plt.plot(z_pca[:, 0], z_pca[:, 1],
-             '.', ms=3, color='black', alpha=0.3, rasterized=True)
-    plt.ylabel('PC 1')
-    plt.xlabel('PC 0')
-    plt.title('PCA of latent encoding of gene expression in cells')
-
-    return fig
 
 
 def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
