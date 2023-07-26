@@ -257,17 +257,19 @@ class EncodeNonZLatents(nn.Module):
         n_extra_features = 4
 
         # Inject extra features at each level
-        self.layer1 = nn.Linear(n_extra_features + self.n_genes, 32)
-        self.batchnorm1 = nn.BatchNorm1d(num_features=32)
-        self.layer2 = nn.Linear(n_extra_features + 32, 16)
-        self.batchnorm2 = nn.BatchNorm1d(num_features=16)
-        self.layer3 = nn.Linear(n_extra_features + 16, 3)
+        self.layer1 = nn.Linear(n_extra_features + self.n_genes, 512)
+        self.batchnorm1 = nn.BatchNorm1d(num_features=512)
+        self.layer2 = nn.Linear(n_extra_features + 512, 512)
+        self.batchnorm2 = nn.BatchNorm1d(num_features=512)
+        self.layer3 = nn.Linear(n_extra_features + 512, 3)
 
         # Adjust initialization conditions to start with a reasonable output.
         self._weight_init()
 
         # Set up the non-linear activations.
         self.softplus = nn.Softplus()
+        self.dropout10 = nn.Dropout1d(p=0.1)
+        self.dropout50 = nn.Dropout1d(p=0.5)
 
         # Set up the initial biases.
         self.offset = None
@@ -344,7 +346,7 @@ class EncodeNonZLatents(nn.Module):
 
         # Form a new input by concatenation.
         # Compute the hidden layers and the output.
-        x_in = self.batchnorm0(x)
+        x_in = self.dropout50(self.batchnorm0(x))
         x_extra_features = torch.cat(
             (log_sum,
              log_nnz,
@@ -371,8 +373,8 @@ class EncodeNonZLatents(nn.Module):
             return torch.cat((x_extra_features, y), dim=-1)
 
         # Do the forward pass
-        x_ = self.softplus(self.batchnorm1(self.layer1(add_extra_features(x_in))))
-        x_ = self.softplus(self.batchnorm2(self.layer2(add_extra_features(x_))))
+        x_ = self.softplus(self.batchnorm1(self.dropout10(self.layer1(add_extra_features(x_in)))))
+        x_ = self.softplus(self.batchnorm2(self.dropout10(self.layer2(add_extra_features(x_)))))
         out = self.layer3(add_extra_features(x_))
 
         # Gather outputs
@@ -394,6 +396,7 @@ class EncodeNonZLatents(nn.Module):
 
             # Heuristic for initialization of d.
             self.offset['d'] = d_out[cells].median().item()
+            self.offset['mean_log_sum_cells'] = log_sum[cells].mean().item()
 
             # Heuristic for initialization of epsilon.
             # self.offset['epsilon'] = out[cells, 2].mean().item()
@@ -421,10 +424,10 @@ class EncodeNonZLatents(nn.Module):
                                 * self.EPS_OUTPUT_SCALE + self.EPS_OUTPUT_MEAN)
 
         d_loc = self.softplus(
-            d_out
-            - self.offset['d']
-            + self.softplus(log_sum.squeeze() - self.log_count_crossover)
-            + self.log_count_crossover
+            (d_out - self.offset['d'])
+            + self.offset['mean_log_sum_cells']
+            # + self.softplus(log_sum.squeeze() - self.log_count_crossover)
+            # + self.log_count_crossover
         )
 
         return {'p_y': p_y_logit,
