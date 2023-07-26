@@ -44,7 +44,15 @@ python run_benchmark.py \
     --git $GIT_HASH \
     --input "gs://broad-dsde-methods-sfleming/cellbender_test/s4.h5" \
     --truth "gs://broad-dsde-methods-sfleming/cellbender_test/s4_truth.h5" \
-    --sample "s4"
+    --sample "s4" \
+    --fpr "0.2"
+
+# Simulation s7, hgmm
+python run_benchmark.py \
+    --git $GIT_HASH \
+    --input "gs://broad-dsde-methods-sfleming/cellbender_test/s7.h5" \
+    --truth "gs://broad-dsde-methods-sfleming/cellbender_test/s7_truth.h5" \
+    --sample "s1"
 
 # additional datasets ========================
 
