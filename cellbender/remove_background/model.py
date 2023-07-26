@@ -400,22 +400,22 @@ class RemoveBackgroundPyroModel(nn.Module):
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
 
-                empty_constraint = soft_constraint_function(loc=-5, scale=0.2, lower_bound=False)
-                cell_constraint = soft_constraint_function(loc=5, scale=0.2, lower_bound=True)
-
-                # For empties where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=surely_empty_mask):
-
-                    # Supervision of empty probabilities.
-                    pyro.factor("obs_surely_empty_y",
-                                log_factor=empty_constraint(p_logit_posterior))
-
-                # For cells where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=surely_cell_mask):
-
-                    # Supervision of cell probabilities.
-                    pyro.factor("obs_surely_cell_y",
-                                log_factor=cell_constraint(p_logit_posterior))
+                # empty_constraint = soft_constraint_function(loc=-5, scale=0.2, lower_bound=False)
+                # cell_constraint = soft_constraint_function(loc=5, scale=0.2, lower_bound=True)
+                #
+                # # For empties where our inference is currently wrong, impose a big penalty.
+                # with poutine.mask(mask=surely_empty_mask):
+                #
+                #     # Supervision of empty probabilities.
+                #     pyro.factor("obs_surely_empty_y",
+                #                 log_factor=empty_constraint(p_logit_posterior))
+                #
+                # # For cells where our inference is currently wrong, impose a big penalty.
+                # with poutine.mask(mask=surely_cell_mask):
+                #
+                #     # Supervision of cell probabilities.
+                #     pyro.factor("obs_surely_cell_y",
+                #                 log_factor=cell_constraint(p_logit_posterior))
 
                 # Softer semi-supervision to encourage cell probabilities to do the right thing.
                 probably_empty_mask = (counts < self.counts_crossover).bool().to(self.device)
