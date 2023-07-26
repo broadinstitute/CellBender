@@ -10,4 +10,6 @@ loompy
 ipython
 jupyter
 jupyter_contrib_nbextensions
+notebook<7.0.0
+nbconvert<7.0.0
 psutil
