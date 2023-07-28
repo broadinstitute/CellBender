@@ -45,6 +45,11 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            help="Number of cells expected in the dataset "
                                 "(a rough estimate within a factor of 2 "
                                 "is sufficient).")
+    subparser.add_argument("--expected-ambient-size", nargs=None, type=int,
+                           default=None,
+                           dest="expected_ambient_size",
+                           help="Prior for the number of counts expected in empty "
+                                "droplets.")
     subparser.add_argument("--total-droplets-included",
                            nargs=None, type=int,
                            default=consts.TOTAL_DROPLET_DEFAULT,

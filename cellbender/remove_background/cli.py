@@ -51,6 +51,11 @@ class CLI(AbstractCLI):
             assert args.total_droplets > args.expected_cell_count, \
                 f"total_droplets must be an integer greater than the input " \
                 f"expected_cell_count, which is {args.expected_cell_count}."
+            
+        # If expected counts for empty drolets are specified, it should be positive
+        if (args.expected_ambient_size is not None):
+            assert args.expected_ambient_size > 0, \
+                f"expected_ambient_size must be an integer greater than 0."
 
         assert (args.fraction_empties > 0) and (args.fraction_empties < 1), \
             "fraction_empties must be between 0 and 1, exclusive.  This is " \
@@ -150,6 +155,7 @@ def run_remove_background(args):
         dataset_obj = \
             SingleCellRNACountsDataset(input_file=args.input_file,
                                        expected_cell_count=args.expected_cell_count,
+                                       expected_ambient_size=args.expected_ambient_size,
                                        total_droplet_barcodes=args.total_droplets,
                                        fraction_empties=args.fraction_empties,
                                        model_name=args.model,
