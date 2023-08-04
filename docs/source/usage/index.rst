@@ -157,6 +157,11 @@ The default settings are good for getting started with a clean and simple datase
 the publicly available `PBMC dataset from 10x Genomics
 <https://support.10xgenomics.com/single-cell-gene-expression/datasets/2.1.0/pbmc8k>`_.
 
+As of v0.3.0, users will typically not need to set values for ``--expected-cells``
+or ``--total-droplets-included``, as CellBender will choose reasonable values
+based on your dataset. If something goes wrong with these defaults, then you can
+try to input these arguments manually.
+
 Considerations for setting parameters:
 
 * ``--epochs``: 150 is typically a good choice.  Look for a reasonably-converged ELBO value

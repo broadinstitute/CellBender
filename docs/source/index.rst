@@ -34,3 +34,4 @@ For troubleshooting and an FAQ, see the :ref:`Troubleshooting <troubleshooting>`
    contributing/index
    citation/index
    reference/license/index
+   changelog/index
