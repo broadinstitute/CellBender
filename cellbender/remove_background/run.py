@@ -486,7 +486,10 @@ def collect_output_metrics(dataset_obj: SingleCellRNACountsDataset,
                                  / np.std(loss['train']['elbo'][-20:]))
     else:
         convergence_indicator = 'not enough training epochs to compute (requires more than 20)'
-    overall_change_in_train_elbo = loss['train']['elbo'][-1] - loss['train']['elbo'][0]
+    if len(loss['train']['elbo']) > 0:
+        overall_change_in_train_elbo = loss['train']['elbo'][-1] - loss['train']['elbo'][0]
+    else:
+        overall_change_in_train_elbo = 0  # zero epoch initialization
 
     all_metrics_dict = \
         {'total_raw_counts': total_raw_counts,
