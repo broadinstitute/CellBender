@@ -16,6 +16,7 @@ import random
 import pickle
 import tempfile
 import shutil
+import traceback
 
 
 logger = logging.getLogger('cellbender')
@@ -173,6 +174,7 @@ def save_checkpoint(filebase: str,
 
     except Exception:
         logger.warning('Could not save checkpoint')
+        logger.warning(traceback.format_exc())
         return False
 
 
