@@ -254,15 +254,38 @@ class EncodeNonZLatents(nn.Module):
         #     self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
         # self.output = nn.Linear(hidden_dims[-1], self.output_dim)
 
-        n_extra_features = 4
+        additional_features_p = 4
 
         # Inject extra features at each level
-        self.layer1 = nn.Linear(n_extra_features + self.n_genes, 512)
-        # self.layer1 = nn.Linear(n_extra_features + self.z_dim, 64)
+        self.layer1 = nn.Linear(additional_features_p + self.n_genes, 512)
         self.batchnorm1 = nn.BatchNorm1d(num_features=512)
-        self.layer2 = nn.Linear(n_extra_features + 512, 512)
+        self.layer2 = nn.Linear(additional_features_p + 512, 512)
         self.batchnorm2 = nn.BatchNorm1d(num_features=512)
-        self.layer3 = nn.Linear(n_extra_features + 512, 3)
+        self.layer3 = nn.Linear(additional_features_p + 512, 1)
+
+        # additional_features_p = 4
+        #
+        # self.p_network = nn.Sequential(
+        #     nn.Linear(additional_features_p + self.n_genes, 512),
+        #     nn.BatchNorm1d(num_features=512),
+        #     nn.Softplus(),
+        #     nn.Linear(additional_features_p + 512, 512),
+        #     nn.BatchNorm1d(num_features=512),
+        #     nn.Softplus(),
+        #     nn.Linear(additional_features_p + 512, 1),
+        # )
+
+        additional_features_eps = 4
+
+        self.eps_network = nn.Sequential(
+            nn.Linear(additional_features_eps + self.n_genes, 512),
+            nn.BatchNorm1d(num_features=512),
+            nn.Softplus(),
+            nn.Linear(512, 512),
+            nn.BatchNorm1d(num_features=512),
+            nn.Softplus(),
+            nn.Linear(512, 1),
+        )
 
         # Adjust initialization conditions to start with a reasonable output.
         self._weight_init()
@@ -278,6 +301,13 @@ class EncodeNonZLatents(nn.Module):
         self.x_scaling = None
         self.batchnorm0 = nn.BatchNorm1d(num_features=self.n_genes)
         # self.batchnorm0 = nn.BatchNorm1d(num_features=self.z_dim)
+
+        # Function that constrains the output values of epsilon.
+        # self.eps_constraint_fun = constrained_interval_with_offset(
+        #     range=2.,
+        #     low_lim=0.5,
+        #     output_at_zero=1.,
+        # )
 
     def _weight_init(self):
         """Initialize neural network weights"""
@@ -308,20 +338,29 @@ class EncodeNonZLatents(nn.Module):
         # Calculate the log of the number of nonzero genes.
         log_nnz = (x > 0).sum(dim=-1, keepdim=True).float().log1p()
 
-        # Calculate a similarity between expression and ambient.
+        # Calculate a similarity between expression and ambient, for p.
         if chi_ambient is not None:
-            overlap = _poisson_log_prob(
-                lam=(pyro.param("d_empty_loc").exp().detach()
-                     * chi_ambient.detach().unsqueeze(0) + 1e-10),
-                value=x,
-            ).sum(dim=-1, keepdim=True)
+            # overlap = _poisson_log_prob(
+            #     lam=(pyro.param("d_empty_loc").exp().detach()
+            #          * chi_ambient.detach().unsqueeze(0) + 1e-10),
+            #     value=x,
+            # ).sum(dim=-1, keepdim=True)
+            overlap = (-0.5 * (torch.clamp(log_sum - pyro.param("d_empty_loc").detach(), min=0.) / 0.1).pow(2)).exp()
 
-            # Normalize the values
-            overlap_mean = overlap.mean()
-            overlap_std = overlap.std() + 1e-3
-            overlap = (overlap - overlap_mean) / overlap_std
+            # # Normalize the values
+            # overlap_mean = overlap.mean()
+            # overlap_std = overlap.std() + 1e-3
+            # overlap = (overlap - overlap_mean) / overlap_std
         else:
             overlap = torch.zeros_like(counts)
+
+        # Calculate a dot product between expression and ambient, for epsilon.
+        if chi_ambient is not None:
+            x_ambient = pyro.param("d_empty_loc").exp().detach() * chi_ambient.detach().unsqueeze(0)
+            x_ambient_norm = x_ambient / torch.linalg.vector_norm(x_ambient, ord=2, dim=-1, keepdim=True)
+            eps_overlap = (x_ambient_norm * x).sum(dim=-1, keepdim=True)
+        else:
+            eps_overlap = torch.zeros_like(counts)
 
         # Apply transformation to data.
         x = transform_input(x, self.transform)
@@ -345,10 +384,17 @@ class EncodeNonZLatents(nn.Module):
         # Compute the hidden layers and the output.
         x_in = self.dropout50(self.batchnorm0(x))
         # x_in = self.batchnorm0(z.detach())
-        x_extra_features = torch.cat(
+        p_extra_features = torch.cat(
             (log_sum,
              log_nnz,
              overlap,
+             torch.linalg.vector_norm(z.detach(), ord=2, dim=-1, keepdim=True)),
+            dim=-1,
+        )
+        eps_extra_features = torch.cat(
+            (log_sum,
+             log_nnz,
+             eps_overlap,
              torch.linalg.vector_norm(z.detach(), ord=2, dim=-1, keepdim=True)),
             dim=-1,
         )
@@ -367,18 +413,21 @@ class EncodeNonZLatents(nn.Module):
         #
         # out = self.output(hidden).squeeze(-1)
 
-        def add_extra_features(y):
-            return torch.cat((x_extra_features, y), dim=-1)
+        def add_extra_features(y, features):
+            return torch.cat((features, y), dim=-1)
 
-        # Do the forward pass
-        x_ = self.softplus(self.batchnorm1(self.layer1(add_extra_features(x_in))))
-        x_ = self.softplus(self.batchnorm2(self.layer2(add_extra_features(x_))))
-        out = self.layer3(add_extra_features(x_))
+        # Do the forward pass for p
+        x_ = self.softplus(self.batchnorm1(self.layer1(add_extra_features(x_in, p_extra_features))))
+        x_ = self.softplus(self.batchnorm2(self.layer2(add_extra_features(x_, p_extra_features))))
+        p_out = self.layer3(add_extra_features(x_, p_extra_features)).squeeze()
 
-        # Gather outputs
-        p_out = out[:, 0].squeeze()
-        eps_out = out[:, 1].squeeze()
-        d_out = out[:, 2].squeeze()
+        # Do the forward pass for epsilon
+        eps_out = self.eps_network(add_extra_features(x_in, eps_extra_features)).squeeze()
+
+        # # Gather outputs
+        # p_out = out[:, 0].squeeze()
+        # eps_out = out[:, 1].squeeze()
+        # d_out = out[:, 2].squeeze()
 
         if self.offset is None:
 
@@ -387,14 +436,14 @@ class EncodeNonZLatents(nn.Module):
             # Heuristic for initialization of logit_cell_probability.
             cells = (log_sum > self.log_count_crossover).squeeze()
             assert cells.sum() > 4, "Fewer than 4 cells passed to encoder minibatch"
-            cell_prob = cells.sum() / x.shape[0]
+            # cell_prob = cells.sum() / x.shape[0]
             # self.offset['logit_p'] = torch.quantile(p_out, q=1. - cell_prob).item()
             self.offset['logit_p'] = p_out.mean().item()
             self.offset['logit_p_div'] = torch.quantile(p_out, q=0.95).item()
 
-            # Heuristic for initialization of d.
-            self.offset['d'] = d_out[cells].median().item()
-            self.offset['mean_log_sum_cells'] = log_sum[cells].mean().item()
+            # # Heuristic for initialization of d.
+            # self.offset['d'] = d_out[cells].median().item()
+            # self.offset['mean_log_sum_cells'] = log_sum[cells].mean().item()
 
             # Heuristic for initialization of epsilon.
             # self.offset['epsilon'] = out[cells, 2].mean().item()
@@ -418,10 +467,14 @@ class EncodeNonZLatents(nn.Module):
         alpha_empty = (beta * (log_sum - self.empty_log_count_threshold)).sigmoid().squeeze()
         p_y_logit = alpha_empty * p_y_logit + (1. - alpha_empty) * (-1 * consts.REG_LOGIT_MEAN)
 
-        epsilon = self.softplus(
-            (eps_out - self.offset['epsilon']) * self.EPS_OUTPUT_SCALE
-            + self.EPS_OUTPUT_MEAN
-        )
+        # epsilon = self.softplus(
+        #     (eps_out - self.offset['epsilon']) * self.EPS_OUTPUT_SCALE
+        #     + self.EPS_OUTPUT_MEAN
+        # )
+
+        # Constrain epsilon in (0.5, 2.5) with eps_out 0 mapping to epsilon 1
+        # 1.0986122886681098 = log(3)
+        epsilon = 2. * (eps_out * self.EPS_OUTPUT_SCALE - 1.0986122886681098).sigmoid() + 0.5
 
         # d_loc = self.softplus(
         #     (d_out - self.offset['mean_log_sum_cells'])
@@ -437,15 +490,10 @@ class EncodeNonZLatents(nn.Module):
         #     - self.empty_log_count_threshold
         # ) + self.empty_log_count_threshold
 
-        rho_alpha = pyro.param("rho_alpha")
-        rho_beta = pyro.param("rho_beta")
-        rho_mean = torch.clamp(rho_alpha / (rho_alpha + rho_beta), max=0.9)
+        d_empty = pyro.param("d_empty_loc").exp().detach()
 
         d_loc = self.softplus(
-            (self.softplus(counts.squeeze() - pyro.param("d_empty_loc").exp().detach())
-             / (epsilon + 1e-2)
-             / (1. - rho_mean.detach())
-             + 1e-10).log()
+            (self.softplus(counts.squeeze() / (epsilon + 1e-2) - d_empty) + 1e-10).log()
             - self.log_count_crossover
         ) + self.log_count_crossover
         # d_loc = (d_loc + d_loc_est) / 2
@@ -456,6 +504,26 @@ class EncodeNonZLatents(nn.Module):
 
         # TODO: figure out why the list of droplets in the dataloader is different
         # TODO for the two test cases: with and without antibodies in file
+
+
+def constrained_interval_with_offset(output_range: float = 2.,
+                                     low_lim: float = 0.5,
+                                     output_at_zero: float = 1.):
+    """Return a function which transforms unconstrained values to a constrained
+    interval, with the property that zero maps to a specific value.
+
+    Args:
+        output_range: range of the output
+        low_lim: output is always larger than this limit
+        output_at_zero: zero maps to this value
+
+    """
+    offset = np.log(output_range / (output_at_zero - low_lim) - 1.)
+
+    def _fun(x: torch.Tensor) -> torch.Tensor:
+        return output_range * torch.sigmoid(x - offset) + low_lim
+
+    return _fun
 
 
 # TODO: this was new
