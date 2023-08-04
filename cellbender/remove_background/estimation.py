@@ -551,6 +551,8 @@ class MultipleChoiceKnapsack(EstimationMethod):
             Logical array which indexes elements of coo posterior for the chunk
         """
 
+        # TODO this generator is way too slow
+
         # approximate number of entries in a chunk
         # approx_chunk_entries = (noise_log_prob_coo.data.size - 1) // n_chunks
 
@@ -579,29 +581,6 @@ class MultipleChoiceKnapsack(EstimationMethod):
             entry_logic = genes_series.isin(gene_set).values
             if sum(entry_logic) > 0:
                 yield entry_logic
-
-        # # go through all genes
-        # for g in np.unique(genes):
-        #
-        #     # append current gene
-        #     current_chunk_genes.append(g)
-        #     entry_logic = entry_logic | (genes == g)
-        #
-        #     # figure out when to send out a chunk
-        #     if entry_logic.sum() >= approx_chunk_entries:
-        #         logger.debug(f'{timestamp()} New gene chunk being processed by MCKP')
-        #         print(entry_logic)
-        #         yield entry_logic  # _subset_coo(noise_log_prob_coo, entry_logic)
-        #
-        #         # keep track and reset stuff
-        #         entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
-        #         current_chunk_genes = []
-        #
-        # # last bit
-        # if entry_logic.sum() > 0:
-        #     logger.debug(f'{timestamp()} New gene chunk being processed by MCKP')
-        #     print(entry_logic)
-        #     yield entry_logic  # _subset_coo(noise_log_prob_coo, entry_logic)
 
     def _chunk_estimate_noise(self,
                               noise_log_prob_coo: sp.coo_matrix,

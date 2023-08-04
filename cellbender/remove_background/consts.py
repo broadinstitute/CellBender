@@ -1,7 +1,7 @@
 """Constant numbers used in remove-background."""
 
 # Seed for random number generators.
-RANDOM_SEED = 1234  # TODO ensure this gets used
+RANDOM_SEED = 1234
 
 # Factor by which the mode UMI count of the empty droplet plateau is
 # multiplied to come up with a UMI cutoff below which no barcodes are used.

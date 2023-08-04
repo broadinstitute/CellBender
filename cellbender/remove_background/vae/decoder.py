@@ -1,6 +1,4 @@
 import torch
-import torch.nn as nn
-from typing import List
 from cellbender.remove_background.vae.base import FullyConnectedNetwork
 
 
@@ -46,38 +44,3 @@ class Decoder(FullyConnectedNetwork):
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return self.softmax(self.network(z))
-
-    # def __init__(self,
-    #              input_dim: int,
-    #              hidden_dims: List[int],
-    #              output_dim: int,
-    #              log_output: bool = False):
-    #     super(Decoder, self).__init__()
-    #     self.input_dim = input_dim
-    #     self.log_output = log_output
-    #
-    #     # Set up the linear transformations used in fully-connected layers.
-    #     self.linears = nn.ModuleList([nn.Linear(input_dim, hidden_dims[0])])
-    #     for i in range(1, len(hidden_dims)):  # Second hidden layer onward
-    #         self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
-    #     self.outlinear = nn.Linear(hidden_dims[-1], output_dim)
-    #
-    #     # Set up the non-linear activations.
-    #     self.softplus = nn.Softplus()
-    #     if log_output:
-    #         self.softmax = nn.LogSoftmax(dim=-1)
-    #     else:
-    #         self.softmax = nn.Softmax(dim=-1)
-    #
-    # def forward(self, z: torch.Tensor) -> torch.Tensor:
-    #     # Define the forward computation to go from latent z to gene expression.
-    #
-    #     # Compute the hidden layers.
-    #     hidden = self.softplus(self.linears[0](z))
-    #     for i in range(1, len(self.linears)):  # Second hidden layer onward
-    #         hidden = self.softplus(self.linears[i](hidden))
-    #
-    #     # Compute the output, which is on a simplex.
-    #     gene_exp = self.softmax(self.outlinear(hidden))
-    #
-    #     return gene_exp

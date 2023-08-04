@@ -59,6 +59,11 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
 
     """
 
+    # Handle initial random state.
+    pyro.util.set_rng_seed(consts.RANDOM_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(consts.RANDOM_SEED)
+
     # Load dataset, run inference, and write the output to a file.
 
     # Log the start time.
@@ -163,14 +168,7 @@ def save_output_plots(file_dir: str,
 
     try:
         # File naming.
-        gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
         summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
-
-        # # UMI count prior GMM plot.
-        # fig = dataset_obj.gmm.plot_summary()
-        # fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
-        # logger.info(f"Saved UMI count plot as {gmm_fig_name}")
-        # TODO: replace this plot with another?
 
         # Three-panel output summary plot.
         counts = np.array(dataset_obj.get_count_matrix().sum(axis=1)).squeeze()
@@ -246,8 +244,6 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
     # Save denoised count matrix outputs (for each FPR if applicable).
     success = True
     for fpr in args.fpr:
-
-        # TODO: relying on there being one value in the list by default, even if not using FPR
 
         logger.debug(f'Working on FPR {fpr}')
 
@@ -557,17 +553,12 @@ def get_optimizer(n_batches: int,
     optimizer_args = {'lr': learning_rate, 'clip_norm': 10.}
 
     # Set up a learning rate scheduler.
-    # minibatches_per_epoch = int(np.ceil(n_batches / batch_size).item())
-    # minibatches_per_epoch = int(np.ceil(n_batches // batch_size).item()) + 1
-    # total_epochs = epochs if (total_epochs_for_testing_only is None) else total_epochs_for_testing_only
     if total_epochs_for_testing_only is not None:
         total_steps = n_batches * total_epochs_for_testing_only
     else:
         total_steps = n_batches * epochs
     scheduler_args = {'optimizer': optimizer,
                       'max_lr': learning_rate * 10,
-                      # 'steps_per_epoch': minibatches_per_epoch,
-                      # 'epochs': total_epochs,
                       'total_steps': total_steps,
                       'optim_args': optimizer_args}
     scheduler = pyro.optim.OneCycleLR(scheduler_args)
@@ -650,17 +641,15 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                             output_dim=args.z_dim,
                             use_batch_norm=False,
                             use_layer_norm=False,
-                            input_transform='normalize')  # TODO log?
+                            input_transform='normalize')
 
         encoder_other = EncodeNonZLatents(n_genes=count_matrix.shape[1],
                                           z_dim=args.z_dim,
-                                          hidden_dims=consts.ENC_HIDDEN_DIMS,
                                           log_count_crossover=dataset_obj.priors['log_counts_crossover'],
                                           prior_log_cell_counts=np.log1p(dataset_obj.priors['cell_counts']),
                                           empty_log_count_threshold=np.log1p(dataset_obj.empty_UMI_threshold),
-                                          # empty_log_count_upper=np.log1p(dataset_obj.priors['empty_count_upper_limit']),
                                           prior_logit_cell_prob=dataset_obj.priors['cell_logit'],
-                                          input_transform='log_normalize')  # TODO log?
+                                          input_transform='log_normalize')
 
         encoder = CompositeEncoder({'z': encoder_z,
                                     'other': encoder_other})
@@ -761,7 +750,6 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                          final_elbo_fail_fraction=args.final_elbo_fail_fraction)
 
         except ElboException:
-            # TODO: ensure this works: trigger a new run with half the learning rate
 
             logger.warning(traceback.format_exc())
 

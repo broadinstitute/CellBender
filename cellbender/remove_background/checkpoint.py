@@ -90,32 +90,6 @@ def load_random_state(filebase: str):
         torch.cuda.set_rng_state_all(cuda_random_state)
 
 
-# def save_dataloader_state(filebase: str,
-#                           data_loader_state: Dict[str, Union[np.ndarray, int]],
-#                           name: str) -> str:
-#     """Save state of dataloader"""
-#
-#     file = os.path.join(filebase + '_' + name + '.loaderstate')
-#
-#     with open(file, 'wb') as f:
-#         pickle.dump(data_loader_state, f)
-#
-#     return file
-#
-#
-# def load_dataloader_state(data_loader: DataLoader,
-#                           file: str):
-#     """Load saved dataloader state into DataLoader object, prepping it for use"""
-#
-#     if data_loader is None:
-#         return
-#
-#     with open(file, 'rb') as f:
-#         d = pickle.load(f)
-#
-#     data_loader.set_state(ind_list=d['ind_list'], ptr=d['ptr'])
-
-
 def save_checkpoint(filebase: str,
                     model_obj: 'RemoveBackgroundPyroModel',
                     scheduler: pyro.optim.PyroOptim,
