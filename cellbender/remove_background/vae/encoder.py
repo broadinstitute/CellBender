@@ -243,8 +243,8 @@ class EncodeNonZLatents(nn.Module):
         self.prior_logit_cell_prob = prior_logit_cell_prob
 
         # Values related to epsilon
-        self.EPS_OUTPUT_SCALE = 1.  # slows down learning for epsilon
-        self.EPS_OUTPUT_MEAN = 0.6931  # log(e - 1)  # 1.
+        self.EPS_OUTPUT_SCALE = 0.2  # slows down learning for epsilon
+        self.EPS_OUTPUT_MEAN = 0.6931  # log(e - 1)  # softplus(0.6931) = 1.
 
         # Set up the linear transformations used in fully-connected layers.
 
@@ -258,6 +258,7 @@ class EncodeNonZLatents(nn.Module):
 
         # Inject extra features at each level
         self.layer1 = nn.Linear(n_extra_features + self.n_genes, 512)
+        # self.layer1 = nn.Linear(n_extra_features + self.z_dim, 64)
         self.batchnorm1 = nn.BatchNorm1d(num_features=512)
         self.layer2 = nn.Linear(n_extra_features + 512, 512)
         self.batchnorm2 = nn.BatchNorm1d(num_features=512)
@@ -268,7 +269,6 @@ class EncodeNonZLatents(nn.Module):
 
         # Set up the non-linear activations.
         self.softplus = nn.Softplus()
-        self.dropout10 = nn.Dropout1d(p=0.1)
         self.dropout50 = nn.Dropout1d(p=0.5)
 
         # Set up the initial biases.
@@ -277,17 +277,14 @@ class EncodeNonZLatents(nn.Module):
         # Set up the initial scaling for values of x.
         self.x_scaling = None
         self.batchnorm0 = nn.BatchNorm1d(num_features=self.n_genes)
+        # self.batchnorm0 = nn.BatchNorm1d(num_features=self.z_dim)
 
     def _weight_init(self):
         """Initialize neural network weights"""
         return
-
-        # # Initialize p to be a sigmoid function of UMI counts.
-        # for linear in self.linears:
-        #     with torch.no_grad():
-        #         linear.weight[0][0] = 1.
         # with torch.no_grad():
-        #     self.output.weight[0][0] = self.INITIAL_WEIGHT_FOR_LOG_COUNTS
+        #     self.layer3.weight[:, 0] = self.INITIAL_WEIGHT_FOR_LOG_COUNTS
+        #     self.layer3.weight[:, 1:] = self.layer3.weight[:, 1:] / 10.
 
     def forward(self,
                 x: torch.Tensor,
@@ -347,6 +344,7 @@ class EncodeNonZLatents(nn.Module):
         # Form a new input by concatenation.
         # Compute the hidden layers and the output.
         x_in = self.dropout50(self.batchnorm0(x))
+        # x_in = self.batchnorm0(z.detach())
         x_extra_features = torch.cat(
             (log_sum,
              log_nnz,
@@ -373,8 +371,8 @@ class EncodeNonZLatents(nn.Module):
             return torch.cat((x_extra_features, y), dim=-1)
 
         # Do the forward pass
-        x_ = self.softplus(self.batchnorm1(self.dropout10(self.layer1(add_extra_features(x_in)))))
-        x_ = self.softplus(self.batchnorm2(self.dropout10(self.layer2(add_extra_features(x_)))))
+        x_ = self.softplus(self.batchnorm1(self.layer1(add_extra_features(x_in))))
+        x_ = self.softplus(self.batchnorm2(self.layer2(add_extra_features(x_))))
         out = self.layer3(add_extra_features(x_))
 
         # Gather outputs
@@ -420,15 +418,37 @@ class EncodeNonZLatents(nn.Module):
         alpha_empty = (beta * (log_sum - self.empty_log_count_threshold)).sigmoid().squeeze()
         p_y_logit = alpha_empty * p_y_logit + (1. - alpha_empty) * (-1 * consts.REG_LOGIT_MEAN)
 
-        epsilon = self.softplus((eps_out - self.offset['epsilon'])
-                                * self.EPS_OUTPUT_SCALE + self.EPS_OUTPUT_MEAN)
+        epsilon = self.softplus(
+            (eps_out - self.offset['epsilon']) * self.EPS_OUTPUT_SCALE
+            + self.EPS_OUTPUT_MEAN
+        )
+
+        # d_loc = self.softplus(
+        #     (d_out - self.offset['mean_log_sum_cells'])
+        #     # (d_out - self.offset['d']) * self.EPS_OUTPUT_SCALE
+        #     # + log_sum.squeeze()
+        #     # + self.offset['mean_log_sum_cells']
+        # ) + self.offset['mean_log_sum_cells']
+
+        # d_loc = self.softplus(
+        #     d_out
+        #     - self.offset['d']
+        #     + log_sum.squeeze()
+        #     - self.empty_log_count_threshold
+        # ) + self.empty_log_count_threshold
+
+        rho_alpha = pyro.param("rho_alpha")
+        rho_beta = pyro.param("rho_beta")
+        rho_mean = torch.clamp(rho_alpha / (rho_alpha + rho_beta), max=0.9)
 
         d_loc = self.softplus(
-            (d_out - self.offset['d'])
-            + self.offset['mean_log_sum_cells']
-            # + self.softplus(log_sum.squeeze() - self.log_count_crossover)
-            # + self.log_count_crossover
-        )
+            (self.softplus(counts.squeeze() - pyro.param("d_empty_loc").exp().detach())
+             / (epsilon + 1e-2)
+             / (1. - rho_mean.detach())
+             + 1e-10).log()
+            - self.log_count_crossover
+        ) + self.log_count_crossover
+        # d_loc = (d_loc + d_loc_est) / 2
 
         return {'p_y': p_y_logit,
                 'd_loc': d_loc,
