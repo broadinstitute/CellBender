@@ -119,6 +119,20 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         posterior.load(file=ckpt_posterior['posterior_file'])
         _do_posterior_regularization(posterior)
     else:
+
+        # # Temporary debugging ===========
+        # # TODO ==========
+        # from cellbender.remove_background.run import save_output_plots
+        # save_output_plots(
+        #     file_dir='out',
+        #     file_name='tmp',
+        #     dataset_obj=dataset_obj,
+        #     inferred_model=inferred_model,
+        #     p=posterior.latents_map['p'],
+        #     z=posterior.latents_map['z'],
+        # )
+        # # TODO ==========
+
         # Compute posterior.
         logger.info('Posterior not currently included in checkpoint.')
         posterior.cell_noise_count_posterior_coo()
@@ -183,6 +197,9 @@ class Posterior:
         self.vi_model = vi_model
         if vi_model is not None:
             self.vi_model.eval()
+            self.vi_model.encoder['z'].eval()
+            self.vi_model.encoder['other'].eval()
+            self.vi_model.decoder.eval()
         self.use_cuda = (torch.cuda.is_available() if vi_model is None
                          else vi_model.use_cuda)
         self.device = 'cuda' if self.use_cuda else 'cpu'
