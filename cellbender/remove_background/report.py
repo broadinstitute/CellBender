@@ -1526,8 +1526,11 @@ def mixed_species_plots(adata, input_layer_key='raw', output_layer_key='cellbend
 
     for genome in genomes:
         if 'feature_type' in adata.var.keys():
-            var_subset = adata.var[(adata.var["genome"] == genome)
-                                   & (adata.var["feature_type"] == "Gene Expression")]
+            if 'Gene Expression' in adata.var["feature_type"].values:
+                var_subset = adata.var[(adata.var["genome"] == genome)
+                                       & (adata.var["feature_type"] == "Gene Expression")]
+            else:
+                var_subset = adata.var[(adata.var["genome"] == genome)]
         else:
             var_subset = adata.var[(adata.var["genome"] == genome)]
         print(f'Genome "{genome}" has {len(var_subset)} genes: '
