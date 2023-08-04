@@ -19,6 +19,7 @@ from typing import Tuple, List, Optional
 import logging
 import time
 from datetime import datetime
+import sys
 
 
 logger = logging.getLogger('cellbender')
@@ -278,6 +279,7 @@ def run_training(model: RemoveBackgroundPyroModel,
         print(nan.message)
         logger.info(f"Inference procedure terminated early due to a NaN value in: {nan.param}\n\n"
                     f"The suggested fix is to reduce the learning rate by a factor of two.\n\n")
+        sys.exit(1)
 
     logger.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
