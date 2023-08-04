@@ -290,6 +290,19 @@ class RemoveBackgroundPyroModel(nn.Module):
                                   dist.Gamma(concentration=self.epsilon_prior,
                                              rate=self.epsilon_prior)
                                   .expand_by([x.size(0)]))
+            #
+            # # Grab our posterior for the d_cell and epsilon (this is a workaround).
+            # d_posterior = pyro.sample("d_passback",
+            #                                 NullDist(torch.zeros(1).to(self.device))
+            #                                 .expand_by([x.size(0)]))
+            # eps_posterior = pyro.sample("eps_passback",
+            #                                 NullDist(torch.zeros(1).to(self.device))
+            #                                 .expand_by([x.size(0)]))
+            #
+            # # Encourage d_cell * epsilon = d_obs
+            # pyro.sample("d_eps",
+            #             dist.LogNormal(loc=d_posterior * eps_posterior, scale=self.d_cell_scale_prior),
+            #             obs=x.sum(dim=-1))
 
             # If modelling empty droplets:
             if self.include_empties:
@@ -374,7 +387,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 surely_empty_mask = (counts < self.empty_UMI_threshold).bool().to(self.device)
                 surely_cell_mask = (counts >= self.d_cell_loc_prior.exp()).bool().to(self.device)
 
-                with poutine.mask(mask=surely_empty_mask):
+                with poutine.mask(mask=y.detach().bool().logical_not()):  # surely_empty_mask):
 
                     with poutine.scale(scale=consts.REG_SCALE_AMBIENT_EXPRESSION):
 
@@ -384,7 +397,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                             r = None
 
                         # Semi-supervision of ambient expression using all empties.
-                        lam = self._calculate_lambda(epsilon=epsilon.detach(),
+                        lam = self._calculate_lambda(epsilon=torch.tensor(1.).to(d_empty.device),  # epsilon.detach(),
                                                      chi_ambient=chi_ambient,
                                                      d_empty=d_empty,
                                                      y=torch.zeros_like(d_empty),
@@ -560,6 +573,8 @@ class RemoveBackgroundPyroModel(nn.Module):
 
                 # Pass back the inferred p_y to the model.
                 pyro.sample("p_passback", NullDist(enc['p_y'].detach()))
+                # pyro.sample("d_passback", NullDist(enc['d_loc'].detach()))
+                # pyro.sample("eps_passback", NullDist(enc['epsilon'].detach()))
 
                 # Sample the Bernoulli y from encoded p(y).
                 y = pyro.sample("y", dist.Bernoulli(logits=enc['p_y']))
