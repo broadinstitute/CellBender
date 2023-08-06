@@ -186,7 +186,7 @@ task run_cellbender_remove_background_gpu {
         nvidiaDriverVersion: "${nvidia_driver_version}"
         preemptible: hardware_preemptible_tries
         checkpointFile: "ckpt.tar.gz"
-        maxRetries: 1  # in case of a PAPI error code 2 failure to install GPU drivers
+        maxRetries: 0  # can be used in case of a PAPI error code 2 failure to install GPU drivers
     }
     meta {
         author: "Stephen Fleming"

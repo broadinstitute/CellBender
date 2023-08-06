@@ -1,7 +1,7 @@
 """Constant numbers used in remove-background."""
 
 # Seed for random number generators.
-RANDOM_SEED = 1234  # TODO ensure this gets used
+RANDOM_SEED = 1234
 
 # Factor by which the mode UMI count of the empty droplet plateau is
 # multiplied to come up with a UMI cutoff below which no barcodes are used.
@@ -64,9 +64,6 @@ D_CELL_SCALE_INIT = 0.02
 # Scale used to regularize values of logit cell probability (mean zero).
 P_LOGIT_SCALE = 2.
 
-# Hidden layer sizes of non-z latent encoder neural network.
-ENC_HIDDEN_DIMS = [100, 50]
-
 # False to use an approximate log_prob computation which is much faster.
 USE_EXACT_LOG_PROB = False
 
@@ -81,12 +78,10 @@ POISSON_EPS_SAFEGAURD = 1e-10
 
 # Scale factors for loss function regularization terms: semi-supervision.
 REG_SCALE_AMBIENT_EXPRESSION = 0.01
-REG_SCALE_EMPTY_PROB = 10.0
-REG_SCALE_CELL_PROB = 1.0
-REG_SCALE_SOFT_SUPERVISION = 1.0
+REG_SCALE_SOFT_SUPERVISION = 10.0
 
 # Regularize logit probabilities toward this lognormal distribution.
-REG_LOGIT_MEAN = 5.0
+REG_LOGIT_MEAN = 10.0
 REG_LOGIT_SCALE = 0.2
 REG_LOGIT_SOFT_SCALE = 1.0
 

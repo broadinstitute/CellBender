@@ -119,6 +119,7 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         posterior.load(file=ckpt_posterior['posterior_file'])
         _do_posterior_regularization(posterior)
     else:
+
         # Compute posterior.
         logger.info('Posterior not currently included in checkpoint.')
         posterior.cell_noise_count_posterior_coo()
@@ -183,6 +184,9 @@ class Posterior:
         self.vi_model = vi_model
         if vi_model is not None:
             self.vi_model.eval()
+            self.vi_model.encoder['z'].eval()
+            self.vi_model.encoder['other'].eval()
+            self.vi_model.decoder.eval()
         self.use_cuda = (torch.cuda.is_available() if vi_model is None
                          else vi_model.use_cuda)
         self.device = 'cuda' if self.use_cuda else 'cpu'
@@ -814,12 +818,6 @@ class Posterior:
         log_prob_tensor = torch.where((noise_count_tensor <= data.unsqueeze(-1)),
                                       log_prob_tensor,
                                       neg_inf_tensor)
-
-        # Set log_prob to -inf, -inf, -inf, 0 for entries where mu == 0, since they will be NaN
-        # TODO: either this or require that mu > 0...
-        # log_prob_tensor = torch.where(mu_est == 0,
-        #                               data,
-        #                               log_prob_tensor)
 
         logger.debug(f'Prob computation with tensor of shape {log_prob_tensor.shape}')
 
@@ -1541,96 +1539,6 @@ class IndexConverter:
         return np.divmod(m_inds, self.total_n_genes)
 
 
-# @torch.no_grad()
-# def get_noise_budget_per_gene_as_function(
-#         posterior: Posterior,
-#         how: str = 'fpr') -> Callable[[float], np.ndarray]:
-#     """Compute the noise budget on a per-gene basis, returned as a function
-#     that takes a target value and returns counts per gene in one cell.
-#
-#     Args:
-#         posterior: Posterior object
-#         how: For now this can only be 'fpr'
-#
-#     Returns:
-#         expected_noise_count_fcn_per_cell_G: Function that, when called with a
-#             certain nominal FPR value, returns an array of per-gene noise counts
-#             expected in each cell. Not just analyzed genes: all genes.
-#
-#     """
-#
-#     logger.debug('Computing per-gene noise targets')
-
-    # if 'chi_ambient' in pyro.get_param_store().keys():
-    #     chi_ambient_G = pyro.param('chi_ambient').detach()
-    # else:
-    #     chi_ambient_G = 0.
-    #
-    # chi_bar_G = posterior.vi_model.avg_gene_expression
-    #
-    # if how == 'fpr':
-    #
-    #     # Expectation for counts in empty droplets.
-    #     empty_droplet_mean_counts = dist.LogNormal(loc=pyro.param('d_empty_loc'),
-    #                                                scale=pyro.param('d_empty_scale')).mean
-    #     if posterior.vi_model.include_rho:
-    #         swapping_fraction = dist.Beta(pyro.param('rho_alpha'), pyro.param('rho_beta')).mean
-    #     else:
-    #         swapping_fraction = 0.
-    #     empty_droplet_mean_counts_G = empty_droplet_mean_counts * chi_ambient_G
-    #
-    #     data_loader = posterior.dataset_obj.get_dataloader(
-    #         use_cuda=posterior.use_cuda,
-    #         analyzed_bcs_only=True,
-    #         batch_size=512,
-    #         shuffle=False,
-    #     )
-    #
-    #     # Keep a running sum over expected noise counts as we minibatch.
-    #     expected_noise_counts_without_fpr_G = torch.zeros(len(posterior.dataset_obj.analyzed_gene_inds)).to(posterior.device)
-    #     expected_real_counts_G = torch.zeros(len(posterior.dataset_obj.analyzed_gene_inds)).to(posterior.device)
-    #     expected_cells = 0
-    #
-    #     for i, data in enumerate(data_loader):
-    #         enc = posterior.vi_model.encoder(x=data,
-    #                                          chi_ambient=chi_ambient_G,
-    #                                          cell_prior_log=posterior.vi_model.d_cell_loc_prior)
-    #         p_batch = enc['p_y'].sigmoid().detach()
-    #         epsilon_batch = dist.Gamma(enc['epsilon'] * posterior.vi_model.epsilon_prior,
-    #                                    posterior.vi_model.epsilon_prior).mean.detach()
-    #         expected_ambient_counts_in_cells_G = (empty_droplet_mean_counts_G
-    #                                               * epsilon_batch[p_batch > 0.5].sum())
-    #         expected_swapping_counts_in_cells_G = (swapping_fraction * chi_bar_G *
-    #                                                (data * epsilon_batch.unsqueeze(-1))[p_batch > 0.5].sum())
-    #         expected_noise_counts_without_fpr_G = (expected_noise_counts_without_fpr_G
-    #                                                + expected_ambient_counts_in_cells_G
-    #                                                + expected_swapping_counts_in_cells_G)
-    #         expected_real_counts_G = (expected_real_counts_G
-    #                                   + torch.clamp(data[p_batch > 0.5].sum(dim=0)
-    #                                                 - expected_noise_counts_without_fpr_G, min=0.))
-    #         expected_cells = expected_cells + (p_batch > 0.5).sum()
-    #
-    #     def expected_noise_count_fcn_per_cell_G(target_fpr: float) -> np.ndarray:
-    #         """The function which gets returned as the output"""
-    #         target_per_analyzed_gene = ((expected_noise_counts_without_fpr_G
-    #                                      + expected_real_counts_G * target_fpr)  # fpr addition
-    #                                     / expected_cells)
-    #         target_per_analyzed_gene = target_per_analyzed_gene.cpu().numpy()
-    #         target_per_gene = np.zeros(posterior.dataset_obj.data['matrix'].shape[1])
-    #         target_per_gene[posterior.dataset_obj.analyzed_gene_inds] = target_per_analyzed_gene
-    #         return target_per_gene
-    #
-    # elif how == 'cdf':
-    #
-    #     raise NotImplementedError('TODO')
-    #
-    # else:
-    #     raise NotImplementedError(f'No method {how} for get_noise_budget_per_gene_as_function()')
-    #
-    # # TODO: note - floor() ruined the game (per cell) for the optimal calcs
-    # return expected_noise_count_fcn_per_cell_G
-
-
 def compute_mean_target_removal_as_function(noise_count_posterior_coo: sp.coo_matrix,
                                             noise_offsets: Dict[int, int],
                                             index_converter: IndexConverter,
@@ -1691,93 +1599,6 @@ def compute_mean_target_removal_as_function(noise_count_posterior_coo: sp.coo_ma
         return torch.tensor(target / n_cells).to(device)
 
     return _target_fun
-
-
-# @numba.njit(fastmath=True)
-# def binary_search(
-#     evaluate_outcome_given_value: Callable[[float], float],
-#     target_outcome: float,
-#     init_range: List[float],
-#     target_tolerance: Optional[float] = 0.001,
-#     max_iterations: int = consts.POSTERIOR_REG_SEARCH_MAX_ITER,
-# ) -> float:
-#     """Perform a binary search, given a target and an evaluation function.
-#     No python, for jit.
-#
-#     NOTE: evaluate_outcome_given_value(value) should increase monotonically
-#     with the input value. It is assumed that
-#     consts.POSTERIOR_REG_MIN < output_value < consts.POSTERIOR_REG_MAX.
-#     If this is not the case, the algorithm will produce an output close to one
-#     of those endpoints, and target_tolerance will not be achieved.
-#     Moreover, output_value must be positive (due to how we search for limits).
-#
-#     Args:
-#         evaluate_outcome_given_value: Numba jitted function that takes a value
-#             as its input and produces the outcome, which is the target we are
-#             trying to control. Should increase monotonically with value.
-#         target_outcome: Desired outcome value from evaluate_outcome_given_value(value).
-#         init_range: Search range as [low_limit, high_limit]
-#         target_tolerance: Tolerated error in the target value.
-#         max_iterations: A cutoff to ensure termination. Even if a tolerable
-#             solution is not found, the algorithm will stop after this many
-#             iterations and return the best answer so far.
-#
-#     Returns:
-#         value: Result of binary search.
-#
-#     """
-#
-#     # assert (target_tolerance > 0), 'target_tolerance should be > 0.'
-#     # assert len(init_range.shape) > 1, 'init_range must be at least two-dimensional ' \
-#     #                                   '(last dimension contains lower and upper bounds)'
-#     # assert init_range.shape[-1] == 2, 'Last dimension of init_range should be 2: low and high'
-#
-#     value_bracket = init_range
-#
-#     # Binary search algorithm.
-#     for i in range(max_iterations):
-#
-#         # Current test value.
-#         value = np.mean(value_bracket)
-#
-#         # Calculate an expected false positive rate for this lam_mult value.
-#         outcome = evaluate_outcome_given_value(value)
-#         residual = target_outcome - outcome
-#
-#         # Check on residual and update our bracket values.
-#         stop_condition = (residual.abs() < target_tolerance)
-#         if stop_condition:
-#             break
-#         else:
-#             if outcome < target_outcome - target_tolerance:
-#                 value_bracket[0] =
-#             else:
-#
-#             value_bracket[..., 0] = torch.where(outcome < target_outcome - target_tolerance,
-#                                                 value,
-#                                                 value_bracket[..., 0])
-#             value_bracket[..., 1] = torch.where(outcome > target_outcome + target_tolerance,
-#                                                 value,
-#                                                 value_bracket[..., 1])
-#
-#     # If we stopped due to iteration limit, take the average value.
-#     if i == max_iterations:
-#         value = value_bracket.mean(dim=-1)
-#         logger.warning(f'Binary search target not achieved in {max_iterations} attempts. '
-#                        f'Output is estimated to be {outcome.mean().item():.4f}')
-#
-#     # Warn if we railed out at the limits of the search
-#     if debug:
-#         if (value - target_tolerance <= init_range[..., 0]).sum() > 0:
-#             logger.debug(f'{(value - target_tolerance <= init_range[..., 0]).sum()} '
-#                          f'entries in the binary search hit the lower limit')
-#             logger.debug(value[value - target_tolerance <= init_range[..., 0]])
-#         if (value + target_tolerance >= init_range[..., 1]).sum() > 0:
-#             logger.debug(f'{(value + target_tolerance >= init_range[..., 1]).sum()} '
-#                          f'entries in the binary search hit the upper limit')
-#             logger.debug(value[value + target_tolerance >= init_range[..., 1]])
-#
-#     return value
 
 
 @torch.no_grad()

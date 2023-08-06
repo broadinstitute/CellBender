@@ -1,7 +1,7 @@
 """Script to enable memory usage profiling via memory-profiler"""
 
 from cellbender.remove_background.estimation import MultipleChoiceKnapsack
-from cellbender.remove_background.sparse_utils import zero_out_csr_rows
+from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
 from cellbender.remove_background.checkpoint import load_from_checkpoint
 from cellbender.remove_background.posterior import Posterior, \
     compute_mean_target_removal_as_function
@@ -87,7 +87,7 @@ def get_noise_targets(posterior, fpr=0.01):
                                                             > consts.CELL_PROB_CUTOFF]
     non_cell_row_logic = np.array([i not in cell_inds
                                    for i in range(count_matrix.shape[0])])
-    cell_counts = zero_out_csr_rows(csr=count_matrix, row_logic=non_cell_row_logic)
+    cell_counts = csr_set_rows_to_zero(csr=count_matrix, row_logic=non_cell_row_logic)
 
     noise_target_fun_per_cell = compute_mean_target_removal_as_function(
         noise_count_posterior_coo=posterior._noise_count_posterior_coo,

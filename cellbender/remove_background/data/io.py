@@ -290,8 +290,8 @@ def write_posterior_coo_to_h5(
         f.create_carray(group, "log_prob", obj=posterior_coo.data, filters=filters)
         f.create_carray(group, "m_index", obj=posterior_coo.row, filters=filters)
         f.create_carray(group, "noise_count", obj=posterior_coo.col, filters=filters)
-        f.create_carray(group, "shape", atom=tables.Int32Atom(),
-                        obj=np.array(posterior_coo.shape, dtype=np.int32), filters=filters)
+        f.create_carray(group, "shape", atom=tables.Int64Atom(),
+                        obj=np.array(posterior_coo.shape, dtype=np.int64), filters=filters)
 
         # regularized posterior COO
         if regularized_posterior_coo is not None:
@@ -300,8 +300,8 @@ def write_posterior_coo_to_h5(
             f.create_carray(group, "log_prob", obj=regularized_posterior_coo.data, filters=filters)
             f.create_carray(group, "m_index", obj=regularized_posterior_coo.row, filters=filters)
             f.create_carray(group, "noise_count", obj=regularized_posterior_coo.col, filters=filters)
-            f.create_carray(group, "shape", atom=tables.Int32Atom(),
-                            obj=np.array(regularized_posterior_coo.shape, dtype=np.int32), filters=filters)
+            f.create_carray(group, "shape", atom=tables.Int64Atom(),
+                            obj=np.array(regularized_posterior_coo.shape, dtype=np.int64), filters=filters)
 
         # latents
         droplet_latent_group = f.create_group("/", "droplet_latents_map", "Latent variables per droplet")

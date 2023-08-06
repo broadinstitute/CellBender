@@ -16,6 +16,7 @@ import random
 import pickle
 import tempfile
 import shutil
+import traceback
 
 
 logger = logging.getLogger('cellbender')
@@ -89,32 +90,6 @@ def load_random_state(filebase: str):
         torch.cuda.set_rng_state_all(cuda_random_state)
 
 
-# def save_dataloader_state(filebase: str,
-#                           data_loader_state: Dict[str, Union[np.ndarray, int]],
-#                           name: str) -> str:
-#     """Save state of dataloader"""
-#
-#     file = os.path.join(filebase + '_' + name + '.loaderstate')
-#
-#     with open(file, 'wb') as f:
-#         pickle.dump(data_loader_state, f)
-#
-#     return file
-#
-#
-# def load_dataloader_state(data_loader: DataLoader,
-#                           file: str):
-#     """Load saved dataloader state into DataLoader object, prepping it for use"""
-#
-#     if data_loader is None:
-#         return
-#
-#     with open(file, 'rb') as f:
-#         d = pickle.load(f)
-#
-#     data_loader.set_state(ind_list=d['ind_list'], ptr=d['ptr'])
-
-
 def save_checkpoint(filebase: str,
                     model_obj: 'RemoveBackgroundPyroModel',
                     scheduler: pyro.optim.PyroOptim,
@@ -173,6 +148,7 @@ def save_checkpoint(filebase: str,
 
     except Exception:
         logger.warning('Could not save checkpoint')
+        logger.warning(traceback.format_exc())
         return False
 
 
@@ -317,7 +293,7 @@ def make_tarball(files: List[str], tarball_name: str) -> bool:
     NOTE2: .tmp file is used so that incomplete checkpoint files do not exist
         even temporarily
     """
-    with tarfile.open(tarball_name + '.tmp', 'w:gz') as tar:
+    with tarfile.open(tarball_name + '.tmp', 'w:gz', compresslevel=1) as tar:
         for file in files:
             # without arcname, unpacking results in unpredictable file locations!
             tar.add(file, arcname=os.path.basename(file))

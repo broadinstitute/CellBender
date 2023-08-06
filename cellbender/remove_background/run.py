@@ -8,7 +8,8 @@ from cellbender.remove_background.vae.encoder \
     import EncodeZ, CompositeEncoder, EncodeNonZLatents
 from cellbender.remove_background.data.dataprep import \
     prep_sparse_data_for_training as prep_data_for_training
-from cellbender.remove_background.checkpoint import attempt_load_checkpoint
+from cellbender.remove_background.checkpoint import attempt_load_checkpoint, \
+    save_checkpoint
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.train import run_training
@@ -19,7 +20,7 @@ from cellbender.remove_background.estimation import MultipleChoiceKnapsack, \
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
-from cellbender.remove_background.report import run_notebook_make_html
+from cellbender.remove_background.report import run_notebook_make_html, plot_summary
 
 import pyro
 from pyro.infer import SVI, JitTraceEnum_ELBO, JitTrace_ELBO, \
@@ -57,6 +58,11 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
         command line.
 
     """
+
+    # Handle initial random state.
+    pyro.util.set_rng_seed(consts.RANDOM_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(consts.RANDOM_SEED)
 
     # Load dataset, run inference, and write the output to a file.
 
@@ -162,14 +168,7 @@ def save_output_plots(file_dir: str,
 
     try:
         # File naming.
-        gmm_fig_name = os.path.join(file_dir, file_name + "_umi_counts.pdf")
         summary_fig_name = os.path.join(file_dir, file_name + ".pdf")
-
-        # # UMI count prior GMM plot.
-        # fig = dataset_obj.gmm.plot_summary()
-        # fig.savefig(gmm_fig_name, bbox_inches='tight', format='pdf')
-        # logger.info(f"Saved UMI count plot as {gmm_fig_name}")
-        # TODO: replace this plot with another?
 
         # Three-panel output summary plot.
         counts = np.array(dataset_obj.get_count_matrix().sum(axis=1)).squeeze()
@@ -182,68 +181,6 @@ def save_output_plots(file_dir: str,
         logger.warning("Unable to save all plots.")
         logger.warning(traceback.format_exc())
         return False
-
-
-def plot_summary(loss: Dict[str, Dict[str, np.ndarray]],
-                 umi_counts: np.ndarray,
-                 p: np.ndarray,
-                 z: np.ndarray):
-    """Output summary plot with three panels: training, cells, latent z."""
-
-    fig = plt.figure(figsize=(6, 18))
-
-    # Plot the train error.
-    plt.subplot(3, 1, 1)
-    plt.plot(loss['train']['elbo'], '.--', label='Train')
-
-    # Plot the test error, if there was held-out test data.
-    if 'test' in loss.keys():
-        if len(loss['test']['epoch']) > 0:
-            plt.plot(loss['test']['epoch'],
-                     loss['test']['elbo'], 'o:', label='Test')
-            plt.legend()
-
-    ylim_low = max(loss['train']['elbo'][0], loss['train']['elbo'][-1] - 2000)
-    ylim_high = max(max(loss['train']['elbo']), max(loss['test']['elbo']))
-    ylim_high = ylim_high + (ylim_high - ylim_low) / 20
-    plt.gca().set_ylim([ylim_low, ylim_high])
-    plt.xlabel('Epoch')
-    plt.ylabel('ELBO')
-    plt.title('Progress of the training procedure')
-
-    # Plot the barcodes used, along with the inferred
-    # cell probabilities.
-    plt.subplot(3, 1, 2)
-    count_order = np.argsort(umi_counts)[::-1]
-    plt.semilogy(umi_counts[count_order], color='black')
-    plt.ylabel('UMI counts')
-    plt.xlabel('Barcode index, sorted by UMI count')
-    if p is not None:  # The case of a simple model.
-        plt.gca().twinx()
-        plt.plot(p[count_order], '.:', color='red', alpha=0.3, rasterized=True)
-        plt.ylabel('Cell probability', color='red')
-        plt.ylim([-0.05, 1.05])
-        plt.title('Determination of which barcodes contain cells')
-    else:
-        plt.title('The subset of barcodes used for training')
-
-    plt.subplot(3, 1, 3)
-    if p is None:
-        p = np.ones(z.shape[0])
-
-    # Do PCA on the latent encoding z.
-    A = torch.tensor(z[p >= consts.CELL_PROB_CUTOFF])
-    U, S, V = torch.pca_lowrank(A)
-    z_pca = torch.matmul(A, V[:, :2])
-
-    # Plot the latent encoding via PCA.
-    plt.plot(z_pca[:, 0], z_pca[:, 1],
-             '.', ms=3, color='black', alpha=0.3, rasterized=True)
-    plt.ylabel('PC 1')
-    plt.xlabel('PC 0')
-    plt.title('PCA of latent encoding of gene expression in cells')
-
-    return fig
 
 
 def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
@@ -307,8 +244,6 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
     # Save denoised count matrix outputs (for each FPR if applicable).
     success = True
     for fpr in args.fpr:
-
-        # TODO: relying on there being one value in the list by default, even if not using FPR
 
         logger.debug(f'Working on FPR {fpr}')
 
@@ -547,7 +482,10 @@ def collect_output_metrics(dataset_obj: SingleCellRNACountsDataset,
                                  / np.std(loss['train']['elbo'][-20:]))
     else:
         convergence_indicator = 'not enough training epochs to compute (requires more than 20)'
-    overall_change_in_train_elbo = loss['train']['elbo'][-1] - loss['train']['elbo'][0]
+    if len(loss['train']['elbo']) > 0:
+        overall_change_in_train_elbo = loss['train']['elbo'][-1] - loss['train']['elbo'][0]
+    else:
+        overall_change_in_train_elbo = 0  # zero epoch initialization
 
     all_metrics_dict = \
         {'total_raw_counts': total_raw_counts,
@@ -615,17 +553,12 @@ def get_optimizer(n_batches: int,
     optimizer_args = {'lr': learning_rate, 'clip_norm': 10.}
 
     # Set up a learning rate scheduler.
-    # minibatches_per_epoch = int(np.ceil(n_batches / batch_size).item())
-    # minibatches_per_epoch = int(np.ceil(n_batches // batch_size).item()) + 1
-    # total_epochs = epochs if (total_epochs_for_testing_only is None) else total_epochs_for_testing_only
     if total_epochs_for_testing_only is not None:
         total_steps = n_batches * total_epochs_for_testing_only
     else:
         total_steps = n_batches * epochs
     scheduler_args = {'optimizer': optimizer,
                       'max_lr': learning_rate * 10,
-                      # 'steps_per_epoch': minibatches_per_epoch,
-                      # 'epochs': total_epochs,
                       'total_steps': total_steps,
                       'optim_args': optimizer_args}
     scheduler = pyro.optim.OneCycleLR(scheduler_args)
@@ -708,14 +641,15 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                             output_dim=args.z_dim,
                             use_batch_norm=False,
                             use_layer_norm=False,
-                            input_transform='normalize')  # TODO log?
+                            input_transform='normalize')
 
         encoder_other = EncodeNonZLatents(n_genes=count_matrix.shape[1],
                                           z_dim=args.z_dim,
-                                          hidden_dims=consts.ENC_HIDDEN_DIMS,
                                           log_count_crossover=dataset_obj.priors['log_counts_crossover'],
                                           prior_log_cell_counts=np.log1p(dataset_obj.priors['cell_counts']),
-                                          input_transform='normalize')  # TODO log?
+                                          empty_log_count_threshold=np.log1p(dataset_obj.empty_UMI_threshold),
+                                          prior_logit_cell_prob=dataset_obj.priors['cell_logit'],
+                                          input_transform='log_normalize')
 
         encoder = CompositeEncoder({'z': encoder_z,
                                     'other': encoder_other})
@@ -789,6 +723,16 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         logger.info("Zero epochs specified... will only initialize the model.")
         model.guide(train_loader.__next__())
         train_loader.reset_ptr()
+
+        # Even though it's not much of a checkpoint, we still need one for subsequent steps.
+        save_checkpoint(filebase=checkpoint_filename,
+                        tarball_name=output_checkpoint_tarball,
+                        args=args,
+                        model_obj=model,
+                        scheduler=svi.optim,
+                        train_loader=train_loader,
+                        test_loader=test_loader)
+
     else:
         logger.info("Running inference...")
         try:
@@ -806,7 +750,6 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                          final_elbo_fail_fraction=args.final_elbo_fail_fraction)
 
         except ElboException:
-            # TODO: ensure this works: trigger a new run with half the learning rate
 
             logger.warning(traceback.format_exc())
 

@@ -382,7 +382,7 @@ class SingleCellRNACountsDataset:
             self.max_UMI_count = umi_counts.max()
 
             # Estimate cell logit probability prior.
-            cell_prob = n_cells / total_droplet_barcodes
+            cell_prob = (n_cells / total_droplet_barcodes) * (1. - self.fraction_empties)
             self.priors['cell_logit'] = np.log(cell_prob) - np.log(1. - cell_prob)
 
             logger.info(f"Using {n_cells} probable cell "
@@ -421,22 +421,14 @@ class SingleCellRNACountsDataset:
     def get_count_matrix(self) -> sp.csr_matrix:
         """Get the count matrix, trimmed if trimming has occurred."""
 
-        # if self.is_trimmed:
-
         # Return the count matrix for selected barcodes and genes.
         trimmed_bc_matrix = self.data['matrix'][self.analyzed_barcode_inds,
                                                 :].tocsc()
         trimmed_matrix = trimmed_bc_matrix[:, self.analyzed_gene_inds].tocsr()
         return trimmed_matrix
 
-        # else:
-        #     logger.warning("Using full count matrix, without any trimming.  Could be slow.")
-        #     return self.data['matrix']
-
     def get_count_matrix_empties(self) -> sp.csr_matrix:
         """Get the count matrix for empty drops, trimmed if possible."""
-
-        # if self.is_trimmed_features:
 
         # Return the count matrix for selected barcodes and genes.
         trimmed_bc_matrix = self.data['matrix'][self.empty_barcode_inds,
@@ -444,23 +436,13 @@ class SingleCellRNACountsDataset:
         trimmed_matrix = trimmed_bc_matrix[:, self.analyzed_gene_inds].tocsr()
         return trimmed_matrix
 
-        # else:
-        #     logger.error("Trying to get empty count matrix without trimmed data.")
-        #     return self.data['matrix']
-
     def get_count_matrix_all_barcodes(self) -> sp.csr_matrix:
         """Get the count matrix, trimming only genes, not barcodes."""
-
-        # if self.is_trimmed_features:
 
         # Return the count matrix for selected barcodes and genes.
         trimmed_bc_matrix = self.data['matrix'].tocsc()
         trimmed_matrix = trimmed_bc_matrix[:, self.analyzed_gene_inds].tocsr()
         return trimmed_matrix
-
-        # else:
-        #     logger.warning("Using full count matrix, without any trimming.  Could be slow.")
-        #     return self.data['matrix']
 
     def get_dataloader(self,
                        use_cuda: bool = True,
@@ -555,125 +537,3 @@ def get_dataset_obj(args: argparse.Namespace) -> SingleCellRNACountsDataset:
         ambient_counts_in_cells_low_limit=args.ambient_counts_in_cells_low_limit,
         fpr=args.fpr,
     )
-
-
-# def estimate_cell_count_from_dataset(dataset: SingleCellRNACountsDataset) -> int:
-#     """Compute an estimate of number of real cells in a dataset.
-#
-#     Given a Dataset, compute an estimate of the number of real cells.
-#
-#     Args:
-#         dataset: Dataset object containing a matrix of unique UMI counts,
-#             where rows are barcodes and columns are genes.
-#
-#     Returns:
-#         cell_count_est: Estimated number of real cells.
-#
-#     """
-#
-#     # If it's a model that does not model empty droplets, the dataset is cells.
-#     # NOTE: this is overridden if --expected_cells is specified.
-#     if not dataset.include_empties:
-#         return dataset.data['matrix'].shape[0]
-#
-#     # Count the number of barcodes with UMI counts above the cutoff.
-#     cell_count_est = int(np.sum(estimate_cell_logic_from_dataset(dataset=dataset)).item())
-#
-#     return cell_count_est
-#
-#
-# def estimate_cell_logic_from_dataset(dataset: SingleCellRNACountsDataset) -> int:
-#     """Compute an estimate of number of real cells in a dataset.
-#
-#     Given a Dataset, compute an estimate of the number of real cells.
-#
-#     Args:
-#         dataset: Dataset object containing a matrix of unique UMI counts,
-#             where rows are barcodes and columns are genes.
-#
-#     Returns:
-#         cell_logic: Array where True indicates a probable cell.
-#
-#     """
-#
-#     # Count number of UMIs in each barcode.
-#     counts = np.array(dataset.data['matrix'].sum(axis=1),
-#                       dtype=int).squeeze()
-#
-#     # Find mid-way between cell_counts and empty_counts in log space.
-#     midway = np.mean([np.log1p(dataset.priors['cell_counts']),
-#                       np.log1p(dataset.priors['empty_counts'])])
-#     umi_cutoff = np.expm1(midway)
-#
-#     return counts > umi_cutoff
-#
-#
-# def estimate_chi_ambient_from_dataset(dataset: SingleCellRNACountsDataset) \
-#         -> Tuple[torch.Tensor, torch.Tensor]:
-#     """Compute an estimate of ambient RNA levels.
-#
-#     Given a Dataset, compute an estimate of the ambient gene expression and
-#     compute the average gene expression.
-#
-#     Args:
-#         dataset: Dataset object containing a matrix of unique UMI counts,
-#             where rows are barcodes and columns are genes.
-#
-#     Returns:
-#         chi_ambient_init: Estimated number of real cells.
-#         chi_bar: Average gene expression over dataset.
-#
-#     NOTE: This must be done on transformed data.
-#
-#     """
-#
-#     # Ensure that an estimate of the log count crossover point between cells
-#     # and empty droplets has already been calculated.
-#     try:
-#         log_crossover = dataset.priors['log_counts_crossover']
-#     except KeyError:
-#         raise AssertionError("Could not find dataset parameter "
-#                              "log_counts_crossover.")
-#
-#     ep = np.finfo(np.float32).eps.item()  # Small value
-#
-#     # Trimmed and appropriately transformed count matrix.
-#     count_matrix = dataset.get_count_matrix()
-#
-#     # Empty droplets have log counts < log_crossover.
-#     empty_barcodes = (np.log1p(np.array(count_matrix.sum(axis=1)).squeeze())
-#                       < log_crossover)
-#
-#     # Sum gene expression for the empty droplets.
-#     gene_expression = np.array(count_matrix[empty_barcodes, :].sum(axis=0)).squeeze()
-#
-#     # As a vector on a simplex.
-#     gene_expression = gene_expression + ep
-#     chi_ambient_init = torch.tensor(gene_expression / np.sum(gene_expression))
-#
-#     # Full count matrix, appropriately transformed.
-#     full_count_matrix = dataset.get_count_matrix_all_barcodes()
-#
-#     # Sum all gene expression.
-#     gene_expression_total = np.array(full_count_matrix.sum(axis=0)).squeeze()
-#
-#     # As a vector on a simplex.
-#     gene_expression_total = gene_expression_total + ep
-#     chi_bar = torch.tensor(gene_expression_total / np.sum(gene_expression_total))
-#
-#     return chi_ambient_init, chi_bar
-
-
-def pca_2d(mat: np.ndarray) -> torch.Tensor:
-    """Perform PCA using pytorch and return top 2 PCs
-
-    Args:
-        mat: matrix where rows are observations and columns are features
-
-    Returns:
-        out: matrix where rows are observations and columns are top 2 PCs
-    """
-
-    A = torch.tensor(mat)
-    U, S, V = torch.pca_lowrank(A)
-    return torch.matmul(A, V[:, :2])

@@ -296,14 +296,6 @@ def get_expected_cells_and_total_droplets(umi_counts: np.ndarray,
     total_droplets = (umi_counts >= total_droplets_count_value).sum()
 
     # find the transition point
-
-    # transition_umi_counts = umi_counts[(umi_counts <= cell_counts)
-    #                                    & (umi_counts >= empty_count_upper_limit)]
-    # smoothing_radius = max(1, len(transition_umi_counts) // 20)
-    # diff = np.diff(np.sort(transition_umi_counts)[::-1][::smoothing_radius], n=1)
-    # transition_point = ((umi_counts > cell_counts).sum()
-    #                     + np.argmin(diff) * smoothing_radius)
-
     count_crossover = np.sqrt(cell_counts * empty_counts)
     transition_point = (umi_counts >= count_crossover).sum()
 

@@ -19,6 +19,7 @@ from typing import Tuple, List, Optional
 import logging
 import time
 from datetime import datetime
+import sys
 
 
 logger = logging.getLogger('cellbender')
@@ -217,18 +218,18 @@ def run_training(model: RemoveBackgroundPyroModel,
                     logger.info("[epoch %03d] average test loss: %.4f"
                                 % (epoch, total_epoch_loss_test))
 
-            # Check whether ELBO has spiked beyond specified conditions.
-            if epoch_elbo_fail_fraction is not None:
-                current_diff = max(0, test_elbo[-2] - test_elbo[-1])
-                overall_diff = test_elbo[-2] - test_elbo[0]
-                fractional_spike = current_diff / overall_diff
-                if fractional_spike > epoch_elbo_fail_fraction:
-                    raise ElboException(
-                        f'Training failed because test loss moved {current_diff:.2f} '
-                        f'in the wrong direction, and that is {fractional_spike:.2f} '
-                        f'of the total test ELBO change, > '
-                        f'specified epoch_elbo_fail_fraction {epoch_elbo_fail_fraction:.2f}%'
-                    )
+                    # Check whether test ELBO has spiked beyond specified conditions.
+                    if (epoch_elbo_fail_fraction is not None) and (len(test_elbo) > 2):
+                        current_diff = max(0., test_elbo[-2] - test_elbo[-1])
+                        overall_diff = np.abs(test_elbo[-2] - test_elbo[0])
+                        fractional_spike = current_diff / overall_diff
+                        if fractional_spike > epoch_elbo_fail_fraction:
+                            raise ElboException(
+                                f'Training failed because test loss moved {current_diff:.2f} '
+                                f'in the wrong direction, and that is {fractional_spike:.2f} '
+                                f'of the total test ELBO change, > '
+                                f'specified epoch_elbo_fail_fraction {epoch_elbo_fail_fraction:.2f}'
+                            )
 
             # Checkpoint throughout and after final epoch.
             if ((ckpt_tarball_name != 'none')
@@ -278,6 +279,7 @@ def run_training(model: RemoveBackgroundPyroModel,
         print(nan.message)
         logger.info(f"Inference procedure terminated early due to a NaN value in: {nan.param}\n\n"
                     f"The suggested fix is to reduce the learning rate by a factor of two.\n\n")
+        sys.exit(1)
 
     logger.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 

@@ -144,6 +144,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                      'test': {'epoch': [], 'elbo': []},
                      'learning_rate': {'epoch': [], 'value': []}}
         self.empty_UMI_threshold = empty_UMI_threshold
+        self.log_counts_crossover = log_counts_crossover
         self.counts_crossover = np.exp(log_counts_crossover)
 
         # Determine whether we are working on a GPU.
@@ -300,9 +301,13 @@ class RemoveBackgroundPyroModel(nn.Module):
                                       .expand_by([x.size(0)]))
 
                 # Sample y, the presence of a real cell, based on p_logit_prior.
-                y = pyro.sample("y",
-                                dist.Bernoulli(logits=self.p_logit_prior - 100.)  # TODO
-                                .expand_by([x.size(0)]))
+                p_logit_prior = get_p_logit_prior(
+                    log_counts=x.sum(dim=-1).log(),
+                    log_cell_prior_counts=self.d_cell_loc_prior,
+                    surely_empty_counts=self.empty_UMI_threshold,
+                    naive_p_logit_prior=self.p_logit_prior,
+                )
+                y = pyro.sample("y", dist.Bernoulli(logits=p_logit_prior))
 
             else:
                 d_empty = None
@@ -363,10 +368,9 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # Additionally use the surely empty droplets for regularization,
                 # since we know these droplets by their UMI counts.
                 counts = x.sum(dim=-1, keepdim=False)
-                surely_empty_mask = (counts < self.empty_UMI_threshold).bool().to(self.device)
                 surely_cell_mask = (counts >= self.d_cell_loc_prior.exp()).bool().to(self.device)
 
-                with poutine.mask(mask=surely_empty_mask):
+                with poutine.mask(mask=y.detach().bool().logical_not()):  # surely_empty_mask):
 
                     with poutine.scale(scale=consts.REG_SCALE_AMBIENT_EXPRESSION):
 
@@ -376,7 +380,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                             r = None
 
                         # Semi-supervision of ambient expression using all empties.
-                        lam = self._calculate_lambda(epsilon=epsilon.detach(),
+                        lam = self._calculate_lambda(epsilon=torch.tensor(1.).to(d_empty.device),  # epsilon.detach(),
                                                      chi_ambient=chi_ambient,
                                                      d_empty=d_empty,
                                                      y=torch.zeros_like(d_empty),
@@ -391,23 +395,6 @@ class RemoveBackgroundPyroModel(nn.Module):
                 p_logit_posterior = pyro.sample("p_passback",
                                                 NullDist(torch.zeros(1).to(self.device))
                                                 .expand_by([x.size(0)]))
-
-                empty_constraint = soft_constraint_function(loc=-2, scale=2, lower_bound=False)
-                cell_constraint = soft_constraint_function(loc=2, scale=2, lower_bound=True)
-
-                # For empties where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=surely_empty_mask):
-
-                    # Supervision of empty probabilities.
-                    pyro.factor("obs_surely_empty_y",
-                                log_factor=empty_constraint(p_logit_posterior))
-
-                # For cells where our inference is currently wrong, impose a big penalty.
-                with poutine.mask(mask=surely_cell_mask):
-
-                    # Supervision of cell probabilities.
-                    pyro.factor("obs_surely_cell_y",
-                                log_factor=cell_constraint(p_logit_posterior))
 
                 # Softer semi-supervision to encourage cell probabilities to do the right thing.
                 probably_empty_mask = (counts < self.counts_crossover).bool().to(self.device)
@@ -429,11 +416,17 @@ class RemoveBackgroundPyroModel(nn.Module):
 
         # Regularization of epsilon.mean()
         if surely_cell_mask.sum() >= 2:
-            epsilon_mean = epsilon[surely_cell_mask].mean()
-            with poutine.scale(scale=surely_cell_mask.sum() / 10.):
-                pyro.sample("epsilon_mean",
-                            dist.Normal(loc=epsilon_mean, scale=0.01),
-                            obs=torch.ones_like(epsilon_mean))
+            epsilon_median = epsilon[probably_cell_mask].median()
+            # with poutine.scale(scale=probably_cell_mask.sum() / 10.):
+            pyro.sample("epsilon_mean",
+                        dist.Normal(loc=epsilon_median, scale=0.01),
+                        obs=torch.ones_like(epsilon_median))
+
+        epsilon_median_empty = epsilon[probably_empty_mask].median()
+        # with poutine.scale(scale=probably_cell_mask.sum() / 10.):
+        pyro.sample("epsilon_empty_mean",
+                    dist.Normal(loc=epsilon_median_empty, scale=0.01),
+                    obs=torch.ones_like(epsilon_median_empty))
 
         return {'chi_ambient': chi_ambient, 'z': z,
                 'mu': mu_cell, 'lam': lam, 'alpha': alpha, 'counts': c}
@@ -549,27 +542,27 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # Sample the Bernoulli y from encoded p(y).
                 y = pyro.sample("y", dist.Bernoulli(logits=enc['p_y']))
 
-                # Gate d_cell_loc so empty droplets do not give big gradients.
-                prob = enc['p_y'].sigmoid()  # Logits to probability
-                d_cell_loc_gated = (prob * enc['d_loc'] + (1 - prob)
-                                    * self.d_cell_loc_prior)  # NOTE: necessary to pass on sim6
-
-                # Sample d based on the encoding.
-                d_cell = pyro.sample("d_cell", dist.LogNormal(loc=d_cell_loc_gated,
-                                                              scale=d_cell_scale))
+                # Get cell probabilities for gating.
+                prob = enc['p_y'].sigmoid().detach()  # Logits to probability
 
                 # Mask out empty droplets.
-                with poutine.mask(mask=y.bool()):
+                with poutine.mask(mask=y.bool().detach()):
 
                     # Sample latent code z for the barcodes containing cells.
                     z = pyro.sample("z", dist.Normal(loc=enc['z']['loc'], scale=enc['z']['scale'])
                                     .to_event(1))
 
-                    # Gate epsilon and sample.
-                    epsilon_gated = (prob * enc['epsilon'] + (1 - prob) * 1.)
+                # Gate d based and sample.
+                d_cell_loc_gated = (prob * enc['d_loc'] + (1 - prob)
+                                    * self.d_cell_loc_prior)  # NOTE: necessary to pass on sim6
+                d_cell = pyro.sample("d_cell", dist.LogNormal(loc=d_cell_loc_gated,
+                                                              scale=d_cell_scale))
 
-                    epsilon = pyro.sample("epsilon", dist.Gamma(epsilon_gated * self.epsilon_prior,
-                                                                self.epsilon_prior))
+                # Gate epsilon and sample.
+                epsilon_gated = (prob * enc['epsilon'] + (1 - prob) * 1.)
+                epsilon = pyro.sample("epsilon",
+                                      dist.Gamma(concentration=epsilon_gated * self.epsilon_prior,
+                                                 rate=self.epsilon_prior))
 
             else:
 
@@ -581,33 +574,20 @@ class RemoveBackgroundPyroModel(nn.Module):
                             .to_event(1))
 
 
-def soft_constraint_function(loc: float, scale: float, lower_bound: bool, invert: bool = True) \
-        -> Callable[[torch.Tensor], torch.Tensor]:
-    """Return a function which implements an exponential soft constraint:
-    exp((1 - 2 * lower_bound) * (x - loc) * scale)
-
-    NOTE: if lower_bound, then if x > loc, this function returns 0, and if
-    lower_bound = False, then if x < loc, this function returns 0
-
-    Args:
-        loc: value where constraint turns on
-        scale: how fast the constraint blows up. 1 is exponential blow up.
-        lower_bound: True to turn on constraint when x < loc, False to turn on
-            constraint when x > loc
-        invert: True to emit negative values as penalties
-
-    Returns:
-        Function that maps a value to a log prob factor that represents a
-        soft constraint
-    """
-    sign = 1 - 2 * lower_bound
-    inversion_sign = -1 if invert else 1
-
-    def _fun(x: torch.Tensor) -> torch.Tensor:
-        return inversion_sign * (sign * (x - loc) * scale).exp()
-        # return inversion_sign * torch.clamp((sign * (x - loc) * scale).exp() - 1., min=0.)
-
-    return _fun
+def get_p_logit_prior(log_counts: torch.Tensor,
+                      log_cell_prior_counts: float,
+                      surely_empty_counts: torch.Tensor,
+                      naive_p_logit_prior: float) -> torch.Tensor:
+    """Compute the logit cell probability prior per droplet based on counts"""
+    ones = torch.ones_like(log_counts)
+    p_logit_prior = ones * naive_p_logit_prior
+    p_logit_prior = torch.where(log_counts <= (surely_empty_counts.log() + log_cell_prior_counts) / 2,
+                                ones * -100.,
+                                p_logit_prior)
+    p_logit_prior = torch.where(log_counts >= log_cell_prior_counts,
+                                ones * consts.REG_LOGIT_MEAN,
+                                p_logit_prior)
+    return p_logit_prior
 
 
 def get_rho() -> Optional[np.ndarray]:

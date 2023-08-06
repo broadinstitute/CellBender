@@ -27,6 +27,9 @@ and it can be used to run ``cellbender remove-background`` from
 `Cromwell <https://cromwell.readthedocs.io/en/stable/>`_ instance.  The WDL is designed to
 make use of an Nvidia Tesla T4 GPU on Google Cloud architecture.
 
+As of v0.3.0, the WDL uses preemptible instances that are a fraction of the cost,
+and uses automatic restarting from checkpoints so that work is not lost.
+
 In addition to the above command line options, the workflow has its own set of
 input options, which are described in detail
 `here <https://github.com/broadinstitute/CellBender/tree/master/wdl>`_.
@@ -167,3 +170,19 @@ Example:
 
 .. automodule:: cellbender.remove_background.downstream
    :members:
+
+The posterior
+~~~~~~~~~~~~~
+
+There is an additional output file called ``posterior.h5`` which contains the
+full posterior. The structure of this data is a sparse matrix whose shape is
+[count matrix entries, number of potential noise counts]. Typically the number
+of potential noise counts in any entry of the count matrix is truncated at 50.
+The values are log probabilities of the specified number of noise counts in the
+given count matrix entry.
+
+The information contained in the posterior can be used to
+quantitatively answer questions such as "What is the probability that the
+number of viral gene counts in this cell is nonzero?" For help with these kinds
+of computations, please open a
+`github issue <https://github.com/broadinstitute/CellBender/issues>`_.

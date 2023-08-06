@@ -133,7 +133,10 @@ Answers / Troubleshooting Tips
     which runs on a GPU on Google Cloud at the click of a button.
   * Others have successfully run on Google Colab notebooks for free.  Since CellBender
     produces checkpoint files during training (``ckpt.tar.gz``), you can even pick up
-    where you left off if you get preempted.
+    where you left off if you get preempted. You just need to put the ``ckpt.tar.gz``
+    file in the directory where the CellBender command is being invoked (or
+    specify the file using the argument ``--checkpoint``), and CellBender will
+    automatically pick up where it left off when the same command is re-run.
   * If you really want to use a CPU only, then consider things that will speed up the
     run, like using fewer ``--total-droplets-included``, and increasing the threshold
     ``--projected-ambient-count-threshold`` so that fewer features are analyzed,
@@ -166,6 +169,15 @@ Answers / Troubleshooting Tips
     and `in our paper <https://www.biorxiv.org/content/10.1101/791699v2>`_.
     The results for ``Antibody Capture`` data look even better than
     for gene expression, due to the higher ambient background for that modality.
+  * ATAC data is a bit more tricky. CellBender will run, though it takes a long
+    time with 200k+ Peak features. You can use the argument
+    ``--projected-ambient-count-threshold 2`` to tell CellBender to ignore all
+    features which are not estimated to have at least two noise counts in cells.
+    This can greatly speed things up. Feel free to experiment with that value.
+    Anecdotally it seems that ATAC data is less noisy than gene expression data
+    to begin with, so some users opt to have CellBender ignore the ATAC features
+    using the input argument ``--exclude-feature-types Peaks``. There is nothing
+    wrong with doing this.
 
 .. _a8:
 

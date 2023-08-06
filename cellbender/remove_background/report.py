@@ -10,14 +10,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import scipy.sparse as sp
+import scipy.stats
 from IPython.display import display, Markdown, HTML
 
 import subprocess
 import datetime
 import os
+import logging
 from typing import Dict, Optional
 
 
+logger = logging.getLogger('cellbender')
 warnings = []
 TIMEOUT = 1200  # twenty minutes should always be way more than enough
 
@@ -115,6 +118,9 @@ def generate_summary_plots(input_file: str,
                                                    truth_file=truth_file)
         out_key = 'cellbender'
 
+    # need to make any duplicate var indices unique (for pandas manipulations)
+    adata.var_names_make_unique()
+
     display(Markdown('## Loaded dataset'))
     print(adata)
 
@@ -133,7 +139,7 @@ def generate_summary_plots(input_file: str,
                                              / (adata.var[f'n_{input_layer_key}_cells'] + 1e-5))
 
     # this inline command is necessary after cellbender imports
-    plt.rcParams.update({'font.size': 13})
+    plt.rcParams.update({'font.size': 12})
 
     # input UMI curve
     raw_full_adata = plot_input_umi_curve(input_file)
@@ -156,7 +162,10 @@ def generate_summary_plots(input_file: str,
 
     # plot learning curve
     if out_key == 'cellbender':
-        assess_learning_curve(adata)
+        try:
+            assess_learning_curve(adata)
+        except Exception:
+            pass
     else:
         display(Markdown('Skipping learning curve assessment.'))
 
@@ -635,8 +644,10 @@ def plot_learning_curve(adata):
         plt.show()
 
 
-def assess_count_removal_per_gene(adata, raw_full_adata,
-                                  input_layer_key='raw', r_squared_cutoff=0.75,
+def assess_count_removal_per_gene(adata,
+                                  raw_full_adata,
+                                  input_layer_key='raw',
+                                  r_squared_cutoff=0.5,
                                   extended=True):
 
     global warnings
@@ -660,7 +671,7 @@ def assess_count_removal_per_gene(adata, raw_full_adata,
         else:
             # a very rare edge case I've seen once
             display(Markdown('Having some trouble finding the empty droplets via heuristics. '
-                             'This section about count removal per gene may be inaccurate.'))
+                             'The "approximate background estimated from empty droplets" may be inaccurate.'))
             approximate_ambient_profile = np.array(raw_full_adata[counts < clims[1]].X.mean(axis=0)).squeeze()
         approximate_ambient_profile = approximate_ambient_profile / approximate_ambient_profile.sum()
     y = adata.var['n_removed'] / adata.var['n_removed'].sum()
@@ -698,9 +709,16 @@ def assess_count_removal_per_gene(adata, raw_full_adata,
         plt.tight_layout()
         plt.show()
 
-    r_squared = 1. - (np.square(y - approximate_ambient_profile).sum()
-                      / np.square(y - y.mean()).sum())
-    display(Markdown(f'R<sup>2</sup> value for the fit of y=x for removal is {r_squared:.4f}'))
+    cutoff = 1e-6
+    logic = np.logical_not((approximate_ambient_profile < cutoff) | (y < cutoff))
+    r_squared_result = scipy.stats.pearsonr(np.log(approximate_ambient_profile[logic]),
+                                            np.log(y[logic]))
+    if hasattr(r_squared_result, 'statistic'):
+        # scipy version 1.9.0+
+        r_squared = r_squared_result.statistic
+    else:
+        r_squared = r_squared_result[0]
+    display(Markdown(f'Pearson correlation coefficient for the above is {r_squared:.4f}'))
     if r_squared > r_squared_cutoff:
         display(Markdown('This meets expectations.'))
     else:
@@ -757,9 +775,9 @@ def plot_counts_and_probs_per_cell(adata, input_layer_key='raw'):
         var_logic = ...
 
     in_counts = np.array(adata.layers[input_layer_key][:, var_logic].sum(axis=1)).squeeze()
-    cellbender_counts = np.array(adata.layers['cellbender'][:, var_logic].sum(axis=1)).squeeze()
+    # cellbender_counts = np.array(adata.layers['cellbender'][:, var_logic].sum(axis=1)).squeeze()
     order = np.argsort(in_counts)[::-1]
-    plt.semilogy(cellbender_counts[order], '.:', ms=3, color='lightgray', alpha=0.5, label='cellbender')
+    # plt.semilogy(cellbender_counts[order], '.:', ms=3, color='lightgray', alpha=0.5, label='cellbender')
     plt.semilogy(in_counts[order], 'k-', lw=1, label=input_layer_key)
     plt.xlabel('Sorted barcode ID')
     plt.ylabel('Unique UMI counts' + ('\n(for features analyzed by CellBender)'
@@ -1018,21 +1036,23 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
     if extended:
 
         # plot z PCA colored by a few features
-        def _pca_color(g, layer):
-            outcounts = np.array(adata[:, g].layers['cellbender'].todense()).squeeze()
-            rawcounts = np.array(adata[:, g].layers[input_layer_key].todense()).squeeze()
-            cmax = 2 * (rawcounts - outcounts)[rawcounts > 0].mean()
+        def _pca_color(g: int, layer):
+            outcounts = np.array(adata.layers['cellbender'][:, adata.var_names == g].todense()).squeeze()
+            rawcounts = np.array(adata.layers[input_layer_key][:, adata.var_names == g].todense()).squeeze()
+            # cmax = 2 * (rawcounts - outcounts)[rawcounts > 0].mean()
+            cmax = np.percentile(rawcounts[rawcounts > 0], q=80)
             if layer == 'cellbender':
                 counts = outcounts
             else:
                 counts = rawcounts
             order = np.argsort(counts[cells])
+
             s = plt.scatter(x=adata.obsm['X_pca'][:, 0][cells][order],
                             y=adata.obsm['X_pca'][:, 1][cells][order],
                             c=counts[cells][order],
                             s=10,
                             vmin=0,
-                            vmax=min(20, max(1, cmax)),
+                            vmax=cmax,  # min(20, max(1, cmax)),
                             cmap='Oranges',
                             alpha=0.25)
             plt.title(f'{g}: {layer}')
@@ -1049,13 +1069,21 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
         features = (adata.var[feature_logic
                               & (adata.var['n_cellbender'] > genecount_lowlim)]
                     .sort_values(by='fraction_removed', ascending=False)
-                    .groupby('genome').head(2).index.values.tolist())
+                    .groupby('genome')
+                    .head(2)
+                    .index
+                    .values
+                    .tolist())
         if 'feature_type' in adata.var.keys():
             if (adata.var['feature_type'] != 'Gene Expression').sum() > 0:
                 features.extend(adata.var[(adata.var['feature_type'] != 'Gene Expression')
                                           & (adata.var['n_cellbender'] > genecount_lowlim)]
                                 .sort_values(by='fraction_removed', ascending=False)
-                                .groupby('feature_type').head(2).index.values.tolist())
+                                .groupby('feature_type')
+                                .head(2)
+                                .index
+                                .values
+                                .tolist())
 
         display(Markdown('### Visualization of a few features'))
         display(Markdown('Focusing on a few top features which were removed the most.'))
@@ -1069,13 +1097,13 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
             plt.tight_layout()
             plt.show()
 
-        display(Markdown('<span style="color:gray">*We typically see selective '
+        display(Markdown('*<span style="color:gray">We typically see selective '
                          'removal of some genes from '
                          'particular cell types.  The genes above have been picked '
                          'randomly based on fraction_removed, and so might not be '
                          'the best genes for visualization.  These sorts of plots '
                          'can be an interesting way to visualize what '
-                         '`remove-background` does.*</span>'))
+                         '`remove-background` does.</span>*'))
 
 
 def cluster_cells(adata, embedding_key='cellbender_embedding', n=2):
@@ -1481,7 +1509,7 @@ def mixed_species_plots(adata, input_layer_key='raw', output_layer_key='cellbend
     if 'genome' not in adata.var.keys():
         return
 
-    if 'feature_type' in adata.var.keys():
+    if ('feature_type' in adata.var.keys()) and ('Gene Expression' in adata.var['feature_type'].values):
         genomes = adata.var[adata.var['feature_type'] == 'Gene Expression']['genome'].unique()
     else:
         genomes = adata.var['genome'].unique()
@@ -1498,8 +1526,11 @@ def mixed_species_plots(adata, input_layer_key='raw', output_layer_key='cellbend
 
     for genome in genomes:
         if 'feature_type' in adata.var.keys():
-            var_subset = adata.var[(adata.var["genome"] == genome)
-                                   & (adata.var["feature_type"] == "Gene Expression")]
+            if 'Gene Expression' in adata.var["feature_type"].values:
+                var_subset = adata.var[(adata.var["genome"] == genome)
+                                       & (adata.var["feature_type"] == "Gene Expression")]
+            else:
+                var_subset = adata.var[(adata.var["genome"] == genome)]
         else:
             var_subset = adata.var[(adata.var["genome"] == genome)]
         print(f'Genome "{genome}" has {len(var_subset)} genes: '
@@ -1784,6 +1815,74 @@ def pca_2d(mat: np.ndarray) -> torch.Tensor:
         out: matrix where rows are observations and columns are top 2 PCs
     """
 
-    A = torch.tensor(mat)
+    A = torch.as_tensor(mat).float()
     U, S, V = torch.pca_lowrank(A)
     return torch.matmul(A, V[:, :2])
+
+
+def plot_summary(loss: Dict[str, Dict[str, np.ndarray]],
+                 umi_counts: np.ndarray,
+                 p: np.ndarray,
+                 z: np.ndarray):
+    """Output summary plot with three panels: training, cells, latent z."""
+
+    fig = plt.figure(figsize=(6, 18))
+
+    # Plot the train error.
+    plt.subplot(3, 1, 1)
+    try:
+        plt.plot(loss['train']['elbo'], '.--', label='Train')
+
+        # Plot the test error, if there was held-out test data.
+        if 'test' in loss.keys():
+            if len(loss['test']['epoch']) > 0:
+                plt.plot(loss['test']['epoch'],
+                         loss['test']['elbo'], 'o:', label='Test')
+                plt.legend()
+
+        ylim_low = max(loss['train']['elbo'][0], loss['train']['elbo'][-1] - 2000)
+        try:
+            ylim_high = max(max(loss['train']['elbo']), max(loss['test']['elbo']))
+        except ValueError:
+            ylim_high = max(loss['train']['elbo'])
+        ylim_high = ylim_high + (ylim_high - ylim_low) / 20
+        plt.gca().set_ylim([ylim_low, ylim_high])
+    except:
+        logger.warning('Error plotting the learning curve. Skipping.')
+        pass
+
+    plt.xlabel('Epoch')
+    plt.ylabel('ELBO')
+    plt.title('Progress of the training procedure')
+
+    # Plot the barcodes used, along with the inferred
+    # cell probabilities.
+    plt.subplot(3, 1, 2)
+    count_order = np.argsort(umi_counts)[::-1]
+    plt.semilogy(umi_counts[count_order], color='black')
+    plt.ylabel('UMI counts')
+    plt.xlabel('Barcode index, sorted by UMI count')
+    if p is not None:  # The case of a simple model.
+        plt.gca().twinx()
+        plt.plot(p[count_order], '.:', color='red', alpha=0.3, rasterized=True)
+        plt.ylabel('Cell probability', color='red')
+        plt.ylim([-0.05, 1.05])
+        plt.title('Determination of which barcodes contain cells')
+    else:
+        plt.title('The subset of barcodes used for training')
+
+    plt.subplot(3, 1, 3)
+    if p is None:
+        p = np.ones(z.shape[0])
+
+    # Do PCA on the latent encoding z.
+    z_pca = pca_2d(z[p >= consts.CELL_PROB_CUTOFF])
+
+    # Plot the latent encoding via PCA.
+    plt.plot(z_pca[:, 0], z_pca[:, 1],
+             '.', ms=3, color='black', alpha=0.3, rasterized=True)
+    plt.ylabel('PC 1')
+    plt.xlabel('PC 0')
+    plt.title('PCA of latent encoding of gene expression in cells')
+
+    return fig

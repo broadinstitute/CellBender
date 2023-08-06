@@ -87,14 +87,23 @@ def update_input_json(template_file: str,
     with open(json_inputs_file, mode='w') as f:
         json.dump(template, f, indent=2)
 
-    # write blank options json
+    # write options json that disables call-caching
     json_options_file = os.path.join(tmpdir, 'options.json')
+    options_dict = {
+        "write_to_cache": False,
+        "read_from_cache": False,
+    }
     with open(json_options_file, mode='w') as f:
-        json.dump({}, f, indent=2)
+        json.dump(options_dict, f, indent=2)
 
     if verbose:
         print('Contents of inputs.json:')
         subprocess.run(['cat', json_inputs_file])
+        print('', end='\n')
+
+    if verbose:
+        print('Contents of options.json:')
+        subprocess.run(['cat', json_options_file])
         print('', end='\n')
 
     return json_inputs_file, json_options_file
