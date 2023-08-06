@@ -535,7 +535,6 @@ class RemoveBackgroundPyroModel(nn.Module):
 
                 # Regularize based on wanting a balanced p_y_logit.
                 pyro.sample("p_logit_reg", dist.Normal(loc=enc['p_y'], scale=consts.P_LOGIT_SCALE))
-                # pyro.sample("p_logit_reg", dist.Delta(enc['p_y']))
 
                 # Pass back the inferred p_y to the model.
                 pyro.sample("p_passback", NullDist(enc['p_y'].detach()))
