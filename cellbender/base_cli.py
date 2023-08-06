@@ -5,14 +5,30 @@ Parses arguments and determines which tool should be called.
 """
 
 import sys
+import os
 import argparse
 from abc import ABC, abstractmethod
 from typing import Dict
 import importlib
-
+import codecs
 
 # New tools should be added to this list.
 TOOL_NAME_LIST = ['remove-background']
+
+
+def read(rel_path):
+    here = os.path.abspath(os.path.dirname(__file__))
+    with codecs.open(os.path.join(here, rel_path), 'r') as fp:
+        return fp.read()
+
+
+def get_version() -> str:
+    for line in read('__init__.py').splitlines():
+        if line.startswith('__version__'):
+            delim = '"' if '"' in line else "'"
+            return line.split(delim)[1]
+    else:
+        raise RuntimeError("Unable to find version string.")
 
 
 class AbstractCLI(ABC):
@@ -29,13 +45,15 @@ class AbstractCLI(ABC):
         """Return the command-line name of the tool."""
         pass
 
+    @staticmethod
     @abstractmethod
-    def validate_args(self, parser: argparse):
+    def validate_args(parser: argparse) -> argparse.Namespace:
         """Do tool-specific argument validation, returning args."""
         pass
 
+    @staticmethod
     @abstractmethod
-    def run(self, args):
+    def run(args):
         """Run the tool using the parsed arguments."""
         pass
 
@@ -62,8 +80,12 @@ def get_populated_argparser() -> argparse.ArgumentParser:
     # Set up argument parser.
     parser = argparse.ArgumentParser(
         prog="cellbender",
-        description="CellBender is a software package for eliminating technical artifacts from high-throughput "
-                    "single-cell RNA sequencing (scRNA-seq) data.")
+        description="CellBender is a software package for eliminating technical "
+                    "artifacts from high-throughput single-cell RNA sequencing "
+                    "(scRNA-seq) data.")
+
+    # Add the ability to display the version.
+    parser.add_argument('-v', '--version', action='version', version=get_version())
 
     # Declare the existence of sub-parsers.
     subparsers = parser.add_subparsers(
@@ -72,7 +94,7 @@ def get_populated_argparser() -> argparse.ArgumentParser:
         dest="tool")
 
     for tool_name in TOOL_NAME_LIST:
-        module_argparse_str_list = ["cellbender", tool_name.replace("-", "_"), "argparse"]
+        module_argparse_str_list = ["cellbender", tool_name.replace("-", "_"), "argparser"]
         module_argparse = importlib.import_module('.'.join(module_argparse_str_list))
         subparsers = module_argparse.add_subparser_args(subparsers)
 
@@ -103,3 +125,9 @@ def main():
     else:
 
         parser.print_help()
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

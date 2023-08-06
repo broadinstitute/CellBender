@@ -1,0 +1,17 @@
+name: 'validate WDL'
+on: [pull_request]
+env:
+  MINIWDL_VERSION: 1.8.0
+jobs:
+  miniwdl-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.7'
+      - name: 'Install miniwdl and Run Validation Test'
+        run: |
+          pip install miniwdl==$MINIWDL_VERSION;
+          ./cellbender/remove_background/tests/miniwdl_check_wdl.sh;
+        shell: bash

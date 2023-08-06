@@ -118,7 +118,7 @@ class TorchNegativeBinomialPoissonConvApprox(Distribution):
                                                       value=value)
 
         # Use a poisson for small mu, where the above approximation is bad.
-        empty_indices = (mu < 1e-5)
+        empty_indices = (mu < 1e-5 * lam)
         poisson_log_prob = self._poisson_log_prob(lam=lam[empty_indices],
                                                   value=value[empty_indices])
 

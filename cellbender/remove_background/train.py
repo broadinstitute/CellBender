@@ -1,35 +1,40 @@
 """Helper functions for training."""
 
 import pyro
-import pyro.distributions as dist
-from pyro.infer import SVI, JitTraceEnum_ELBO, JitTrace_ELBO, \
-    TraceEnum_ELBO, Trace_ELBO
-from pyro.optim import ClippedAdam
 from pyro.util import ignore_jit_warnings
-
-from cellbender.remove_background.model import RemoveBackgroundPyroModel
-from cellbender.remove_background.vae.decoder import Decoder
-from cellbender.remove_background.vae.encoder \
-    import EncodeZ, CompositeEncoder, EncodeNonZLatents
-from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
-from cellbender.remove_background.data.dataprep import \
-    prep_sparse_data_for_training as prep_data_for_training
-from cellbender.remove_background.data.dataprep import DataLoader
-from cellbender.remove_background.exceptions import NanException
-import cellbender.remove_background.consts as consts
-
-import numpy as np
+from pyro.infer import SVI
 import torch
 
+from cellbender.remove_background.model import RemoveBackgroundPyroModel
+from cellbender.remove_background.data.dataprep import DataLoader
+from cellbender.remove_background.exceptions import NanException, ElboException
+import cellbender.remove_background.consts as consts
+from cellbender.remove_background.checkpoint import save_checkpoint
+from cellbender.monitor import get_hardware_usage
+
+import numpy as np
+
+import argparse
 from typing import Tuple, List, Optional
 import logging
 import time
 from datetime import datetime
+import sys
+
+
+logger = logging.getLogger('cellbender')
+
+
+def is_scheduler(optim):
+    """Currently is_scheduler is on a pyro dev branch"""
+    if hasattr(optim, 'is_scheduler'):
+        return optim.is_scheduler()
+    else:
+        return type(optim) == pyro.optim.lr_scheduler.PyroLRScheduler
 
 
 def train_epoch(svi: SVI,
-                train_loader: DataLoader,
-                epoch: Optional[int] = None) -> float:
+                train_loader: DataLoader) -> float:
     """Train a single epoch.
 
     Args:
@@ -53,11 +58,21 @@ def train_epoch(svi: SVI,
 
         # Perform gradient descent step and accumulate loss.
         epoch_loss += svi.step(x_cell_batch)
-        svi.optim.step(epoch=epoch)  # for LR scheduling
         normalizer_train += x_cell_batch.size(0)
+
+        if is_scheduler(svi.optim):
+            svi.optim.step()  # for LR scheduling
 
     # Return epoch loss.
     total_epoch_loss_train = epoch_loss / normalizer_train
+
+    if is_scheduler(svi.optim):
+        try:
+            logger.debug(f'Learning rate scheduler: LR = '
+                         f'{list(svi.optim.optim_objs.values())[0].get_last_lr()[0]:.2e}')
+        except IndexError:
+            logger.debug('No values being optimized')
+            pass
 
     return total_epoch_loss_train
 
@@ -98,232 +113,185 @@ def evaluate_epoch(svi: pyro.infer.SVI,
 
 @ignore_jit_warnings()
 def run_training(model: RemoveBackgroundPyroModel,
+                 args: argparse.Namespace,
                  svi: pyro.infer.SVI,
                  train_loader: DataLoader,
                  test_loader: DataLoader,
                  epochs: int,
+                 output_filename: str,
                  test_freq: int = 10,
                  final_elbo_fail_fraction: float = None,
-                 epoch_elbo_fail_fraction: float = None) -> Tuple[List[float],
-                                                                  List[float], bool]:
+                 epoch_elbo_fail_fraction: float = None,
+                 ckpt_tarball_name: str = consts.CHECKPOINT_FILE_NAME,
+                 checkpoint_freq: int = 10) -> Tuple[List[float], List[float]]:
     """Run an entire course of training, evaluating on a tests set periodically.
 
         Args:
             model: The model, here in order to store train and tests loss.
+            args: Parsed arguments, which get saved to checkpoints.
             svi: The pyro object used for stochastic variational inference.
             train_loader: Dataloader for training set.
             test_loader: Dataloader for tests set.
             epochs: Number of epochs to run training.
+            output_filename: User-specified output file, used to construct
+                checkpoint filenames.
             test_freq: Test set loss is calculated every test_freq epochs of
                 training.
-            final_elbo_fail_fraction: fail if final test ELBO >= best ELBO * (1+this value)
-            epoch_elbo_fail_fraction: fail if current test ELBO >= previous ELBO * (1+this value)
+            final_elbo_fail_fraction: Fail if final test ELBO >=
+                best ELBO * (1 + this value)
+            epoch_elbo_fail_fraction: Fail if current test ELBO >=
+                previous ELBO * (1 + this value)
+            ckpt_tarball_name: Name of saved tarball for checkpoint.
+            checkpoint_freq: Checkpoint after this many minutes
 
         Returns:
-            Tuple(
-             list of training ELBO for each epoch,
-             list of test ELBO for each epoch for which testing is done,
-             boolean: False indicates training failed
-             )
-    """
+            total_epoch_loss_train: The loss for this epoch of training, which
+                is -ELBO, normalized by the number of items in the training set.
 
-    logging.info("Running inference...")
+    """
 
     # Initialize train and tests ELBO with empty lists.
     train_elbo = []
     test_elbo = []
-    succeeded = True
+    lr = []
+    epoch_checkpoint_freq = 1000  # a large number... it will be recalculated
+
     # Run training loop.  Use try to allow for keyboard interrupt.
     try:
-        for epoch in range(1, epochs + 1):
+
+        start_epoch = (1 if (model is None) or (len(model.loss['train']['epoch']) == 0)
+                       else model.loss['train']['epoch'][-1] + 1)
+
+        for epoch in range(start_epoch, epochs + 1):
+
+            # In debug mode, log hardware load every epoch.
+            if args.debug:
+                # Don't spend time pinging usage stats if we will not use the log.
+                # TODO: use multiprocessing to sample these stats DURING training...
+                logger.debug('\n' + get_hardware_usage(use_cuda=model.use_cuda))
 
             # Display duration of an epoch (use 2 to avoid initializations).
-            if epoch == 2:
+            if epoch == start_epoch + 1:
                 t = time.time()
 
+            model.train()
             total_epoch_loss_train = train_epoch(svi, train_loader)
 
             train_elbo.append(-total_epoch_loss_train)
-            model.loss['train']['epoch'].append(epoch)
-            model.loss['train']['elbo'].append(-total_epoch_loss_train)
+            try:
+                last_learning_rate = list(svi.optim.optim_objs.values())[0].get_last_lr()[0]
+            except AttributeError:
+                # not a scheduler
+                last_learning_rate = args.learning_rate
+            lr.append(last_learning_rate)
 
-            if epoch == 2:
-                logging.info("[epoch %03d]  average training loss: %.4f  (%.1f seconds per epoch)"
-                             % (epoch, total_epoch_loss_train, time.time() - t))
+            if model is not None:
+                model.loss['train']['epoch'].append(epoch)
+                model.loss['train']['elbo'].append(-total_epoch_loss_train)
+                model.loss['learning_rate']['epoch'].append(epoch)
+                model.loss['learning_rate']['value'].append(last_learning_rate)
+
+            if epoch == start_epoch + 1:
+                time_per_epoch = time.time() - t
+                logger.info("[epoch %03d]  average training loss: %.4f  (%.1f seconds per epoch)"
+                            % (epoch, total_epoch_loss_train, time_per_epoch))
+                epoch_checkpoint_freq = int(np.ceil(60 * checkpoint_freq / time_per_epoch))
+                if (epoch_checkpoint_freq > 0) and (epoch_checkpoint_freq < epochs):
+                    logger.info(f"Will checkpoint every {epoch_checkpoint_freq} epochs")
+                elif epoch_checkpoint_freq >= epochs:
+                    logger.info(f"Will not checkpoint due to projected run "
+                                f"completion in under {checkpoint_freq} min")
             else:
-                logging.info("[epoch %03d]  average training loss: %.4f"
-                             % (epoch, total_epoch_loss_train))
+                logger.info("[epoch %03d]  average training loss: %.4f"
+                            % (epoch, total_epoch_loss_train))
 
             # If there is no test data (training_fraction == 1.), skip test.
-            if len(test_loader) == 0:
-                continue
+            if (test_loader is not None) and (len(test_loader) > 0):
 
-            # Every test_freq epochs, evaluate tests loss.
-            if epoch % test_freq == 0:
-                total_epoch_loss_test = evaluate_epoch(svi, test_loader)
-                test_elbo.append(-total_epoch_loss_test)
-                model.loss['test']['epoch'].append(epoch)
-                model.loss['test']['elbo'].append(-total_epoch_loss_test)
-                logging.info("[epoch %03d] average test loss: %.4f"
-                             % (epoch, total_epoch_loss_test))
-                if epoch_elbo_fail_fraction is not None and len(test_elbo) > 1 and \
-                    test_elbo[-1] < test_elbo[-2] and \
-                        (test_elbo[-2] - test_elbo[-1])/(test_elbo[-2] - train_elbo[0]) > epoch_elbo_fail_fraction:
-                    logging.info(
-                        "Training failed because this test loss (%.4f) exceeds previous test loss(%.4f) by >= %.2f%%, "
-                        "relative to initial train loss %.4f" ,
-                        test_elbo[-1], test_elbo[-2], 100*epoch_elbo_fail_fraction, train_elbo[0])
-                    succeeded = False
-                    break
+                # Every test_freq epochs, evaluate tests loss.
+                if epoch % test_freq == 0:
+                    model.eval()
+                    total_epoch_loss_test = evaluate_epoch(svi, test_loader)
+                    test_elbo.append(-total_epoch_loss_test)
+                    model.loss['test']['epoch'].append(epoch)
+                    model.loss['test']['elbo'].append(-total_epoch_loss_test)
+                    logger.info("[epoch %03d] average test loss: %.4f"
+                                % (epoch, total_epoch_loss_test))
 
-        logging.info("Inference procedure complete.")
+                    # Check whether test ELBO has spiked beyond specified conditions.
+                    if (epoch_elbo_fail_fraction is not None) and (len(test_elbo) > 2):
+                        current_diff = max(0., test_elbo[-2] - test_elbo[-1])
+                        overall_diff = np.abs(test_elbo[-2] - test_elbo[0])
+                        fractional_spike = current_diff / overall_diff
+                        if fractional_spike > epoch_elbo_fail_fraction:
+                            raise ElboException(
+                                f'Training failed because test loss moved {current_diff:.2f} '
+                                f'in the wrong direction, and that is {fractional_spike:.2f} '
+                                f'of the total test ELBO change, > '
+                                f'specified epoch_elbo_fail_fraction {epoch_elbo_fail_fraction:.2f}'
+                            )
 
-        if succeeded and final_elbo_fail_fraction is not None and len(test_elbo) > 1:
+            # Checkpoint throughout and after final epoch.
+            if ((ckpt_tarball_name != 'none')
+                    and (((checkpoint_freq > 0) and (epoch % epoch_checkpoint_freq == 0))
+                         or (epoch == epochs))):  # checkpoint at final epoch
+                save_checkpoint(filebase=output_filename,
+                                tarball_name=ckpt_tarball_name,
+                                args=args,
+                                model_obj=model,
+                                scheduler=svi.optim,
+                                train_loader=train_loader,
+                                test_loader=test_loader)
+
+        # Check on the final test ELBO to see if it meets criteria.
+        if final_elbo_fail_fraction is not None:
             best_test_elbo = max(test_elbo)
-            if test_elbo[-1] < best_test_elbo and \
-                   (best_test_elbo - test_elbo[-1])/(best_test_elbo - train_elbo[0]) > final_elbo_fail_fraction:
-                logging.info(
-                    "Training failed because final test loss (%.4f) exceeds "
-                    "best test loss(%.4f) by >= %.2f%%, relative to initial train loss %.4f",
-                    test_elbo[-1], best_test_elbo, 100*final_elbo_fail_fraction, train_elbo[0])
-                succeeded = False
+            if test_elbo[-1] < best_test_elbo:
+                final_best_diff = best_test_elbo - test_elbo[-1]
+                initial_best_diff = best_test_elbo - test_elbo[0]
+                if (final_best_diff / initial_best_diff) > final_elbo_fail_fraction:
+                    raise ElboException(
+                        f'Training failed because final test loss {test_elbo[-1]:.2f} '
+                        f'is not sufficiently close to best test loss {best_test_elbo:.2f}, '
+                        f'compared to the initial test loss {test_elbo[0]:.2f}. '
+                        f'Fractional difference is {final_best_diff / initial_best_diff:.2f}, '
+                        f'which is > specified final_elbo_fail_fraction {final_elbo_fail_fraction:.2f}'
+                    )
 
     # Exception allows program to continue after ending inference prematurely.
     except KeyboardInterrupt:
+        logger.info("Inference procedure stopped by keyboard interrupt... "
+                    "will save a checkpoint.")
+        save_checkpoint(filebase=output_filename,
+                        tarball_name=ckpt_tarball_name,
+                        args=args,
+                        model_obj=model,
+                        scheduler=svi.optim,
+                        train_loader=train_loader,
+                        test_loader=test_loader)
 
-        logging.info("Inference procedure stopped by keyboard interrupt.")
+    except ElboException as e:
+        logger.info(e.message)
+        raise e  # re-raise the exception to pass it back to caller function
 
     # Exception allows program to produce output when terminated by a NaN.
     except NanException as nan:
-
         print(nan.message)
-        logging.info(f"Inference procedure terminated early due to a NaN value in: {nan.param}\n\n"
-                     f"The suggested fix is to reduce the learning rate.\n\n")
-        succeeded = False
+        logger.info(f"Inference procedure terminated early due to a NaN value in: {nan.param}\n\n"
+                    f"The suggested fix is to reduce the learning rate by a factor of two.\n\n")
+        sys.exit(1)
 
-    if succeeded:
-        logging.info("Training succeeded")
-    logging.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    logger.info(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-    return train_elbo, test_elbo, succeeded
+    # Check final ELBO meets conditions.
+    if (final_elbo_fail_fraction is not None) and (len(test_elbo) > 1):
+        best_test_elbo = max(test_elbo)
+        if -test_elbo[-1] >= -best_test_elbo * (1 + final_elbo_fail_fraction):
+            raise ElboException(f'Training failed because final test loss ({-test_elbo[-1]:.4f}) '
+                                f'exceeds best test loss ({-best_test_elbo:.4f}) by >= '
+                                f'{100 * final_elbo_fail_fraction:.1f}%')
 
+    # Free up all the GPU memory we can once training is complete.
+    torch.cuda.empty_cache()
 
-def run_inference(dataset_obj: SingleCellRNACountsDataset,
-                  args) -> RemoveBackgroundPyroModel:
-    """Run a full inference procedure, training a latent variable model.
-
-    Args:
-        dataset_obj: Input data in the form of a SingleCellRNACountsDataset
-            object.
-        args: Input command line parsed arguments.
-
-    Returns:
-         model: cellbender.model.RemoveBackgroundPyroModel that has had
-            inference run.
-
-    """
-
-    # Get the trimmed count matrix (transformed if called for).
-    count_matrix = dataset_obj.get_count_matrix()
-
-    # Configure pyro options (skip validations to improve speed).
-    pyro.enable_validation(False)
-    pyro.distributions.enable_validation(False)
-
-    # Load the dataset into DataLoaders.
-    frac = args.training_fraction  # Fraction of barcodes to use for training
-    batch_size = int(min(300, frac * dataset_obj.analyzed_barcode_inds.size / 2))
-
-    for attempt in range(args.num_training_tries):
-        # set seed for every attempt for reproducibility
-        pyro.set_rng_seed(0)
-        pyro.clear_param_store()
-
-        # Set up the variational autoencoder:
-
-        # Encoder.
-        encoder_z = EncodeZ(input_dim=count_matrix.shape[1],
-                            hidden_dims=args.z_hidden_dims,
-                            output_dim=args.z_dim,
-                            input_transform='normalize')
-
-        encoder_other = EncodeNonZLatents(n_genes=count_matrix.shape[1],
-                                          z_dim=args.z_dim,
-                                          hidden_dims=consts.ENC_HIDDEN_DIMS,
-                                          log_count_crossover=dataset_obj.priors['log_counts_crossover'],
-                                          prior_log_cell_counts=np.log1p(dataset_obj.priors['cell_counts']),
-                                          input_transform='normalize')
-
-        encoder = CompositeEncoder({'z': encoder_z,
-                                    'other': encoder_other})
-
-        # Decoder.
-        decoder = Decoder(input_dim=args.z_dim,
-                          hidden_dims=args.z_hidden_dims[::-1],
-                          output_dim=count_matrix.shape[1])
-
-        # Set up the pyro model for variational inference.
-        model = RemoveBackgroundPyroModel(model_type=args.model,
-                                          encoder=encoder,
-                                          decoder=decoder,
-                                          dataset_obj=dataset_obj,
-                                          use_cuda=args.use_cuda)
-
-        train_loader, test_loader = \
-            prep_data_for_training(dataset=count_matrix,
-                                   empty_drop_dataset=
-                                   dataset_obj.get_count_matrix_empties(),
-                                   random_state=dataset_obj.random,
-                                   batch_size=batch_size,
-                                   training_fraction=frac,
-                                   fraction_empties=args.fraction_empties,
-                                   shuffle=True,
-                                   use_cuda=args.use_cuda)
-
-        # Set up the optimizer.
-        optimizer = pyro.optim.clipped_adam.ClippedAdam
-        optimizer_args = {'lr': args.learning_rate, 'clip_norm': 10.}
-
-        # Set up a learning rate scheduler.
-        minibatches_per_epoch = int(np.ceil(len(train_loader) / train_loader.batch_size).item())
-        scheduler_args = {'optimizer': optimizer,
-                          'max_lr': args.learning_rate * 10,
-                          'steps_per_epoch': minibatches_per_epoch,
-                          'epochs': args.epochs,
-                          'optim_args': optimizer_args}
-        scheduler = pyro.optim.OneCycleLR(scheduler_args)
-
-        # Determine the loss function.
-        if args.use_jit:
-
-            # Call guide() once as a warm-up.
-            model.guide(torch.zeros([10, dataset_obj.analyzed_gene_inds.size]).to(model.device))
-
-            if args.model == "simple":
-                loss_function = JitTrace_ELBO()
-            else:
-                loss_function = JitTraceEnum_ELBO(max_plate_nesting=1,
-                                                  strict_enumeration_warning=False)
-        else:
-
-            if args.model == "simple":
-                loss_function = Trace_ELBO()
-            else:
-                loss_function = TraceEnum_ELBO(max_plate_nesting=1)
-
-        # Set up the inference process.
-        svi = SVI(model.model, model.guide, scheduler,
-                  loss=loss_function)
-
-        # Run training.
-        train_elbo, test_elbo, succeeded = run_training(model, svi, train_loader, test_loader,
-                                                        epochs=args.epochs, test_freq=5,
-                                                        final_elbo_fail_fraction=args.final_elbo_fail_fraction,
-                                                        epoch_elbo_fail_fraction=args.epoch_elbo_fail_fraction)
-        if succeeded or attempt+1 >= args.num_training_tries:
-            break
-        else:
-            args.learning_rate = args.learning_rate * args.learning_rate_retry_mult
-            logging.info("Learning failed.  Retrying with learning-rate %.8f" % args.learning_rate)
-
-    return model
+    return train_elbo, test_elbo

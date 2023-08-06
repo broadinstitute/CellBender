@@ -12,3 +12,9 @@ dist/
 .eggs/
 .idea/
 *.iml
+*.h5
+*.h5ad
+*.tsv
+*.csv
+*.npz
+*.tar.gz

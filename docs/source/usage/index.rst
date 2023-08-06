@@ -9,8 +9,8 @@ remove-background
 Use case
 ~~~~~~~~
 
-``remove-background`` is used to remove ambient / background RNA from a count matrix produced by
-`10x Genomics' CellRanger pipeline
+``remove-background`` is used to remove ambient / background RNA from a count matrix,
+such as one produced by the `10x Genomics' CellRanger pipeline
 <https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/what-is-cell-ranger>`_.
 The output of ``cellranger count`` produces a raw .h5 file that is used as the input
 for ``remove-background``.
@@ -21,6 +21,8 @@ analysis using Seurat, scanpy, your own custom analysis, etc.
 The output of ``remove-background`` includes a new .h5 count matrix, with background RNA removed,
 that can directly be used in downstream analysis in Seurat or scanpy as if it were the raw dataset.
 
+.. _proposed-pipeline:
+
 Proposed pipeline
 ~~~~~~~~~~~~~~~~~
 
@@ -28,6 +30,9 @@ Proposed pipeline
 #. Run ``cellbender remove-background``
 #. Perform per-cell quality control checks, and filter out dead / dying cells,
    as appropriate for your experiment
+#. Perform all subsequent analyses using the CellBender count matrix. (It is useful
+   to also load the raw data: keep it as a layer in an ``anndata`` object, for
+   example, see :ref:`here <loading-outputs>`)
 
 
 A few caveats and hints:
@@ -61,7 +66,7 @@ Run ``remove-background`` on the dataset using the following command
 
 .. code-block:: console
 
-   (CellBender) $ cellbender remove-background \
+   (cellbender) $ cellbender remove-background \
                     --input raw_feature_bc_matrix.h5 \
                     --output output.h5 \
                     --cuda \
@@ -85,15 +90,22 @@ This command will produce five output files:
   output for convenient use in certain downstream applications.
 * ``output.pdf``: PDF file that provides a standard graphical summary of the inference procedure.
 * ``output.log``: Log file produced by the ``cellbender remove-background`` run.
+* ``output_metrics.csv``: Metrics describing the run, potentially to be used to flag
+  problematic runs when using CellBender as part of a large-scale automated pipeline.
+* ``output_report.html``: HTML report including plots and commentary, along with any
+  warnings or suggestions for improved parameter settings.
+* ``ckpt.tar.gz``: Checkpoint file which contains the trained model and the full posterior.
 
 Quality control checks
 ~~~~~~~~~~~~~~~~~~~~~~
 
 * Check the log file for any warnings.
-* Check lines 8 - 11 in the log file.  Ensure that the automatically-determined priors
+* Check lines 11 -18 in the log file.  Ensure that the automatically-determined priors
   for cell counts and empty droplet counts match your expectation from the UMI curve.
   Ensure that the numbers of "probable cells", "additional barcodes", and "empty droplets"
   are all nonzero and look reasonable.
+* Look at the HTML report and note any warnings it gives. The report will give advice
+  for re-running the tool if appropriate.
 * Examine the PDF output.
 
     * Look at the upper plot to check whether
@@ -108,7 +120,7 @@ Quality control checks
     * Check the middle plot to see which droplets have been called as cells.  A converged
       inference procedure should result in the vast majority of cell probabilities
       being very close to either zero or one.  If the cell calls look problematic, check
-      the :ref:`help documentation <remove background reference troubleshooting>`.
+      the :ref:`help documentation <remove background troubleshooting>`.
       Keep in mind that
       ``remove-background`` will output a high cell probability for any droplet that is
       unlikely to be drawn from the ambient background.  This can result in a large number
@@ -125,15 +137,18 @@ Quality control checks
       difficulties in calling which droplets contain cells.)
 
 * Create some validation plots of various analyses with and without
-  ``cellbender remove-background``.  One convenient way to do this is in ``scanpy``
-  and storing the raw count matrix and the background-removed count matrix as
-  separate `"layers" <https://anndata.readthedocs.io/en/latest/anndata.AnnData.layers.html>`_.
+  ``cellbender remove-background``.  One convenient way to do this is in ``scanpy``,
+  storing the raw count matrix and the background-removed count matrix as
+  separate `"layers" <https://anndata.readthedocs.io/en/latest/generated/anndata.AnnData.layers.html>`_.
 
-    * UMAPs with and without (on the same set of cell barcodes)
-    * Marker gene dotplots and violin plots (you should see less background)
+    * UMAPs with and without CellBender (on the same set of cell barcodes)
+    * Marker gene dotplots and violin plots before and after CellBender
+      (you should see less background noise)
 
 * Directly subtract the output count matrix from the input count matrix and take a close
   look at what was removed.
+
+.. _best-practices:
 
 Recommended best practices
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -141,6 +156,11 @@ Recommended best practices
 The default settings are good for getting started with a clean and simple dataset like
 the publicly available `PBMC dataset from 10x Genomics
 <https://support.10xgenomics.com/single-cell-gene-expression/datasets/2.1.0/pbmc8k>`_.
+
+As of v0.3.0, users will typically not need to set values for ``--expected-cells``
+or ``--total-droplets-included``, as CellBender will choose reasonable values
+based on your dataset. If something goes wrong with these defaults, then you can
+try to input these arguments manually.
 
 Considerations for setting parameters:
 
@@ -163,8 +183,13 @@ Considerations for setting parameters:
 * ``--cuda``: Include this flag.  The code is meant to be run on a GPU.
 * ``--learning-rate``: The default value of 1e-4 is typically fine, but this value can be
   adjusted if problems arise during quality-control checks of the learning curve (as above).
-* ``--fpr``: A value of 0.01 is generally quite good, but you can generate a few output
-  count matrices and compare them by choosing a few values: 0.01 0.05 0.1
+* ``--fpr``: A value of 0.01 is the default, and represents a fairly conservative
+  setting, which is appropriate for most analyses.
+  In order to examine a single dataset at a time and remove more noise (at the
+  expense of some signal), choose larger values such as 0.05 or 0.1. Bear in mind
+  that the value 1 represents removal of (nearly) every count in the dataset, signal and
+  noise.  You can generate multiple output count matrices in the same run by
+  choosing several values: 0.0 0.01 0.05 0.1
 
 .. image:: /_static/remove_background/UMI_curve_defs.png
    :width: 250 px

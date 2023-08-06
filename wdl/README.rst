@@ -8,7 +8,7 @@ enable CellBender commands to be run on cloud computing architecture.
 ``remove-background``
 ---------------------
 
-The workflow that runs ``cellbender remove-background`` on a (Tesla K80) GPU on a
+The workflow that runs ``cellbender remove-background`` on a (Tesla T4) GPU on a
 Google Cloud virtual machine is located at ``wdl/cellbender_remove_background.wdl``.
 
 Method inputs:
@@ -20,9 +20,8 @@ refer to the `documentation
 
 Required:
 
-* ``input_10x_h5_file_or_mtx_directory``: Path to raw count matrix output by 10x
-  ``cellranger count`` as either a .h5 file or as the directory that contains
-  ``matrix.mtx(.gz)``.  In the `Terra <https://app.terra.bio>`_
+* ``input_file_unfiltered``: Path to raw count matrix such as an .h5 file from
+  ``cellranger count``, or as a .h5ad or a DGE-format .csv.  In the `Terra <https://app.terra.bio>`_
   data model, this could be ``this.h5_file``, where "h5_file" is the column of
   the data model that contains the path to the raw count matrix h5.  Alternatively,
   this could be a Google bucket path as a String (e.g.
@@ -45,40 +44,31 @@ Optional and recommended:
   be called as either cell or empty droplet by the inference procedure.  Any
   droplets not included in the ``total_droplets_included`` largest UMI-count
   droplets will be treated as surely empty.
+* ``output_bucket_base_directory``: Google bucket path (gsURL) to a directory where
+  you want outputs to be copied.  Within that directory, a new folder will appear
+  called `sample_name`, and all outputs will go there.  Note that your data will
+  then be in two locations in the Cloud: here and wherever Cromwell has its
+  execution directory (if using Terra, this is in your workspace's Google bucket).
 
 
 Optional:
 
 * ``learning_rate``: The learning rate used during inference, as a Float (e.g. ``1e-4``).
 * ``epochs``: Number of epochs to train during inference, as an Int (e.g. 150).
-* ``model``: One of {"full", "ambient", "swapping", "simple"}.  This specifies how
-  the count data should be modeled.  "full" specifies an ambient RNA plus chimera
-  formation model, while "ambient" specifies a model with only ambient RNA, and
-  "swapping" specifies a model with only chimera formation.  "simple" should not
-  be used in this context.
 * ``low_count_threshold``: An Int that specifies a number of unique UMIs per droplet (e.g. 15).
   Droplets with total unique UMI count below ``low_count_threshold`` will be
   entirely excluded from the analysis.  They are assumed not even to be empty droplets,
   but some barcode error artifacts that are not useful for inference.
-* ``blacklist_genes``: A whitespace-delimited String of integers
-  (e.g. "523 10021 10022 33693 33694") that specifies genes that should be completely
-  excluded from analysis.  Counts of these genes are set to zero in the output count matrix.
-  Genes are specified by the integer that indexes them in the count matrix.
+* ``projected_ambient_count_threshold``: The larger this number, the fewer genes
+  (features) are analyzed, and the faster the tool will run.  Default is 0.1.  The
+  value represents the expected number of ambient counts (summed over all cells)
+  that we would estimate based on naive assumptions.  Features with fewer expected
+  counts than this threshold will be ignored, and the output for those features will
+  be identical to the input.
 
-Optional but discouraged:
-
-[There should not be any need to change these parameters from their default values.]
-
-* ``z_dim``: Dimension of the latent gene expression space, as an Int.  Use a smaller
-  value (e.g. 20) for slightly more imputation, and a larger value (e.g. 200) for
-  less imputation.
-* ``z_layers``: Architecture of the neural network autoencoder for the latent representation
-  of gene expression.  ``z_layers`` specifies the size of each hidden layer.
-  Input as a whitespace-delimited String of integers, (e.g. "1000").
-  Only use one hidden layer.  [Two hidden layers could be specified with "500 100" for
-  example, but only one hidden layer should be used.]
-* ``empty_drop_training_fraction``: Specifies what fraction of the data in each
-  minibatch should come from surely empty droplets, as a Float (e.g. 0.3).
+Other input parameters are explained `in the documentation
+<https://cellbender.readthedocs.io/en/latest/help_and_reference/remove_background/index.html>`_,
+but are only useful in rare cases.
 
 Optional runtime specifications:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -87,8 +77,9 @@ Software:
 
 * ``docker_image``: Name of the docker image which will be used to run the
   ``cellbender remove-background`` command, as a String that references an image
-  either on the Google Container Registry (e.g. "us.gcr.io/broad-dsde-methods/cellbender:latest")
-  or Dockerhub (e.g. "dockerhub_username/image_name").  Images should be 3GB or smaller.
+  with CellBender installed (e.g. "us.gcr.io/broad-dsde-methods/cellbender:0.3.0").
+  Note that this WDL may not be compatible with other versions of CellBender due
+  to changes in input arguments.
 
 Hardware:
 
@@ -100,23 +91,40 @@ Hardware:
 * ``hardware_disk_size_GB``: Specify the size of the disk attached to the VM, as
   an Int in units of GB.
 * ``hardware_preemptible_tries``: Specify the number of preemptible runs to attempt,
-  as an Int.  Preemptible runs are 1/3 to 1/4 the cost.  If the run gets pre-empted
+  as an Int.  Preemptible runs are 1/3 to 1/4 the cost.  If the run gets preempted
   ``hardware_preemptible_tries`` times, a final non-preemptible run is carried out.
+  Work is not lost during preemption because the workflow uses
+  `checkpointing <https://cromwell.readthedocs.io/en/stable/optimizations/CheckpointFiles/>`_
+  to pick up (near) where it left off.
 
 Outputs:
 ~~~~~~~~
 
-``cellbender remove-background`` outputs five files, and each of these output files is
+``cellbender remove-background`` outputs several files, and each of these files is
 included as an output of the workflow.
 
-If multiple FPR values are specified, then separate ``h5`` and
+If multiple FPR values are specified, then separate ``.h5`` and ``report.html``
+``metrics.csv`` files will be produced, one for each FPR.
 
-* ``h5_array``: Array of output count matrix files, with background RNA removed.
-* ``output_directory``: Same as the workflow input parameter, useful for populating
-  a column of the Terra data model.
-* ``csv``: CSV file containing all the droplet barcodes which were determined to have
+* ``h5_array``: Array of output count matrix files (one for each FPR), with
+  background RNA removed.
+* ``html_report_array``: Array of HTML output reports (one for each FPR)
+* ``metrics_csv_array``: Array of CSV files that include output metrics (one for
+  each FPR)
+* ``output_directory``: If the input `output_base_directory` was blank, this
+  will be black too. Same as the workflow input parameter, but with the
+  `sample_name` subdirectory added: useful for populating
+  a column of the Terra data model.  All outputs are copied here.
+* ``cell_barcodes_csv``: CSV file containing all the droplet barcodes which were determined to have
   a > 50% posterior probability of containing cells.  Barcodes are written in plain text.
   This information is also contained in each of the above outputs, but is included as a separate
   output for convenient use in certain downstream applications.
-* ``pdf``: PDF file that provides a standard graphical summary of the inference procedure.
+* ``summary_pdf``: PDF file that provides a quick graphical summary of the run.
 * ``log``: Log file produced by the ``cellbender remove-background`` run.
+
+
+Cost:
+~~~~~
+
+The cost to run a single sample in v0.3.0 on a preemptible Nvidia Tesla T4 GPU
+on Google Cloud hovers somewhere in the ballpark of
