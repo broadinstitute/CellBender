@@ -27,7 +27,12 @@ Proposed pipeline
 ~~~~~~~~~~~~~~~~~
 
 #. Run ``cellranger count`` or some other quantification tool to obtain a count matrix
-#. Run ``cellbender remove-background``
+#. Run ``cellbender remove-background`` using the command
+
+.. code-block:: console
+
+    cellbender remove-background --cuda --input input_file.h5 --output output_file.h5
+
 #. Perform per-cell quality control checks, and filter out dead / dying cells,
    as appropriate for your experiment
 #. Perform all subsequent analyses using the CellBender count matrix. (It is useful
@@ -67,18 +72,16 @@ Run ``remove-background`` on the dataset using the following command
 .. code-block:: console
 
    (cellbender) $ cellbender remove-background \
-                    --input raw_feature_bc_matrix.h5 \
-                    --output output.h5 \
                     --cuda \
-                    --expected-cells 5000 \
-                    --total-droplets-included 20000 \
-                    --fpr 0.01 \
-                    --epochs 150
+                    --input raw_feature_bc_matrix.h5 \
+                    --output output.h5
 
 (The output filename "output.h5" can be replaced with a filename of choice.)
 
-This command will produce five output files:
+This command will produce nine output files:
 
+* ``output_report.html``: HTML report including plots and commentary, along with any
+  warnings or suggestions for improved parameter settings.
 * ``output.h5``: Full count matrix as an h5 file, with background RNA removed.  This file
   contains all the original droplet barcodes.
 * ``output_filtered.h5``: Filtered count matrix as an h5 file, with background RNA removed.
@@ -92,15 +95,23 @@ This command will produce five output files:
 * ``output.log``: Log file produced by the ``cellbender remove-background`` run.
 * ``output_metrics.csv``: Metrics describing the run, potentially to be used to flag
   problematic runs when using CellBender as part of a large-scale automated pipeline.
-* ``output_report.html``: HTML report including plots and commentary, along with any
-  warnings or suggestions for improved parameter settings.
 * ``ckpt.tar.gz``: Checkpoint file which contains the trained model and the full posterior.
+* ``output_posterior.h5``: The full posterior probability of noise counts.  This is
+  not normally used downstream.
+
+If you are interested in saving space and you do not need to re-run cellbender,
+only the ``output_report.html`` and the ``output.h5`` need to be stored. The
+``ckpt.tar.gz`` in particular is a large file which can be deleted to save disk
+storage space. (However, if you keep this checkpoint file, it can be used to
+create a new output count matrix with a different ``--fpr``, without
+needing to re-run the lengthy training process. Simply run the command again
+with a different ``--fpr`` and specify ``--checkpoint ckpt.tar.gz``.)
 
 Quality control checks
 ~~~~~~~~~~~~~~~~~~~~~~
 
-* Check the log file for any warnings.
-* Check lines 11 -18 in the log file.  Ensure that the automatically-determined priors
+* Check the log file for any errors or warnings.
+* Check lines 13-21 in the log file.  Ensure that the automatically-determined priors
   for cell counts and empty droplet counts match your expectation from the UMI curve.
   Ensure that the numbers of "probable cells", "additional barcodes", and "empty droplets"
   are all nonzero and look reasonable.

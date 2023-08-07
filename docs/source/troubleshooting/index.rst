@@ -177,7 +177,8 @@ Answers / Troubleshooting Tips
     Anecdotally it seems that ATAC data is less noisy than gene expression data
     to begin with, so some users opt to have CellBender ignore the ATAC features
     using the input argument ``--exclude-feature-types Peaks``. There is nothing
-    wrong with doing this.
+    wrong with doing this. The CellBender output file will still contain the ATAC
+    Peak features, but they will be identical to the raw input file.
 
 .. _a8:
 
@@ -421,6 +422,5 @@ Answers / Troubleshooting Tips
       This means that the "empty droplet plateau" could not be identified.  The most likely
       explanation is that the level of background RNA is extremely low, and that the value
       of ``--low-count-threshold`` exceeds this level.  This would result in the empty
-      droplet plateau being excluded from the analysis, which is not advisable.  This can be
-      corrected by decreasing ``--low-count-threshold`` from its default of 15 to a value like 5.
-
+      droplet plateau being excluded from the analysis, which is not advisable.  This could
+      possibly be corrected by decreasing ``--low-count-threshold`` to a value like 1.

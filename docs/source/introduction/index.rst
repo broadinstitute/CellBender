@@ -13,11 +13,11 @@ Despite the recent progress in improving, optimizing and standardizing droplet-b
 like scRNA-seq, the complexity of these experiments leaves room for systematic biases and background noise in
 the raw observations. These nuisances
 can be traced back to undesirable enzymatic processes that produce spurious library fragments, contamination by
-exogeneous or endogenous ambient transcripts, impurity of barcode beads, and barcode swapping during amplification
+exogenous or endogenous ambient transcripts, impurity of barcode beads, and barcode swapping during amplification
 and/or sequencing.
 
 The main purpose of CellBender is to take raw gene-by-cell count matrices and molecule-level information produced
-by 3rd party pipelines (e.g. CellRanger, Alevin, DropSeq, etc.), to model and remove systematic biases and
+by 3rd party pipelines (e.g. CellRanger, Alevin, DropSeq, StarSolo, etc.), to model and remove systematic biases and
 background noise, and to produce improved estimates of gene expression.
 
 As such, CellBender relies on an external tool for primary processing of the raw data obtained from the

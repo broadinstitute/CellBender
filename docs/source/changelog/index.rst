@@ -83,3 +83,57 @@ a workflow using Google Colab on a GPU for free.
 - A ``metrics.csv`` output file is produced for those interested in running
   hundreds of samples in automated pipelines. This file can be parsed to look for
   indications that a sample may need to be re-run.
+
+Human-mouse mixture benchmark
+-----------------------------
+
+The `human-mouse mixture dataset from 10x Genomics
+<https://www.10xgenomics.com/resources/datasets/12-k-1-1-mixture-of-fresh-frozen-human-hek-293-t-and-mouse-nih-3-t-3-cells-2-standard-2-1-0>`_
+is a great dataset for benchmarking noise removal methods.
+
+Figure legend:
+
+a. Log-log plot of counts of human genes versus mouse genes in each cell.
+   Each cell is a dot. Gray dots are the raw data, same in each figure. Green
+   dots are the CellBender output at FPR 0.01. Marginal histograms are shown
+   above and to the right.
+b. Quantification of cross-species contamination per cell. Blue boxes show
+   human genes in mouse cells, and orange boxes show mouse genes in human cells.
+c. Quantification of overall count removal per gene. Each dot is a gene,
+   summed over all cells. X-axis is the raw data. Y-axis is the fraction of
+   counts remaining after CellBender noise removal. This is not a comparison
+   with truth, but rather a look to see if high-count or low-count genes
+   are being treated differently with regard to noise removal. The red line
+   guides the eye for what would be a constant level of removal.
+
+This benchmark is not shown for v0.1.0, as it is deprecated.
+
+v0.2.2
+~~~~~~
+
+.. image:: /_static/remove_background/v0.2.2_hgmm.png
+   :width: 750 px
+
+Note that the very small dip in panel c for genes with raw counts > 1e5
+indicates some over-removal of highly expressed genes. (Some of the mass of
+black dots is dipping below the red line.)
+
+Nature Methods publication
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The code run in the paper is technically v0.3.0_rc, a "release candidate".
+The results are shown in the paper in Figure 5a, and reproduced here in a
+comparable format.
+
+.. image:: /_static/remove_background/v0.3.0_rc_hgmm.png
+   :width: 750 px
+
+Note that the seeming performance regression came with
+a lot of extra guarantees about the quality of the output. The dip visible
+in panel c in v0.2.2 has disappeared.
+
+v0.3.0
+~~~~~~
+
+.. image:: /_static/remove_background/v0.3.0_hgmm.png
+   :width: 750 px
