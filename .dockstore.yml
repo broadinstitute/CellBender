@@ -1,0 +1,6 @@
+version: 1.2
+
+workflows:
+  - subclass: WDL
+    primaryDescriptorPath: /wdl/cellbender_remove_background.wdl
+    name: cellbender_remove_background

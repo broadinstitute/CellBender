@@ -1,40 +1,35 @@
 # Start from nvidia-docker image with drivers pre-installed to use a GPU
-FROM nvcr.io/nvidia/cuda:9.2-base-ubuntu16.04
+FROM nvcr.io/nvidia/cuda:11.7.1-base-ubuntu18.04
+
+# Copy the local cellbender repo
+ADD . /software/cellbender
 
 LABEL maintainer="Stephen Fleming <sfleming@broadinstitute.org>"
+ENV DOCKER=true \
+    CONDA_AUTO_UPDATE_CONDA=false \
+    CONDA_DIR="/opt/conda" \
+    GCLOUD_DIR="/opt/gcloud" \
+    GOOGLE_CLOUD_CLI_VERSION="397.0.0" \
+    GIT_SHA=$GIT_SHA
+ENV PATH="$CONDA_DIR/bin:$GCLOUD_DIR/google-cloud-sdk/bin:$PATH"
 
-# Install curl and sudo and git and miniconda and pytorch, cudatoolkit, pytables, and cellbender
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    sudo \
- && sudo apt-get install -y --no-install-recommends \
-    git \
-    bzip2 \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates sudo \
+ && apt-get clean \
  && sudo rm -rf /var/lib/apt/lists/* \
- && curl -so ~/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
- && chmod +x ~/miniconda.sh \
- && ~/miniconda.sh -b -p /home/user/miniconda \
- && rm ~/miniconda.sh
-
-ENV PATH=/home/user/miniconda/bin:$PATH
-ENV CONDA_AUTO_UPDATE_CONDA=false
-
-RUN conda install -y "pytorch>=1.9.0" torchvision cudatoolkit -c pytorch \
- && conda install -y -c anaconda pytables \
- && conda clean -ya
-
-ENV DOCKER='true'
-
-RUN git clone https://github.com/broadinstitute/CellBender.git cellbender \
- && yes | pip install -e cellbender \
+# get miniconda
+ && curl -so $HOME/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py37_23.1.0-1-Linux-x86_64.sh \
+ && chmod +x $HOME/miniconda.sh \
+ && $HOME/miniconda.sh -b -p $CONDA_DIR \
+ && rm $HOME/miniconda.sh \
+# get gsutil
+ && mkdir -p $GCLOUD_DIR \
+ && curl -so $HOME/google-cloud-cli.tar.gz https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${GOOGLE_CLOUD_CLI_VERSION}-linux-x86_64.tar.gz \
+ && tar -xzf $HOME/google-cloud-cli.tar.gz -C $GCLOUD_DIR \
+ && .$GCLOUD_DIR/google-cloud-sdk/install.sh --usage-reporting false \
+ && rm $HOME/google-cloud-cli.tar.gz \
+# get compiled crcmod for gsutil
+ && conda install -y -c conda-forge crcmod \
+# install cellbender and its dependencies
+ && yes | pip install -e /software/cellbender/ \
+ && conda clean -yaf \
  && sudo rm -rf ~/.cache/pip
-
-# google cloud SDK and gsutil
-RUN curl -sSL https://sdk.cloud.google.com | bash
-RUN conda install -y -c conda-forge google-api-python-client oauth2client google-auth \
- google-cloud-sdk google-auth-oauthlib \
- && conda clean -ya
-
-# Add cellbender command to PATH
-ENV PATH="~/miniconda/bin:${PATH}"

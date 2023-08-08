@@ -1,9 +1,8 @@
 import torch
-import torch.nn as nn
-from typing import List
+from cellbender.remove_background.vae.base import FullyConnectedNetwork
 
 
-class Decoder(nn.Module):
+class Decoder(FullyConnectedNetwork):
     """Decoder module transforms latent representation into gene expression.
 
     The number of input units is the dimension of the latent space and the
@@ -20,6 +19,8 @@ class Decoder(nn.Module):
             expression will be embedded.
         hidden_dims: Size of each of the hidden layers.
         output_dim: Number of genes.  The size of the output of this decoder.
+        use_layernorm: True to use LayerNorm after each hidden layer is
+            computed, before the activation
         log_output: Whether or not the output is in log space.
 
     Attributes:
@@ -36,37 +37,10 @@ class Decoder(nn.Module):
 
     """
 
-    def __init__(self,
-                 input_dim: int,
-                 hidden_dims: List[int],
-                 output_dim: int,
-                 log_output: bool = False):
-        super(Decoder, self).__init__()
+    def __init__(self, input_dim: int, **kwargs):
+        super().__init__(input_dim=input_dim, **kwargs)
         self.input_dim = input_dim
-        self.log_output = log_output
-
-        # Set up the linear transformations used in fully-connected layers.
-        self.linears = nn.ModuleList([nn.Linear(input_dim, hidden_dims[0])])
-        for i in range(1, len(hidden_dims)):  # Second hidden layer onward
-            self.linears.append(nn.Linear(hidden_dims[i-1], hidden_dims[i]))
-        self.outlinear = nn.Linear(hidden_dims[-1], output_dim)
-
-        # Set up the non-linear activations.
-        self.softplus = nn.Softplus()
-        if log_output:
-            self.softmax = nn.LogSoftmax(dim=-1)
-        else:
-            self.softmax = nn.Softmax(dim=-1)
+        self.softmax = torch.nn.Softmax(dim=-1)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        # Define the forward computation to go from latent z to gene expression.
-
-        # Compute the hidden layers.
-        hidden = self.softplus(self.linears[0](z))
-        for i in range(1, len(self.linears)):  # Second hidden layer onward
-            hidden = self.softplus(self.linears[i](hidden))
-
-        # Compute the output, which is on a simplex.
-        gene_exp = self.softmax(self.outlinear(hidden))
-
-        return gene_exp
+        return self.softmax(self.network(z))

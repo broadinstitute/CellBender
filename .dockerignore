@@ -1,0 +1,10 @@
+**/.git
+.github
+examples
+docs
+wdl
+dist
+cellbender.egg-info
+.pytest_cache
+*.h5
+*.tar.gz

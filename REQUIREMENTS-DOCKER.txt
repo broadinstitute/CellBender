@@ -1,9 +1,0 @@
-anndata>=0.7
-numpy
-scipy
-tables
-pandas
-pyro-ppl>=0.3.2
-torch>=1.9.0
-scikit-learn
-matplotlib
