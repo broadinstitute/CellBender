@@ -125,7 +125,7 @@ task run_cellbender_remove_background_gpu {
         fi
 
         # use the directory as the input in the case of an MTX file
-        if [[ "~{input_file_unfiltered}" == *.mtx ]]; then
+        if [[ "~{input_file_unfiltered}" == *.mtx* ]]; then
             input=$(dirname ~{input_file_unfiltered})
         else
             input=~{input_file_unfiltered}
