@@ -58,6 +58,7 @@ task run_cellbender_remove_background_gpu {
         Int? hardware_disk_size_GB = 50
         Int? hardware_boot_disk_size_GB = 20
         Int? hardware_preemptible_tries = 2
+        Int? hardware_max_retries = 0
         Int? hardware_cpu_count = 4
         Int? hardware_memory_GB = 32
         String? hardware_gpu_type = "nvidia-tesla-t4"
@@ -186,7 +187,7 @@ task run_cellbender_remove_background_gpu {
         nvidiaDriverVersion: "${nvidia_driver_version}"
         preemptible: hardware_preemptible_tries
         checkpointFile: "ckpt.tar.gz"
-        maxRetries: 0  # can be used in case of a PAPI error code 2 failure to install GPU drivers
+        maxRetries: hardware_max_retries  # can be used in case of a PAPI error code 2 failure to install GPU drivers
     }
     meta {
         author: "Stephen Fleming"
@@ -214,6 +215,8 @@ task run_cellbender_remove_background_gpu {
             {help: "Optional file only used by CellBender developers or those trying to benchmark CellBender remove-background on simulated data. Normally, this input would not be supplied."}
         hardware_preemptible_tries :
             {help: "If nonzero, CellBender will be run on a preemptible instance, at a lower cost. If preempted, your run will not start from scratch, but will start from a checkpoint that is saved by CellBender and recovered by Cromwell.  For example, if hardware_preemptible_tries is 2, your run will attempt twice using preemptible instances, and if the job is preempted both times before completing, it will finish on a non-preemptible machine. The cost savings is significant. The potential drawback is that preemption wastes time."}
+        hardware_max_retries :
+            {help: "If nonzero when CellBender exits without success it will be retried. If one also sets the memory_retry_multiplier workflow option, and the exit happens to be detected as an out of memory error, then the retry will also increase the memory allocated to the next run. The potential benefit is that one can start CellBender with less memory, and memory will be increased only when needed. The potential drawback is that the job will be retried even if the error is not a memory error."}
         checkpoint_mins :
             {help: "Time in minutes between creation of checkpoint files. Bear in mind that Cromwell copies checkpoints to a bucket every ten minutes."}
         hardware_gpu_type :
