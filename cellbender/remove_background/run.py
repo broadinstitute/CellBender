@@ -1,5 +1,6 @@
 """Single run of remove-background, given input arguments."""
 
+import cellbender
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.data.dataset import get_dataset_obj, \
     SingleCellRNACountsDataset
@@ -21,6 +22,7 @@ from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 from cellbender.remove_background.report import run_notebook_make_html, plot_summary
+from cellbender.remove_background.checkpoint import create_workflow_hashcode
 
 import pyro
 from pyro.infer import SVI, JitTraceEnum_ELBO, JitTrace_ELBO, \
@@ -58,6 +60,22 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
         command line.
 
     """
+
+    # Set up checkpointing by creating a unique workflow hash.
+    hashcode = create_workflow_hashcode(
+        module_path=os.path.dirname(cellbender.__file__),
+        args_to_remove=(['output_file', 'fpr', 'input_checkpoint_tarball', 'debug',
+                         'posterior_batch_size', 'checkpoint_min', 'truth_file',
+                         'posterior_regularization', 'cdf_threshold_q', 'prq_alpha',
+                         'estimator', 'use_multiprocessing_estimation', 'cpu_threads',
+                         # The following settings do not affect the results, and can change when retrying,
+                         # so remove them.
+                         'epoch_elbo_fail_fraction', 'final_elbo_fail_fraction',
+                         'num_failed_attempts', 'checkpoint_filename']
+                        + (['epochs'] if args.constant_learning_rate else [])),
+        args=args)[:10]
+    args.checkpoint_filename = hashcode  # store this in args
+    logger.info(f'(Workflow hash {hashcode})')
 
     # Handle initial random state.
     pyro.util.set_rng_seed(consts.RANDOM_SEED)
@@ -771,7 +789,12 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                 sys.exit(0)
             else:
                 logger.info(f'No more attempts are specified by --num-training-tries. '
-                            f'Therefore the workflow will abort here.')
+                            f'Therefore the workflow will run once more without ELBO restrictions.')
+                args.epoch_elbo_fail_fraction = None
+                args.final_elbo_fail_fraction = None
+                run_remove_background(args)  # start from scratch
+                # non-zero exit status in order to draw user's attention to the fact that ELBO tests
+                # were never satisfied.
                 sys.exit(1)
 
         logger.info("Inference procedure complete.")
