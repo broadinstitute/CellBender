@@ -396,7 +396,7 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets, m):
     if blank_noise_offsets:
         noise_offsets = {}
     else:
-        noise_offsets = dict(zip(np.random.randint(low=0, high=(m - 1), size=10),
+        noise_offsets = dict(zip(np.random.randint(low=0, high=(m - 1), size=10, dtype=np.uint64),
                                  np.random.randint(low=1, high=5, size=10)))
     kwargs = {'a': 'b', 'c': 1}
     kwargs2 = {'a': 'method', 'c': 1}
