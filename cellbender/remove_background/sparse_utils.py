@@ -10,7 +10,7 @@ from typing import Optional, Tuple, Iterable
 @torch.no_grad()
 def dense_to_sparse_op_torch(t: torch.Tensor,
                              tensor_for_nonzeros: Optional[torch.Tensor] = None) \
-        -> Tuple[np.ndarray, ...]:
+        -> Tuple[torch.Tensor, ...]:
     """Converts dense matrix to sparse COO format tuple of numpy arrays (*indices, data)
 
     Args:
@@ -28,9 +28,9 @@ def dense_to_sparse_op_torch(t: torch.Tensor,
         tensor_for_nonzeros = t
 
     nonzero_inds_tuple = torch.nonzero(tensor_for_nonzeros, as_tuple=True)
-    nonzero_values = t[nonzero_inds_tuple].flatten()
+    nonzero_values = t[nonzero_inds_tuple].flatten().clone()
 
-    return tuple([ten.cpu().numpy() for ten in (nonzero_inds_tuple + (nonzero_values,))])
+    return nonzero_inds_tuple + (nonzero_values,)
 
 
 def log_prob_sparse_to_dense(coo: sp.coo_matrix) -> np.ndarray:
