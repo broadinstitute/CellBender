@@ -19,14 +19,14 @@ def sparse_matrix_equal(mat1, mat2):
     """Fast assertion that sparse matrices are equal"""
     if type(mat1) == sp.coo_matrix:
         return coo_equal(mat1, mat2)
-    elif type(mat1) == sp.csc_matrix:
-        return csc_equal(mat1, mat2)
+    elif (type(mat1) == sp.csc_matrix) or (type(mat1) == sp.csr_matrix):
+        return csc_or_csr_equal(mat1, mat2)
     else:
         raise ValueError(f"Error with test functions: sparse_matrix_equal() was called with a {type(mat1)}")
 
 
-def csc_equal(mat1: sp.csc_matrix,
-              mat2: sp.csc_matrix):
+def csc_or_csr_equal(mat1: sp.csc_matrix,
+                     mat2: sp.csc_matrix):
     """Fast assertion that CSC sparse matrices are equal"""
     return (mat1 != mat2).sum() == 0
 
