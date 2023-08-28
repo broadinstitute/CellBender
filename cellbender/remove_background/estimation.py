@@ -810,7 +810,7 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
     """
     array_length = len(np.unique(noise_log_prob_coo.row))
 
-    m = np.zeros(array_length)
+    m = np.zeros(array_length, dtype=np.uint64)
     out = np.zeros(array_length)
     a = 0
 
@@ -829,7 +829,7 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
         out[a:(a + len_s)] = s.detach().cpu().numpy()
         a = a + len_s
 
-    return {'m': m.astype(int), 'result': out}
+    return {'m': m, 'result': out}
 
 
 def pandas_grouped_apply(coo: sp.coo_matrix,
