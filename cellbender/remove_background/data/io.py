@@ -872,9 +872,13 @@ def get_matrix_from_dropseq_dge(filename: str) \
 
             # Create sparse version of data and add to arrays
             nonzero_col_inds = np.nonzero(counts)[0]
-            row.extend([i] * nonzero_col_inds.size)
-            col.extend(nonzero_col_inds)
-            data.extend(counts[nonzero_col_inds])
+            row.append(i * np.ones(nonzero_col_inds.size))
+            col.append(nonzero_col_inds)
+            data.append(counts[nonzero_col_inds].copy())
+
+    row = np.concatenate(row, axis=None)
+    col = np.concatenate(col, axis=None)
+    data = np.concatenate(data, axis=None)
 
     count_matrix = sp.csc_matrix((data, (row, col)),
                                  shape=(len(gene_names), len(barcodes)),
