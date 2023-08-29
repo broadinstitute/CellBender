@@ -513,17 +513,17 @@ class Posterior:
             genes_i = analyzed_gene_inds[genes_i_analyzed.cpu()]
 
             # Barcode index in the dataloader.
-            bcs_i = bcs_i_chunk + ind
+            bcs_i = (bcs_i_chunk + ind).cpu()
 
             # Obtain the real barcode index since we only use cells.
             bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i]
 
             # Translate chunk barcode inds to overall inds.
-            bcs_i = barcode_inds[bcs_i.cpu()]
+            bcs_i = barcode_inds[bcs_i]
 
             # Add sparse matrix values to lists.
-            bcs.append(bcs_i.detach().cpu())
-            genes.append(genes_i.detach().cpu())
+            bcs.append(bcs_i.detach())
+            genes.append(genes_i.detach())
             c.append(c_i.detach().cpu())
             log_probs.append(log_prob_i.detach().cpu())
             c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu())
