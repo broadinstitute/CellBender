@@ -473,6 +473,7 @@ class Posterior:
             barcode_inds = torch.tensor(self.dataset_obj.analyzed_barcode_inds.copy())
         else:
             barcode_inds = torch.tensor(self.barcode_inds.copy())
+        nonzero_noise_offset_dict = {}
 
         logger.info('Computing posterior noise count probabilities in mini-batches.')
 
@@ -526,6 +527,16 @@ class Posterior:
             genes.append(genes_i.detach())
             c.append(c_i.detach().cpu())
             log_probs.append(log_prob_i.detach().cpu())
+
+            # Update offset dict with any nonzeros.
+            nonzero_offset_inds, nonzero_noise_count_offsets = dense_to_sparse_op_torch(
+                noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().flatten(),
+            )
+            m_i = self.index_converter.get_m_indices(cell_inds=bcs_i, gene_inds=genes_i)
+
+            nonzero_noise_offset_dict.update(
+                dict(zip(m_i[nonzero_offset_inds], nonzero_noise_count_offsets))
+            )
             c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu())
 
             # Increment barcode index counter.
@@ -536,7 +547,6 @@ class Posterior:
         c = torch.cat(c)
         barcodes = torch.cat(bcs)
         genes = torch.cat(genes)
-        noise_count_offsets = torch.cat(c_offset)
 
         # Translate (barcode, gene) inds to 'm' format index.
         m = self.index_converter.get_m_indices(cell_inds=barcodes, gene_inds=genes)
@@ -546,8 +556,6 @@ class Posterior:
             (log_probs, (m, c)),
             shape=[np.prod(self.count_matrix_shape), n_counts_max],
         )
-        noise_offset_dict = dict(zip(m, noise_count_offsets))
-        nonzero_noise_offset_dict = {k: v for k, v in noise_offset_dict.items() if (v > 0)}
         self._noise_count_posterior_coo_offsets = nonzero_noise_offset_dict
         return self._noise_count_posterior_coo
 
