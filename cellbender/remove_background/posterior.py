@@ -528,31 +528,8 @@ class Posterior:
             log_probs.append(log_prob_i.detach().cpu())
             c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu())
 
-            # try:
-            #     bcs.extend(bcs_i.tolist())
-            #     genes.extend(genes_i.tolist())
-            #     c.extend(c_i.tolist())
-            #     log_probs.extend(log_prob_i.tolist())
-            #     c_offset.extend(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed]
-            #                     .detach().cpu().numpy())
-            # except TypeError as e:
-            #     # edge case of a single value
-            #     bcs.append(bcs_i)
-            #     genes.append(genes_i)
-            #     c.append(c_i)
-            #     log_probs.append(log_prob_i)
-            #     c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed]
-            #                     .detach().cpu().numpy())
-
             # Increment barcode index counter.
             ind += data.shape[0]  # Same as data_loader.batch_size
-
-        # # Convert the lists to numpy arrays.
-        # log_probs = np.array(log_probs, dtype=float)
-        # c = np.array(c, dtype=np.uint32)
-        # barcodes = np.array(bcs, dtype=np.uint64)  # uint32 is too small!
-        # genes = np.array(genes, dtype=np.uint64)  # use same as above for IndexConverter
-        # noise_count_offsets = np.array(c_offset, dtype=np.uint32)
 
         # Concatenate lists.
         log_probs = torch.cat(log_probs)
