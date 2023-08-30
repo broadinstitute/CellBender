@@ -462,6 +462,16 @@ class MultipleChoiceKnapsack(EstimationMethod):
         t0 = time.time()
 
         if use_multiple_processes:
+            if noise_log_prob_coo.row.max() > np.iinfo(np.int32).max:
+                use_multiple_processes = False
+                logger.info('Ignoring command to use multiprocessing and falling '
+                            'back to a single process due to int32 overflow in '
+                            'number of rows in the posterior')
+
+        if use_multiple_processes:
+
+            # TODO: have to implement the use of shared posterior object in memory
+            # TODO: and does this work on Windows?
 
             logger.info('Dividing dataset into chunks of genes')
             chunk_logic_list = list(
