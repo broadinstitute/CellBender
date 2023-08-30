@@ -419,8 +419,9 @@ def _mckp_chunk_estimate_noise(
     logger.info(f'Completed chunk ({i + 1} / {n_chunks})')
     print(f'Completed chunk ({i + 1} / {n_chunks})')  # because logging from a process does not work right
     if i == 0:
-        logger.info(f'    [single chunk took {(time.time() - tt):.2f} mins]')
-        print(f'    [single chunk took {(time.time() - tt):.2f} mins]')
+        logstr = f'    [single chunk took {(time.time() - tt) / 60:.2f} mins]'
+        logger.info(logstr)
+        print(logstr)
 
     # The final output is those tabulated steps added to the MAP.
     # The MAP already has the noise offsets, so they are not added to steps_csr.
@@ -455,7 +456,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
             noise_count_csr: Estimated noise count matrix.
         """
         if n_chunks is None:
-            n_chunks = max(1, self.index_converter.total_n_genes // 5000)
+            n_chunks = max(1, self.index_converter.total_n_genes // 2500)
             logger.debug(f'Running MCKP estimator in {n_chunks} chunks')
 
         t0 = time.time()

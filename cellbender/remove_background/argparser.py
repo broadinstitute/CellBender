@@ -243,13 +243,13 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            help="Output denoised count estimation method. (For "
                                 "experts: not required for normal usage, see "
                                 "documentation).")
-    subparser.add_argument("--estimator-multiple-cpu",
-                           dest="use_multiprocessing_estimation", action="store_true",
-                           default=False,
-                           help="Including the flag --estimator-multiple-cpu will "
-                                "use more than one CPU to compute the MCKP "
-                                "output count estimator in parallel (does "
-                                "nothing for other estimators).")
+    subparser.add_argument("--estimator-single-process",
+                           dest="use_multiprocessing_estimation", action="store_false",
+                           default=True,
+                           help="Including the flag --estimator-single-process will "
+                                "limit to a single CPU when computing the MCKP "
+                                "output count estimator (does not affect other "
+                                "estimators).")
     subparser.add_argument("--constant-learning-rate",
                            dest="constant_learning_rate", action="store_true",
                            default=False,
