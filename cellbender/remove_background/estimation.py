@@ -537,7 +537,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
                              noise_log_prob_coo: sp.coo_matrix,
                              n_chunks: int) \
             -> List[np.ndarray]:
-        """Return a list of logical (n_gene) arrays used to select gene chunks
+        """Return a list of logical (size m) arrays used to select gene chunks
         on which to compute the MCKP estimate. These chunks are independent.
 
         Args:
