@@ -535,7 +535,8 @@ class Posterior:
             m_i = self.index_converter.get_m_indices(cell_inds=bcs_i, gene_inds=genes_i)
 
             nonzero_noise_offset_dict.update(
-                dict(zip(m_i[nonzero_offset_inds], nonzero_noise_count_offsets))
+                dict(zip(m_i[nonzero_offset_inds.detach().cpu()].tolist(),
+                         nonzero_noise_count_offsets.detach().cpu().tolist()))
             )
             c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu())
 
