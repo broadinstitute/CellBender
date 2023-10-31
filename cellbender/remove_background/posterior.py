@@ -451,7 +451,7 @@ class Posterior:
                          f'accurate for your dataset.')
             raise RuntimeError('Zero cells found!')
 
-        dataloader_index_to_analyzed_bc_index = np.where(cell_logic)[0]
+        dataloader_index_to_analyzed_bc_index = torch.where(torch.tensor(cell_logic))[0]
         cell_data_loader = DataLoader(
             count_matrix[cell_logic],
             empty_drop_dataset=None,
@@ -468,6 +468,12 @@ class Posterior:
         log_probs = []
         ind = 0
         n_minibatches = len(cell_data_loader)
+        analyzed_gene_inds = torch.tensor(self.analyzed_gene_inds.copy())
+        if analyzed_bcs_only:
+            barcode_inds = torch.tensor(self.dataset_obj.analyzed_barcode_inds.copy())
+        else:
+            barcode_inds = torch.tensor(self.barcode_inds.copy())
+        nonzero_noise_offset_dict = {}
 
         logger.info('Computing posterior noise count probabilities in mini-batches.')
 
@@ -505,46 +511,43 @@ class Posterior:
             )
 
             # Get the original gene index from gene index in the trimmed dataset.
-            genes_i = self.analyzed_gene_inds[genes_i_analyzed]
+            genes_i = analyzed_gene_inds[genes_i_analyzed.cpu()]
 
             # Barcode index in the dataloader.
-            bcs_i = bcs_i_chunk + ind
+            bcs_i = (bcs_i_chunk + ind).cpu()
 
             # Obtain the real barcode index since we only use cells.
             bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i]
 
             # Translate chunk barcode inds to overall inds.
-            if analyzed_bcs_only:
-                bcs_i = self.dataset_obj.analyzed_barcode_inds[bcs_i]
-            else:
-                bcs_i = self.barcode_inds[bcs_i]
+            bcs_i = barcode_inds[bcs_i]
 
             # Add sparse matrix values to lists.
-            try:
-                bcs.extend(bcs_i.tolist())
-                genes.extend(genes_i.tolist())
-                c.extend(c_i.tolist())
-                log_probs.extend(log_prob_i.tolist())
-                c_offset.extend(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed]
-                                .detach().cpu().numpy())
-            except TypeError as e:
-                # edge case of a single value
-                bcs.append(bcs_i)
-                genes.append(genes_i)
-                c.append(c_i)
-                log_probs.append(log_prob_i)
-                c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed]
-                                .detach().cpu().numpy())
+            bcs.append(bcs_i.detach())
+            genes.append(genes_i.detach())
+            c.append(c_i.detach().cpu())
+            log_probs.append(log_prob_i.detach().cpu())
+
+            # Update offset dict with any nonzeros.
+            nonzero_offset_inds, nonzero_noise_count_offsets = dense_to_sparse_op_torch(
+                noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().flatten(),
+            )
+            m_i = self.index_converter.get_m_indices(cell_inds=bcs_i, gene_inds=genes_i)
+
+            nonzero_noise_offset_dict.update(
+                dict(zip(m_i[nonzero_offset_inds.detach().cpu()].tolist(),
+                         nonzero_noise_count_offsets.detach().cpu().tolist()))
+            )
+            c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu())
 
             # Increment barcode index counter.
             ind += data.shape[0]  # Same as data_loader.batch_size
 
-        # Convert the lists to numpy arrays.
-        log_probs = np.array(log_probs, dtype=float)
-        c = np.array(c, dtype=np.uint32)
-        barcodes = np.array(bcs, dtype=np.uint64)  # uint32 is too small!
-        genes = np.array(genes, dtype=np.uint64)  # use same as above for IndexConverter
-        noise_count_offsets = np.array(c_offset, dtype=np.uint32)
+        # Concatenate lists.
+        log_probs = torch.cat(log_probs)
+        c = torch.cat(c)
+        barcodes = torch.cat(bcs)
+        genes = torch.cat(genes)
 
         # Translate (barcode, gene) inds to 'm' format index.
         m = self.index_converter.get_m_indices(cell_inds=barcodes, gene_inds=genes)
@@ -554,8 +557,6 @@ class Posterior:
             (log_probs, (m, c)),
             shape=[np.prod(self.count_matrix_shape), n_counts_max],
         )
-        noise_offset_dict = dict(zip(m, noise_count_offsets))
-        nonzero_noise_offset_dict = {k: v for k, v in noise_offset_dict.items() if (v > 0)}
         self._noise_count_posterior_coo_offsets = nonzero_noise_offset_dict
         return self._noise_count_posterior_coo
 
