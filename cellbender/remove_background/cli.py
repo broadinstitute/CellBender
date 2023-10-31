@@ -207,17 +207,6 @@ def setup_and_logging(args):
                 + ' '.join(['cellbender', 'remove-background'] + sys.argv[2:]))
     logger.info("CellBender " + get_version())
 
-    # Set up checkpointing by creating a unique workflow hash.
-    hashcode = create_workflow_hashcode(
-        module_path=os.path.dirname(cellbender.__file__),
-        args_to_remove=(['output_file', 'fpr', 'input_checkpoint_tarball', 'debug',
-                         'posterior_batch_size', 'checkpoint_min', 'truth_file',
-                         'posterior_regularization', 'cdf_threshold_q', 'prq_alpha',
-                         'estimator', 'use_multiprocessing_estimation', 'cpu_threads']
-                        + (['epochs'] if args.constant_learning_rate else [])),
-        args=args)[:10]
-    args.checkpoint_filename = hashcode  # store this in args
-    logger.info(f'(Workflow hash {hashcode})')
     return args, file_handler
 
 
