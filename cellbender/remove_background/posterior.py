@@ -555,7 +555,7 @@ class Posterior:
         # Put the counts into a sparse csr_matrix.
         self._noise_count_posterior_coo = sp.coo_matrix(
             (log_probs, (m, c)),
-            shape=[np.prod(self.count_matrix_shape), n_counts_max],
+            shape=[np.prod(self.count_matrix_shape, dtype=np.uint64), n_counts_max],
         )
         self._noise_count_posterior_coo_offsets = nonzero_noise_offset_dict
         return self._noise_count_posterior_coo
@@ -1528,7 +1528,7 @@ class IndexConverter:
         if not ((gene_inds >= 0) & (gene_inds < self.total_n_genes)).all():
             raise ValueError(f'Requested gene_inds out of range: '
                              f'{gene_inds[(gene_inds < 0) | (gene_inds >= self.total_n_genes)]}')
-        return cell_inds * self.total_n_genes + gene_inds
+        return cell_inds.astype(np.uint64) * self.total_n_genes + gene_inds.astype(np.uint64)
 
     def get_ng_indices(self, m_inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Given a list of 'm' index values, return two arrays: cell index values

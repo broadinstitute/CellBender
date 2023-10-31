@@ -368,23 +368,35 @@ def test_compute_mean_target_removal_as_function(log_prob_coo, fpr, per_gene, cu
 
 
 @pytest.mark.parametrize('blank_noise_offsets', [False, True], ids=['', 'no_noise_offsets'])
-def test_save_and_load(tmpdir_factory, blank_noise_offsets):
+@pytest.mark.parametrize('m', [1000, 2200000000], ids=['small', 'big'])
+def test_save_and_load(tmpdir_factory, blank_noise_offsets, m):
     """Test that a round trip through save and load gives the same thing"""
 
     tmp_dir = tmpdir_factory.mktemp('posterior')
     filename = tmp_dir.join('posterior.h5')
 
-    m = 1000
     n = 20
+    num_nonzeros = 1000
 
     posterior = Posterior(dataset_obj=None, vi_model=None)  # blank
 
-    posterior_coo = sp.random(m, n, density=0.1, format='coo', dtype=float)
-    posterior_coo2 = sp.random(m, n, density=0.08, format='coo', dtype=float)
+    # old way that cannot handle large m
+    # posterior_coo = sp.random(m, n, density=0.1, format='coo', dtype=float)
+    # posterior_coo2 = sp.random(m, n, density=0.08, format='coo', dtype=float)
+
+    m_array = np.random.randint(low=0, high=m, size=num_nonzeros - 1, dtype=np.uint64)
+    m_array = np.concatenate([m_array, np.array(m - 1, dtype=np.uint64)], axis=None)
+    n_array = np.random.randint(low=0, high=n, size=num_nonzeros)
+    val_array = np.random.rand(num_nonzeros) * -10
+    val_array2 = np.random.rand(num_nonzeros) * -5
+
+    posterior_coo = sp.coo_matrix((val_array, (m_array, n_array)), shape=(m, n))
+    posterior_coo2 = sp.coo_matrix((val_array2, (m_array, n_array)), shape=(m, n))
+
     if blank_noise_offsets:
         noise_offsets = {}
     else:
-        noise_offsets = dict(zip(np.random.randint(low=0, high=(m - 1), size=10),
+        noise_offsets = dict(zip(np.random.randint(low=0, high=(m - 1), size=10, dtype=np.uint64),
                                  np.random.randint(low=1, high=5, size=10)))
     kwargs = {'a': 'b', 'c': 1}
     kwargs2 = {'a': 'method', 'c': 1}
@@ -396,7 +408,7 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets):
     posterior._noise_count_regularized_posterior_coo = posterior_coo2
     posterior._noise_count_regularized_posterior_kwargs = kwargs2
     posterior._latents = {'p': np.random.randn(100), 'd': np.random.randn(100)}
-    posterior.index_converter = IndexConverter(total_n_cells=1000, total_n_genes=1000)
+    posterior.index_converter = IndexConverter(total_n_cells=max(1000, m // 1000 + 1), total_n_genes=1000)
 
     # save
     posterior.save(file=str(filename))
@@ -406,9 +418,14 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets):
     posterior2.load(file=str(filename))
 
     # check
-    for attr in ['_noise_count_posterior_coo', '_noise_count_posterior_coo_offsets',
-                 '_noise_count_posterior_kwargs', '_noise_count_regularized_posterior_coo',
-                 '_noise_count_regularized_posterior_kwargs', '_latents']:
+    for attr in [
+        '_noise_count_posterior_coo',
+        '_noise_count_posterior_coo_offsets',
+        '_noise_count_posterior_kwargs',
+        '_noise_count_regularized_posterior_coo',
+        '_noise_count_regularized_posterior_kwargs',
+        '_latents'
+    ]:
         val1 = getattr(posterior, attr)
         val2 = getattr(posterior2, attr)
         print(f'{attr} ===================')

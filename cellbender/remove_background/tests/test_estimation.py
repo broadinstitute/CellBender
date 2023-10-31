@@ -81,6 +81,29 @@ def log_prob_coo(request, log_prob_coo_base) \
         raise ValueError(f'Test writing error: requested "{request.param}" log_prob_coo')
 
 
+def test_mean_massive_m(log_prob_coo):
+    """Sets up a posterior COO with massive m values that are > max(int32).
+    Will trigger github issue #252 if a bug exists, no assertion necessary.
+    """
+
+    coo = log_prob_coo['coo']
+    greater_than_max_int32 = 2200000000
+    new_row = coo.row.astype(np.int64) + greater_than_max_int32
+    new_shape = (coo.shape[0] + greater_than_max_int32, coo.shape[1])
+    new_coo = sp.coo_matrix((coo.data, (new_row, coo.col)),
+                            shape=new_shape)
+    offset_dict = {k + greater_than_max_int32: v for k, v in log_prob_coo['offsets'].items()}
+
+    # this is just a shim
+    converter = IndexConverter(total_n_cells=2,
+                               total_n_genes=new_coo.shape[0])
+
+    # set up and estimate
+    estimator = Mean(index_converter=converter)
+    noise_csr = estimator.estimate_noise(noise_log_prob_coo=new_coo,
+                                         noise_offsets=offset_dict)
+
+
 @pytest.fixture(scope='module', params=['exact', 'filtered', 'unsorted'])
 def mckp_log_prob_coo(request, log_prob_coo_base) \
         -> Dict[str, Union[sp.coo_matrix, np.ndarray, Dict[int, int]]]:

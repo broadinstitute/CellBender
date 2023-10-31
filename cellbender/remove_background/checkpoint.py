@@ -297,7 +297,7 @@ def make_tarball(files: List[str], tarball_name: str) -> bool:
         for file in files:
             # without arcname, unpacking results in unpredictable file locations!
             tar.add(file, arcname=os.path.basename(file))
-    os.rename(tarball_name + '.tmp', tarball_name)
+    os.replace(tarball_name + '.tmp', tarball_name)
     return True
 
 

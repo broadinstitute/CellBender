@@ -218,7 +218,7 @@ def _estimation_array_to_csr(index_converter,
                              data: np.ndarray,
                              m: np.ndarray,
                              noise_offsets: Optional[Dict[int, int]],
-                             dtype=np.int64) -> sp.csr_matrix:
+                             dtype=np.int) -> sp.csr_matrix:
     """Say you have point estimates for each count matrix element (data) and
     you have the 'm'-indices for each value (m). This returns a CSR matrix
     that has the shape of the count matrix, where duplicate entries have
@@ -229,7 +229,7 @@ def _estimation_array_to_csr(index_converter,
             a flat format, indexed by 'm'.
         m: Array of the same length as data, where each entry is an m-index.
         noise_offsets: Noise count offset values keyed by 'm'.
-        dtype: Data type for sparse matrix. Int32 is too small for 'm' indices.
+        dtype: Data type for values of sparse matrix
 
     Results:
         noise_csr: Noise point estimate, as a CSR sparse matrix.
@@ -238,7 +238,7 @@ def _estimation_array_to_csr(index_converter,
     row, col = index_converter.get_ng_indices(m_inds=m)
     if noise_offsets is not None:
         data = data + np.array([noise_offsets.get(i, 0) for i in m])
-    coo = sp.coo_matrix((data.astype(dtype), (row.astype(dtype), col.astype(dtype))),
+    coo = sp.coo_matrix((data.astype(dtype), (row.astype(np.uint64), col.astype(np.uint8))),
                         shape=index_converter.matrix_shape, dtype=dtype)
     coo.sum_duplicates()
     return coo.tocsr()
@@ -785,7 +785,7 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
     """
     array_length = len(np.unique(noise_log_prob_coo.row))
 
-    m = np.zeros(array_length)
+    m = np.zeros(array_length, dtype=np.uint64)
     out = np.zeros(array_length)
     a = 0
 
@@ -804,7 +804,7 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
         out[a:(a + len_s)] = s.detach().cpu().numpy()
         a = a + len_s
 
-    return {'m': m.astype(int), 'result': out}
+    return {'m': m, 'result': out}
 
 
 def pandas_grouped_apply(coo: sp.coo_matrix,
