@@ -1518,7 +1518,9 @@ class IndexConverter:
                 f'\n\ttotal_n_genes: {self.total_n_genes}'
                 f'\n\tmatrix_shape: {self.matrix_shape}')
 
-    def get_m_indices(self, cell_inds: np.ndarray, gene_inds: np.ndarray) -> np.ndarray:
+    def get_m_indices(self,
+                      cell_inds: Union[np.ndarray, torch.Tensor],
+                      gene_inds: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
         """Given arrays of cell indices and gene indices, suitable for a sparse matrix,
         convert them to 'm' index values.
         """
@@ -1528,7 +1530,12 @@ class IndexConverter:
         if not ((gene_inds >= 0) & (gene_inds < self.total_n_genes)).all():
             raise ValueError(f'Requested gene_inds out of range: '
                              f'{gene_inds[(gene_inds < 0) | (gene_inds >= self.total_n_genes)]}')
-        return cell_inds.astype(np.uint64) * self.total_n_genes + gene_inds.astype(np.uint64)
+        if type(cell_inds) == np.ndarray:
+            return cell_inds.astype(np.uint64) * self.total_n_genes + gene_inds.astype(np.uint64)
+        elif type(cell_inds) == torch.Tensor:
+            return cell_inds.type(torch.int64) * self.total_n_genes + gene_inds.type(torch.int64)
+        else:
+            raise ValueError('IndexConverter.get_m_indices received cell_inds of unkown object type')
 
     def get_ng_indices(self, m_inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Given a list of 'm' index values, return two arrays: cell index values
