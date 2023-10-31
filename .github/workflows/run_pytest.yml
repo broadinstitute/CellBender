@@ -1,4 +1,4 @@
-# Run cellbender's tests
+# Run cellbender test suite
 
 name: 'pytest'
 
@@ -7,10 +7,12 @@ on: pull_request
 jobs:
   build:
 
-    runs-on: 'ubuntu-latest'
     strategy:
       matrix:
+        os: ['ubuntu-latest', 'windows-latest']
         python-version: ['3.7']
+
+    runs-on: ${{ matrix.os }}
 
     steps:
     - name: 'Checkout repo'

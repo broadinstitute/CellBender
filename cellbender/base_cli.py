@@ -23,12 +23,7 @@ def read(rel_path):
 
 
 def get_version() -> str:
-    for line in read('__init__.py').splitlines():
-        if line.startswith('__version__'):
-            delim = '"' if '"' in line else "'"
-            return line.split(delim)[1]
-    else:
-        raise RuntimeError("Unable to find version string.")
+    return read('VERSION.txt').splitlines()[0]
 
 
 class AbstractCLI(ABC):

@@ -75,9 +75,9 @@ def test_dataloader_sorting(simulated_dataset, cuda):
             bcs_i = loader.unsort_inds(bcs_i)
 
             # Add sparse matrix values to lists.
-            barcodes.append(bcs_i)
-            genes.append(genes_i)
-            counts.append(counts_i)
+            barcodes.append(bcs_i.detach().cpu())
+            genes.append(genes_i.detach().cpu())
+            counts.append(counts_i.detach().cpu())
 
             # Increment barcode index counter.
             ind += data.shape[0]  # Same as data_loader.batch_size

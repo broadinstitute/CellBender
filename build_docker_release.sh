@@ -1,6 +1,6 @@
 #!/bin/bash
 
-tag=$(cat cellbender/__init__.py | sed -e 's?__version__ = ??' | sed "s/^'\(.*\)'$/\1/")
+tag=$(cat cellbender/VERSION.txt)
 release=v${tag}
 
 docker build \

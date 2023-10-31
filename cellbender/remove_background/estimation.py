@@ -218,7 +218,7 @@ def _estimation_array_to_csr(index_converter,
                              data: np.ndarray,
                              m: np.ndarray,
                              noise_offsets: Optional[Dict[int, int]],
-                             dtype=np.int64) -> sp.csr_matrix:
+                             dtype=np.int) -> sp.csr_matrix:
     """Say you have point estimates for each count matrix element (data) and
     you have the 'm'-indices for each value (m). This returns a CSR matrix
     that has the shape of the count matrix, where duplicate entries have
@@ -229,7 +229,7 @@ def _estimation_array_to_csr(index_converter,
             a flat format, indexed by 'm'.
         m: Array of the same length as data, where each entry is an m-index.
         noise_offsets: Noise count offset values keyed by 'm'.
-        dtype: Data type for sparse matrix. Int32 is too small for 'm' indices.
+        dtype: Data type for values of sparse matrix
 
     Results:
         noise_csr: Noise point estimate, as a CSR sparse matrix.
@@ -238,7 +238,7 @@ def _estimation_array_to_csr(index_converter,
     row, col = index_converter.get_ng_indices(m_inds=m)
     if noise_offsets is not None:
         data = data + np.array([noise_offsets.get(i, 0) for i in m])
-    coo = sp.coo_matrix((data.astype(dtype), (row.astype(dtype), col.astype(dtype))),
+    coo = sp.coo_matrix((data.astype(dtype), (row.astype(np.uint64), col.astype(np.uint8))),
                         shape=index_converter.matrix_shape, dtype=dtype)
     coo.sum_duplicates()
     return coo.tocsr()
@@ -463,11 +463,9 @@ class MultipleChoiceKnapsack(EstimationMethod):
         if use_multiple_processes:
 
             logger.info('Dividing dataset into chunks of genes')
-            chunk_logic_list = list(
-                self._gene_chunk_iterator(
-                    noise_log_prob_coo=noise_log_prob_coo,
-                    n_chunks=n_chunks,
-                )
+            chunk_logic_list = self._gene_chunk_iterator(
+                noise_log_prob_coo=noise_log_prob_coo,
+                n_chunks=n_chunks,
             )
 
             logger.info('Computing the output in asynchronous chunks in parallel...')
@@ -538,10 +536,9 @@ class MultipleChoiceKnapsack(EstimationMethod):
     def _gene_chunk_iterator(self,
                              noise_log_prob_coo: sp.coo_matrix,
                              n_chunks: int) \
-            -> Generator[np.ndarray, None, None]:
-        """Yields chunks of the posterior that can be treated as independent,
-        from the standpoint of MCKP count estimation.  That is, they contain all
-        matrix entries for any genes they include.
+            -> List[np.ndarray]:
+        """Return a list of logical (size m) arrays used to select gene chunks
+        on which to compute the MCKP estimate. These chunks are independent.
 
         Args:
             noise_log_prob_coo: Full noise log prob posterior COO
@@ -551,36 +548,14 @@ class MultipleChoiceKnapsack(EstimationMethod):
             Logical array which indexes elements of coo posterior for the chunk
         """
 
-        # TODO this generator is way too slow
-
-        # approximate number of entries in a chunk
-        # approx_chunk_entries = (noise_log_prob_coo.data.size - 1) // n_chunks
-
         # get gene annotations
         _, genes = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
         genes_series = pd.Series(genes)
 
-        # things we need to keep track of for each chunk
-        # current_chunk_genes = []
-        # entry_logic = np.zeros(noise_log_prob_coo.data.size, dtype=bool)
+        gene_chunk_arrays = np.array_split(np.arange(self.index_converter.total_n_genes), n_chunks)
 
-        # TODO eliminate for loop to speed this up
-        # take the list of genes from the coo, sort it, and divide it evenly
-        # somehow break ties for genes overlapping boundaries of divisions
-        sorted_genes = np.sort(genes)
-        gene_arrays = np.array_split(sorted_genes, n_chunks)
-        last_gene_set = {}
-        for gene_array in gene_arrays:
-            gene_set = set(gene_array)
-            gene_set = gene_set.difference(last_gene_set)  # only the new stuff
-            # if there is a second chunk, make sure there is a gene unique to it
-            if (n_chunks > 1) and (len(gene_set) == len(set(genes))):  # all genes in first set
-                # this mainly exists for tests
-                gene_set = gene_set - {gene_arrays[-1][-1]}
-            last_gene_set = gene_set
-            entry_logic = genes_series.isin(gene_set).values
-            if sum(entry_logic) > 0:
-                yield entry_logic
+        gene_logic_arrays = [genes_series.isin(x).values for x in gene_chunk_arrays]
+        return gene_logic_arrays
 
     def _chunk_estimate_noise(self,
                               noise_log_prob_coo: sp.coo_matrix,
@@ -810,7 +785,7 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
     """
     array_length = len(np.unique(noise_log_prob_coo.row))
 
-    m = np.zeros(array_length)
+    m = np.zeros(array_length, dtype=np.uint64)
     out = np.zeros(array_length)
     a = 0
 
@@ -829,7 +804,7 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
         out[a:(a + len_s)] = s.detach().cpu().numpy()
         a = a + len_s
 
-    return {'m': m.astype(int), 'result': out}
+    return {'m': m, 'result': out}
 
 
 def pandas_grouped_apply(coo: sp.coo_matrix,
