@@ -16,6 +16,7 @@ from IPython.display import display, Markdown, HTML
 import subprocess
 import datetime
 import os
+import shutil
 import logging
 from typing import Dict, Optional
 
@@ -42,26 +43,30 @@ to_html_str = lambda file, output: \
 
 
 def _run_notebook(file):
-    subprocess.run(f'cp {file} tmp.report.ipynb', shell=True)
+    shutil.copy(file, 'tmp.report.ipynb')
     subprocess.run(run_notebook_str(file='tmp.report.ipynb'), shell=True)
-    subprocess.run(f'rm tmp.report.ipynb', shell=True)
+    os.remove('tmp.report.ipynb')
     return 'tmp.report.nbconvert.ipynb'
 
 
 def _to_html(file, output) -> str:
     subprocess.run(to_html_str(file=file, output=output), shell=True)
-    subprocess.run(f'mv {file.replace(".ipynb", ".html")} {output}', shell=True)
-    subprocess.run(f'rm {file}', shell=True)
+    os.replace(file.replace(".ipynb", ".html"), output)
+    os.remove(file)
     return output
 
 
 def _postprocess_html(file: str, title: str):
-    with open(file, mode='r') as f:
-        html = f.read()
-    html = html.replace('<title>tmp.report.nbconvert</title>',
-                        f'<title>{title}</title>')
-    with open(file, mode='w') as f:
-        f.write(html)
+    try:
+        with open(file, mode='r', encoding="utf8", errors="surrogateescape") as f:
+            html = f.read()
+        html = html.replace('<title>tmp.report.nbconvert</title>',
+                            f'<title>{title}</title>')
+        with open(file, mode='w', encoding="utf8", errors="surrogateescape") as f:
+            f.write(html)
+    except:
+        logger.warning('Failed to overwrite default HTML report title. '
+                       'This is purely aesthetic and does not affect output.')
 
 
 def run_notebook_make_html(file, output) -> str:
