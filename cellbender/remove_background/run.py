@@ -43,6 +43,7 @@ from datetime import datetime
 from typing import Tuple, Optional, Dict, Union
 
 import matplotlib
+import matplotlib.backends.backend_pdf  # issue #287
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # This needs to be after matplotlib.use('Agg')
 
