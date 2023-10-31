@@ -1,1 +1,3 @@
-__version__ = '0.3.0'
+from .base_cli import get_version
+
+__version__ = get_version()
