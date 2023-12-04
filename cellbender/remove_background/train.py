@@ -249,7 +249,12 @@ def run_training(model: RemoveBackgroundPyroModel,
             if test_elbo[-1] < best_test_elbo:
                 final_best_diff = best_test_elbo - test_elbo[-1]
                 initial_best_diff = best_test_elbo - test_elbo[0]
-                if (final_best_diff / initial_best_diff) > final_elbo_fail_fraction:
+                if initial_best_diff == 0:
+                    raise ElboException(
+                        f'Training failed because there was no improvement from the initial test loss {test_elbo[0]:.2f}. '
+                        f'Final test loss was {test_elbo[-1]}'
+                    )
+                elif (final_best_diff / initial_best_diff) > final_elbo_fail_fraction:
                     raise ElboException(
                         f'Training failed because final test loss {test_elbo[-1]:.2f} '
                         f'is not sufficiently close to best test loss {best_test_elbo:.2f}, '
