@@ -950,7 +950,7 @@ def get_matrix_from_bd_rhapsody(filename: str) \
             # Parse row into gene name and count data
             parsed_line = line.split('\n')[0].split(',')
             barcodes.append(parsed_line[0])
-            counts = np.array(parsed_line[1:], dtype=np.int)
+            counts = np.array(parsed_line[1:], dtype=np.int64)
 
             # Create sparse version of data and add to arrays
             nonzero_col_inds = np.nonzero(counts)[0]
