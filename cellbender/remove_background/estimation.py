@@ -218,7 +218,7 @@ def _estimation_array_to_csr(index_converter,
                              data: np.ndarray,
                              m: np.ndarray,
                              noise_offsets: Optional[Dict[int, int]],
-                             dtype=np.int) -> sp.csr_matrix:
+                             dtype=np.int64) -> sp.csr_matrix:
     """Say you have point estimates for each count matrix element (data) and
     you have the 'm'-indices for each value (m). This returns a CSR matrix
     that has the shape of the count matrix, where duplicate entries have
