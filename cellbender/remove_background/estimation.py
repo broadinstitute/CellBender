@@ -238,7 +238,7 @@ def _estimation_array_to_csr(index_converter,
     row, col = index_converter.get_ng_indices(m_inds=m)
     if noise_offsets is not None:
         data = data + np.array([noise_offsets.get(i, 0) for i in m])
-    coo = sp.coo_matrix((data.astype(dtype), (row.astype(np.uint64), col.astype(np.uint8))),
+    coo = sp.coo_matrix((data.astype(dtype), (row.astype(np.uint64), col.astype(np.uint32))),
                         shape=index_converter.matrix_shape, dtype=dtype)
     coo.sum_duplicates()
     return coo.tocsr()
