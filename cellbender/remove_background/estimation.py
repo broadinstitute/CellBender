@@ -21,9 +21,9 @@ from typing import Callable, Union, Dict, Generator, Tuple, List, Optional
 
 logger = logging.getLogger('cellbender')
 
-N_CELLS_DATATYPE = np.uint64
-N_GENES_DATATYPE = np.uint32
-COUNT_DATATYPE = np.uint64
+N_CELLS_DATATYPE = np.int32
+N_GENES_DATATYPE = np.int32
+COUNT_DATATYPE = np.int32
 
 
 class EstimationMethod(ABC):
