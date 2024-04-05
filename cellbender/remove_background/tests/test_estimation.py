@@ -93,11 +93,12 @@ def test_mean_massive_m(log_prob_coo):
     new_shape = (coo.shape[0] + greater_than_max_int32, coo.shape[1])
     new_coo = sp.coo_matrix((coo.data, (new_row, coo.col)),
                             shape=new_shape)
+    print(new_coo)
     offset_dict = {k + greater_than_max_int32: v for k, v in log_prob_coo['offsets'].items()}
 
     # this is just a shim
-    converter = IndexConverter(total_n_cells=2,
-                               total_n_genes=new_coo.shape[0])
+    converter = IndexConverter(total_n_cells=new_coo.shape[0],
+                               total_n_genes=new_coo.shape[1])
 
     # set up and estimate
     estimator = Mean(index_converter=converter)
