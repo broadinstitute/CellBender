@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from cellbender.remove_background.estimation import Mean, MAP, \
-    SingleSample, ThresholdCDF, MultipleChoiceKnapsack, pandas_grouped_apply
+    SingleSample, ThresholdCDF, MultipleChoiceKnapsack, pandas_grouped_apply, _estimation_array_to_csr
 from cellbender.remove_background.posterior import IndexConverter, \
     dense_to_sparse_op_torch, log_prob_sparse_to_dense
 
@@ -379,3 +379,8 @@ def test_parallel_pandas_grouped_apply(fun):
 
     np.testing.assert_array_equal(reg['m'], parallel['m'])
     np.testing.assert_array_equal(reg['result'], parallel['result'])
+
+
+def test_estimation_array_to_csr():
+
+    
