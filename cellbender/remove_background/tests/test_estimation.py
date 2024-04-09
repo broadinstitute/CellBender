@@ -93,7 +93,10 @@ def test_mean_massive_m(log_prob_coo):
     new_shape = (coo.shape[0] + greater_than_max_int32, coo.shape[1])
     new_coo = sp.coo_matrix((coo.data, (new_row, coo.col)),
                             shape=new_shape)
-    print(new_coo)
+    print(f'original COO shape: {coo.shape}')
+    print(f'new COO shape: {new_coo.shape}')
+    print(f'new row minimum value: {new_coo.row.min()}')
+    print(f'new row maximum value: {new_coo.row.max()}')
     offset_dict = {k + greater_than_max_int32: v for k, v in log_prob_coo['offsets'].items()}
 
     # this is just a shim
