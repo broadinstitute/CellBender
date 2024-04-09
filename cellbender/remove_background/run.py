@@ -307,6 +307,9 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
             posterior.latents_map['p'],
         )
 
+        # Failsafe to ensure no negative counts.
+        assert np.all(denoised_counts.data >= 0), 'Negative count matrix entries in output'
+
         # TODO: correct cell probabilities so that any zero-count droplet becomes "empty"
 
         # Save denoised count matrix.
