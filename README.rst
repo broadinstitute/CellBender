@@ -36,8 +36,6 @@ The current release contains the following modules. More modules will be added i
 
 Please refer to `the documentation <https://cellbender.readthedocs.io/en/latest/>`_ for a quick start tutorial.
 
-..
-
    The release tagged v0.3.1 included a bug which caused output count matrices to be incorrect. `The bug 
    <https://github.com/broadinstitute/CellBender/blame/e2fb5977cb187cb4b12172c9f77ed556bca92cb0/cellbender/remove_background/estimation.py#L241>`_, 
    introduced in `#303 <https://github.com/broadinstitute/CellBender/pull/303>`_, compromised output denoised count matrices 
