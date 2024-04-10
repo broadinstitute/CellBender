@@ -630,7 +630,8 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
     # Attempt to load from a previously-saved checkpoint.
     ckpt = attempt_load_checkpoint(filebase=checkpoint_filename,
                                    tarball_name=args.input_checkpoint_tarball,
-                                   force_device='cuda:0' if args.use_cuda else 'cpu')
+                                   force_device='cuda:0' if args.use_cuda else 'cpu',
+                                   force_use_checkpoint=args.force_use_checkpoint)
     ckpt_loaded = ckpt['loaded']  # True if a checkpoint was loaded successfully
 
     if ckpt_loaded:
