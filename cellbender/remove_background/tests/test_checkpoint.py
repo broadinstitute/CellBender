@@ -414,6 +414,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     args.constant_learning_rate = not scheduler
     args.debug = False
     args.input_checkpoint_tarball = 'none'
+    args.force_use_checkpoint = False
 
     create_random_state_blank_slate(0)
     pyro.clear_param_store()

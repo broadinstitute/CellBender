@@ -6,9 +6,10 @@ import numpy as np
 import torch
 
 from cellbender.remove_background.estimation import Mean, MAP, \
-    SingleSample, ThresholdCDF, MultipleChoiceKnapsack, pandas_grouped_apply
+    SingleSample, ThresholdCDF, MultipleChoiceKnapsack, pandas_grouped_apply, _estimation_array_to_csr, COUNT_DATATYPE
 from cellbender.remove_background.posterior import IndexConverter, \
     dense_to_sparse_op_torch, log_prob_sparse_to_dense
+from cellbender.remove_background.tests.conftest import sparse_matrix_equal
 
 from typing import Dict, Union
 
@@ -92,11 +93,15 @@ def test_mean_massive_m(log_prob_coo):
     new_shape = (coo.shape[0] + greater_than_max_int32, coo.shape[1])
     new_coo = sp.coo_matrix((coo.data, (new_row, coo.col)),
                             shape=new_shape)
+    print(f'original COO shape: {coo.shape}')
+    print(f'new COO shape: {new_coo.shape}')
+    print(f'new row minimum value: {new_coo.row.min()}')
+    print(f'new row maximum value: {new_coo.row.max()}')
     offset_dict = {k + greater_than_max_int32: v for k, v in log_prob_coo['offsets'].items()}
 
     # this is just a shim
-    converter = IndexConverter(total_n_cells=2,
-                               total_n_genes=new_coo.shape[0])
+    converter = IndexConverter(total_n_cells=new_coo.shape[0],
+                               total_n_genes=new_coo.shape[1])
 
     # set up and estimate
     estimator = Mean(index_converter=converter)
@@ -379,3 +384,28 @@ def test_parallel_pandas_grouped_apply(fun):
 
     np.testing.assert_array_equal(reg['m'], parallel['m'])
     np.testing.assert_array_equal(reg['result'], parallel['result'])
+
+
+def test_estimation_array_to_csr():
+
+    larger_than_uint16 = 2**16 + 1
+
+    converter = IndexConverter(total_n_cells=larger_than_uint16,
+                               total_n_genes=larger_than_uint16)
+    m = larger_than_uint16 + np.arange(-10, 10)
+    data = np.random.rand(len(m)) * -10
+    noise_offsets = None
+
+    output_csr = _estimation_array_to_csr(index_converter=converter, data=data, m=m, noise_offsets=noise_offsets, dtype=COUNT_DATATYPE)
+    
+    # reimplementation here with totally permissive datatypes
+    cell_and_gene_dtype = np.float64
+    row, col = converter.get_ng_indices(m_inds=m)
+    if noise_offsets is not None:
+        data = data + np.array([noise_offsets.get(i, 0) for i in m])
+    coo = sp.coo_matrix((data.astype(COUNT_DATATYPE), (row.astype(cell_and_gene_dtype), col.astype(cell_and_gene_dtype))),
+                        shape=converter.matrix_shape, dtype=COUNT_DATATYPE)
+    coo.sum_duplicates()
+    truth_csr = coo.tocsr()
+
+    assert sparse_matrix_equal(output_csr, truth_csr)

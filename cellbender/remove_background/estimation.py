@@ -21,6 +21,10 @@ from typing import Callable, Union, Dict, Generator, Tuple, List, Optional
 
 logger = logging.getLogger('cellbender')
 
+N_CELLS_DATATYPE = np.int32
+N_GENES_DATATYPE = np.int32
+COUNT_DATATYPE = np.int32
+
 
 class EstimationMethod(ABC):
     """Base class for estimation of noise counts, given a posterior."""
@@ -52,7 +56,7 @@ class EstimationMethod(ABC):
                                  data: np.ndarray,
                                  m: np.ndarray,
                                  noise_offsets: Optional[Dict[int, int]],
-                                 dtype=np.int64) -> sp.csr_matrix:
+                                 dtype=COUNT_DATATYPE) -> sp.csr_matrix:
         """Say you have point estimates for each count matrix element (data) and
         you have the 'm'-indices for each value (m). This returns a CSR matrix
         that has the shape of the count matrix, where duplicate entries have
@@ -218,7 +222,7 @@ def _estimation_array_to_csr(index_converter,
                              data: np.ndarray,
                              m: np.ndarray,
                              noise_offsets: Optional[Dict[int, int]],
-                             dtype=np.int) -> sp.csr_matrix:
+                             dtype=COUNT_DATATYPE) -> sp.csr_matrix:
     """Say you have point estimates for each count matrix element (data) and
     you have the 'm'-indices for each value (m). This returns a CSR matrix
     that has the shape of the count matrix, where duplicate entries have
@@ -238,7 +242,7 @@ def _estimation_array_to_csr(index_converter,
     row, col = index_converter.get_ng_indices(m_inds=m)
     if noise_offsets is not None:
         data = data + np.array([noise_offsets.get(i, 0) for i in m])
-    coo = sp.coo_matrix((data.astype(dtype), (row.astype(np.uint64), col.astype(np.uint8))),
+    coo = sp.coo_matrix((data.astype(dtype), (row.astype(N_CELLS_DATATYPE), col.astype(N_GENES_DATATYPE))),
                         shape=index_converter.matrix_shape, dtype=dtype)
     coo.sum_duplicates()
     return coo.tocsr()
