@@ -18,3 +18,4 @@ dist/
 *.csv
 *.npz
 *.tar.gz
+data/

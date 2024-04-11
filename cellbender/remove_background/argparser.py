@@ -48,10 +48,19 @@ def add_subparser_args(subparsers: argparse) -> argparse:
     subparser.add_argument("--checkpoint", nargs=None, type=str,
                            dest='input_checkpoint_tarball',
                            required=False, default=consts.CHECKPOINT_FILE_NAME,
-                           help="Checkpoint tarball produced by the same version "
+                           help="Checkpoint tarball produced by v0.3.0+ "
                                 "of CellBender remove-background.  If present, "
                                 "and the workflow hashes match, training will "
                                 "restart from this checkpoint.")
+    subparser.add_argument("--force-use-checkpoint",
+                           dest='force_use_checkpoint', action="store_true",
+                           help="Normally, checkpoints can only be used if the CellBender "
+                           "code and certain input args match exactly. This flag allows you "
+                           "to bypass this requirement. An example use would be to create a new output "
+                           "using a checkpoint from a run of v0.3.1, a redacted version with "
+                           "faulty output count matrices. If you use this flag, "
+                           "ensure that the input file and the checkpoint match, because "
+                           "CellBender will not check.")
     subparser.add_argument("--expected-cells", nargs=None, type=int,
                            default=None,
                            dest="expected_cell_count",

@@ -50,3 +50,6 @@ def test_full_run(tmpdir_factory, h5_v3_file, cuda):
     adata_cell_barcodes = adata.obs_names[adata.obs['cell_probability'] > consts.CELL_PROB_CUTOFF]
     assert set(cell_barcodes) == set(adata_cell_barcodes), \
         'Cell barcodes in h5 are different from those in CSV file'
+    
+    # ensure there are no negative count matrix entries in the output
+    assert np.all(adata.X.data >= 0), 'Negative count matrix entries in output'

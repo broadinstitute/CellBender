@@ -154,7 +154,8 @@ def save_checkpoint(filebase: str,
 
 def load_checkpoint(filebase: Optional[str],
                     tarball_name: str = consts.CHECKPOINT_FILE_NAME,
-                    force_device: Optional[str] = None)\
+                    force_device: Optional[str] = None,
+                    force_use_checkpoint: bool = False)\
         -> Dict[str, Union['RemoveBackgroundPyroModel', pyro.optim.PyroOptim, DataLoader, bool]]:
     """Load checkpoint and prepare a RemoveBackgroundPyroModel and optimizer."""
 
@@ -163,6 +164,7 @@ def load_checkpoint(filebase: Optional[str],
         tarball_name=tarball_name,
         to_load=['model', 'optim', 'param_store', 'dataloader', 'args', 'random_state'],
         force_device=force_device,
+        force_use_checkpoint=force_use_checkpoint,
     )
     out.update({'loaded': True})
     logger.info(f'Loaded partially-trained checkpoint from {tarball_name}')
@@ -172,7 +174,8 @@ def load_checkpoint(filebase: Optional[str],
 def load_from_checkpoint(filebase: Optional[str],
                          tarball_name: str = consts.CHECKPOINT_FILE_NAME,
                          to_load: List[str] = ['model'],
-                         force_device: Optional[str] = None) -> Dict:
+                         force_device: Optional[str] = None,
+                         force_use_checkpoint: bool = False) -> Dict:
     """Load specific files from a checkpoint tarball."""
 
     load_kwargs = {}
@@ -192,19 +195,24 @@ def load_from_checkpoint(filebase: Optional[str],
         else:
             # no tarball loaded, so do not continue trying to load files
             raise FileNotFoundError
-
-        # See if files have a hash matching input filebase.
-        if filebase is not None:
+        
+        # If posterior is present, do not require run hash to match: will pick up 
+        # after training and run estimation from existing posterior.
+        # This smoothly allows re-runs (including for problematic v0.3.1)
+        logger.debug(f'force_use_checkpoint: {force_use_checkpoint}')
+        if force_use_checkpoint or (filebase is None):
+            filebase = (glob.glob(os.path.join(tmp_dir, '*_model.torch'))[0]
+                        .replace('_model.torch', ''))
+            logger.debug(f'Accepting any file hash, so loading {filebase}*')
+        
+        else:
+            # See if files have a hash matching input filebase.
             basename = os.path.basename(filebase)
             filebase = os.path.join(tmp_dir, basename)
             logger.debug(f'Looking for files with base name matching {filebase}*')
             if not os.path.exists(filebase + '_model.torch'):
                 logger.info('Workflow hash does not match that of checkpoint.')
-                raise ValueError('Workflow hash does not match that of checkpoint.')
-        else:
-            filebase = (glob.glob(os.path.join(tmp_dir, '*_model.torch'))[0]
-                        .replace('_model.torch', ''))
-            logger.debug(f'Accepting any file hash, so loading {filebase}*')
+                raise ValueError('Workflow hash does not match that of checkpoint.')            
 
         out = {}
 
@@ -265,9 +273,10 @@ def load_from_checkpoint(filebase: Optional[str],
     return out
 
 
-def attempt_load_checkpoint(filebase: str,
+def attempt_load_checkpoint(filebase: Optional[str],
                             tarball_name: str = consts.CHECKPOINT_FILE_NAME,
-                            force_device: Optional[str] = None)\
+                            force_device: Optional[str] = None,
+                            force_use_checkpoint: bool = False)\
         -> Dict[str, Union['RemoveBackgroundPyroModel', pyro.optim.PyroOptim, DataLoader, bool]]:
     """Load checkpoint and prepare a RemoveBackgroundPyroModel and optimizer,
     or return the inputs if loading fails."""
@@ -276,7 +285,8 @@ def attempt_load_checkpoint(filebase: str,
         logger.debug('Attempting to load checkpoint from ' + tarball_name)
         return load_checkpoint(filebase=filebase,
                                tarball_name=tarball_name,
-                               force_device=force_device)
+                               force_device=force_device,
+                               force_use_checkpoint=force_use_checkpoint)
 
     except FileNotFoundError:
         logger.debug('No tarball found')
