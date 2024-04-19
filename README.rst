@@ -1,23 +1,25 @@
 CellBender
 ==========
 
-.. image:: https://img.shields.io/github/license/broadinstitute/CellBender?color=white
+|badge1| |badge2| |badge3| |badge4| |badge5|
+
+.. |badge1| image:: https://img.shields.io/github/license/broadinstitute/CellBender?color=white
    :target: LICENSE
    :alt: License
 
-.. image:: https://readthedocs.org/projects/cellbender/badge/?version=latest
+.. |badge2| image:: https://readthedocs.org/projects/cellbender/badge/?version=latest
    :target: https://cellbender.readthedocs.io/en/latest/?badge=latest
    :alt: Documentation Status
 
-.. image:: https://img.shields.io/pypi/v/CellBender.svg
+.. |badge3| image:: https://img.shields.io/pypi/v/CellBender.svg
    :target: https://pypi.org/project/CellBender
    :alt: PyPI
 
-.. image:: https://static.pepy.tech/personalized-badge/cellbender?period=total&units=international_system&left_color=grey&right_color=blue&left_text=pypi%20downloads
+.. |badge4| image:: https://static.pepy.tech/personalized-badge/cellbender?period=total&units=international_system&left_color=grey&right_color=blue&left_text=pypi%20downloads
    :target: https://pepy.tech/project/CellBender
    :alt: Downloads
 
-.. image:: https://img.shields.io/github/stars/broadinstitute/CellBender?color=yellow&logoColor=yellow)
+.. |badge5| image:: https://img.shields.io/github/stars/broadinstitute/CellBender?color=yellow&logoColor=yellow)
    :target: https://github.com/broadinstitute/CellBender/stargazers
    :alt: Stars
 
