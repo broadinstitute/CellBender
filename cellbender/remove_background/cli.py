@@ -117,14 +117,22 @@ class CLI(AbstractCLI):
         args.fpr = fpr_list_correct_dtypes
 
         # Ensure that "exclude_features" specifies allowed features.
-        # As of CellRanger 6.0, the possible features are:
+        # As of CellRanger 7.2, the possible features are:
         #     Gene Expression
         #     Antibody Capture
         #     CRISPR Guide Capture
         #     Custom
         #     Peaks
+        #     Multiplexing Capture
+        #     VDJ
+        #     VDJ-T
+        #     VDJ-T-GD
+        #     VDJ-B
+        #     Antigen Capture
         allowed_features = ['Gene Expression', 'Antibody Capture',
-                            'CRISPR Guide Capture', 'Custom', 'Peaks']
+                            'CRISPR Guide Capture', 'Custom', 'Peaks',
+                            'Multiplexing Capture', 'VDJ', 'VDJ-T',
+                            'VDJ-T-GD', 'VDJ-B', 'Antigen Capture']
         for feature in args.exclude_features:
             if feature not in allowed_features:
                 sys.stdout.write(f"Specified '{feature}' using --exclude-feature-types, "
