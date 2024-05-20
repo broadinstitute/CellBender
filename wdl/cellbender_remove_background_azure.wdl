@@ -135,7 +135,6 @@ task run_cellbender_remove_background_gpu {
         cellbender remove-background \
             --input $input \
             --output "~{sample_name}_out.h5" \
-            #--cuda \
             ~{"--checkpoint " + checkpoint_file} \
             ~{"--expected-cells " + expected_cells} \
             ~{"--total-droplets-included " + total_droplets_included} \
@@ -191,9 +190,6 @@ task run_cellbender_remove_background_gpu {
         memory: "${hardware_memory_GB}G"
         cpu: hardware_cpu_count
         zones: "${hardware_zones}"
-        #gpuCount: 1
-        #gpuType: "${hardware_gpu_type}"
-        #nvidiaDriverVersion: "${nvidia_driver_version}"
         preemptible: hardware_preemptible_tries
         checkpointFile: "ckpt.tar.gz"
         maxRetries: hardware_max_retries  # can be used in case of a PAPI error code 2 failure to install GPU drivers
