@@ -166,10 +166,10 @@ task run_cellbender_remove_background_gpu {
         # copy outputs to google bucket if output_bucket_base_directory is supplied
         echo ~{output_bucket_directory}
         # commenting out b/c cant use gsutil in azure
-        # if [[ ! -z "~{output_bucket_directory}" ]]; then
-        #     echo "Copying output data to ~{output_bucket_directory} using gsutil cp"
-        #     gsutil -m cp ~{sample_name}_out* ~{output_bucket_directory}
-        # fi
+        if [[ ! -z "~{output_bucket_directory}" ]]; then
+            echo "Copying output data to ~{output_bucket_directory} using gsutil cp"
+            gsutil -m cp ~{sample_name}_out* ~{output_bucket_directory}
+        fi
 
     }
 
