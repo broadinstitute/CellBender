@@ -77,6 +77,7 @@ task run_cellbender_remove_background_gpu {
     command {
 
         set -e  # fail the workflow if there is an error
+        set -x
 
         # install a specific commit of cellbender from github if called for (-- developers only)
         if [[ ~{install_from_git} == true ]]; then
