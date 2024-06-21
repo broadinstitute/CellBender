@@ -57,7 +57,7 @@ task run_cellbender_remove_background_gpu {
         String? hardware_zones = "us-east1-d us-east1-c us-central1-a us-central1-c us-west1-b"
         Int? hardware_disk_size_GB = 50
         Int? hardware_boot_disk_size_GB = 20
-        Int? hardware_preemptible_tries = 2
+        Int? hardware_preemptible_tries = 0
         Int? hardware_max_retries = 0
         Int? hardware_cpu_count = 4
         Int? hardware_memory_GB = 32
