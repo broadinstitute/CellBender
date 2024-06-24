@@ -90,6 +90,7 @@ task run_cellbender_remove_background_gpu {
             git clone -q https://github.com/broadinstitute/CellBender.git /cromwell_root/CellBender
             cd /cromwell_root/CellBender
             git checkout -q ~{dev_git_hash__}
+            yes | pip install -U pip setuptools
             yes | pip install --no-cache-dir -U -e /cromwell_root/CellBender
             pip list
             cd /cromwell_root
