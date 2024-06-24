@@ -69,7 +69,7 @@ def get_cromshell_output_h5(workflow: str, grep: str = '_out.h5') -> Union[str, 
     """Use cromshell list-outputs to get the relevant file gsURL"""
 
     output = grep_from_command(['cromshell', 'list-outputs', workflow], grep=grep)
-    out = output[:-1].decode().split('\n')
+    out = output.decode().lstrip('run_cellbender_benchmark.h5_array: ').rstrip('\n').split('\n')
     if len(out) > 1:
         return out
     else:
@@ -95,18 +95,18 @@ def metadata_from_workflow_id(workflow: str) -> Tuple[str, str, Optional[str]]:
     # git hash
     output = grep_from_command(['cromshell', 'metadata', workflow],
                                grep='"git_hash":')
-    git_hash = output[17:-3].decode()
+    git_hash = output.decode().split('"git_hash": ')[-1].lstrip('"').split('"')[0]
 
     # input file
     output = grep_from_command(['cromshell', 'metadata', workflow],
                                grep='run_cellbender_benchmark.cb.input_file_unfiltered')
-    input_file = output[58:-3].decode()
+    input_file = 'gs://' + output.decode().split('gs://')[-1].split('"')[0]
 
     # truth file
     output = grep_from_command(['cromshell', 'metadata', workflow],
                                grep='run_cellbender_benchmark.cb.truth_file')
     if 'null' not in output.decode():
-        truth_file = output[47:-3].decode()
+        truth_file = 'gs://' + output.decode().split('gs://')[-1].split('"')[0]
     else:
         truth_file = None
 
