@@ -141,7 +141,9 @@ def cromshell_submit(wdl: str,
     submit_cmd = ['cromshell', 'submit',
                   tmp_wdl,
                   inputs,
+                  '--options-json',
                   options,
+                  '--dependencies-zip',
                   dependencies_zip]
 
     # submit job

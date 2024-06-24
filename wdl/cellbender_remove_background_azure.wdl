@@ -57,7 +57,7 @@ task run_cellbender_remove_background_gpu {
         String? hardware_zones = "us-east1-d us-east1-c us-central1-a us-central1-c us-west1-b"
         Int? hardware_disk_size_GB = 50
         Int? hardware_boot_disk_size_GB = 20
-        Int? hardware_preemptible_tries = 2
+        Int? hardware_preemptible_tries = 0
         Int? hardware_max_retries = 0
         Int? hardware_cpu_count = 4
         Int? hardware_memory_GB = 32
@@ -77,6 +77,7 @@ task run_cellbender_remove_background_gpu {
     command {
 
         set -e  # fail the workflow if there is an error
+        set -x
 
         # install a specific commit of cellbender from github if called for (-- developers only)
         if [[ ~{install_from_git} == true ]]; then
@@ -90,7 +91,6 @@ task run_cellbender_remove_background_gpu {
             git clone -q https://github.com/broadinstitute/CellBender.git /cromwell_root/CellBender
             cd /cromwell_root/CellBender
             git checkout -q ~{dev_git_hash__}
-            yes | pip install -U pip setuptools
             yes | pip install --no-cache-dir -U -e /cromwell_root/CellBender
             pip list
             cd /cromwell_root
@@ -136,7 +136,6 @@ task run_cellbender_remove_background_gpu {
         cellbender remove-background \
             --input $input \
             --output "~{sample_name}_out.h5" \
-            --cuda \
             ~{"--checkpoint " + checkpoint_file} \
             ~{"--expected-cells " + expected_cells} \
             ~{"--total-droplets-included " + total_droplets_included} \
@@ -165,6 +164,8 @@ task run_cellbender_remove_background_gpu {
             ~{"--truth " + truth_file}
 
         # copy outputs to google bucket if output_bucket_base_directory is supplied
+        echo ~{output_bucket_directory}
+        # commenting out b/c cant use gsutil in azure
         if [[ ! -z "~{output_bucket_directory}" ]]; then
             echo "Copying output data to ~{output_bucket_directory} using gsutil cp"
             gsutil -m cp ~{sample_name}_out* ~{output_bucket_directory}
@@ -190,9 +191,6 @@ task run_cellbender_remove_background_gpu {
         memory: "${hardware_memory_GB}G"
         cpu: hardware_cpu_count
         zones: "${hardware_zones}"
-        gpuCount: 1
-        gpuType: "${hardware_gpu_type}"
-        nvidiaDriverVersion: "${nvidia_driver_version}"
         preemptible: hardware_preemptible_tries
         checkpointFile: "ckpt.tar.gz"
         maxRetries: hardware_max_retries  # can be used in case of a PAPI error code 2 failure to install GPU drivers
