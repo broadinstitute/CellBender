@@ -185,4 +185,5 @@ The information contained in the posterior can be used to
 quantitatively answer questions such as "What is the probability that the
 number of viral gene counts in this cell is nonzero?" For help with these kinds
 of computations, please open a
-`github issue <https://github.com/broadinstitute/CellBender/issues>`_.
+`github issue <https://github.com/broadinstitute/CellBender/issues>`_, or see 
+the `semi-worked example on the github issue here <https://github.com/broadinstitute/CellBender/issues/299>`_.

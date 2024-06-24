@@ -11,33 +11,37 @@ edge case bug fixes, speedups, and small new features might bump up the last
 digit of the version number. For example, the difference between 0.2.1 and 0.2.0
 represents this kind of small change.
 
-Version 0.1.0
+
+Version 0.3.2
 -------------
 
-This was the initial release. The output count matrix was constructed via
-imputation, so that there were no explicit guarantees that CellBender would
-only subtract counts and never add.
+Small improvements aimed at reducing memory footprint, along with bug fixes.
 
-This version has been deprecated, and we do not recommend using it any longer.
+Improvements:
 
-- Imputes the "denoised" count matrix using a variational autoencoder
+- Make posterior generation more memory efficient
 
-Version 0.2.0
--------------
+New features:
 
-A significant overhaul of the model and the output generation procedure were
-undertaken to explicitly guarantee that CellBender only subtracts counts and
-never adds. The output is not constructed by imputation or smoothing, and
-CellBender intentionally tries to modify the raw data as little as possible in
-order to achieve denoising. A nominal false positive rate is approximately
-controlled at the level of the entire dataset, to prevent removal of too much
-signal.
+- WDL workflow updates to facilitate automatic retries on failure
+- Added to list of allowed feature types to match 2024.04 CellRanger definitions
 
-- Uses a variational autoencoder as a prior
+Bug fixes:
 
-- Computes the "denoised" count matrix using a MAP estimate and posterior regularization
+- Fix bug with MTX inputs for WDL
+- Fix Windows bug during posterior generation
+- Fix report generation bugs on Mac and Windows
 
-  - CellBender never adds counts
+
+(Version 0.3.1 -- redacted)
+---------------------------
+
+WARNING: redacted
+
+If you managed to obtain a copy of v0.3.1 before it was redacted, do not use it.  An integer 
+overflow bug caused outputs to be incorrect in nearly all cases. For more information, see
+`github issue 347 here <https://github.com/broadinstitute/CellBender/pull/347>`_.
+
 
 Version 0.3.0
 -------------
@@ -83,6 +87,37 @@ a workflow using Google Colab on a GPU for free.
 - A ``metrics.csv`` output file is produced for those interested in running
   hundreds of samples in automated pipelines. This file can be parsed to look for
   indications that a sample may need to be re-run.
+
+
+Version 0.2.0
+-------------
+
+A significant overhaul of the model and the output generation procedure were
+undertaken to explicitly guarantee that CellBender only subtracts counts and
+never adds. The output is not constructed by imputation or smoothing, and
+CellBender intentionally tries to modify the raw data as little as possible in
+order to achieve denoising. A nominal false positive rate is approximately
+controlled at the level of the entire dataset, to prevent removal of too much
+signal.
+
+- Uses a variational autoencoder as a prior
+
+- Computes the "denoised" count matrix using a MAP estimate and posterior regularization
+
+  - CellBender never adds counts
+
+
+Version 0.1.0
+-------------
+
+This was the initial release. The output count matrix was constructed via
+imputation, so that there were no explicit guarantees that CellBender would
+only subtract counts and never add.
+
+This version has been deprecated, and we do not recommend using it any longer.
+
+- Imputes the "denoised" count matrix using a variational autoencoder
+
 
 Human-mouse mixture benchmark
 -----------------------------
@@ -137,3 +172,14 @@ v0.3.0
 
 .. image:: /_static/remove_background/v0.3.0_hgmm.png
    :width: 750 px
+
+This represents a real improvement over the results published in the paper.
+
+v0.3.2
+~~~~~~
+
+.. image:: /_static/remove_background/v0.3.2_hgmm.png
+   :width: 750 px
+
+This appears identical to v0.3.0, as the changes were intended to fix bugs and 
+reduce memory footprint.
