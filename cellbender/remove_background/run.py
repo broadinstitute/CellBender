@@ -634,6 +634,11 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                                    force_use_checkpoint=args.force_use_checkpoint)
     ckpt_loaded = ckpt['loaded']  # True if a checkpoint was loaded successfully
 
+    # If checkpoint is not loaded set output_checkpoint_tarball to checkpoint_filename
+    # In this way the user can use checkpoint option to set a custom locatio for checkpoint file
+    if not ckpt_loaded:
+        output_checkpoint_tarball = checkpoint_filename
+
     if ckpt_loaded:
 
         model = ckpt['model']
