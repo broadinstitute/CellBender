@@ -634,11 +634,6 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
                                    force_use_checkpoint=args.force_use_checkpoint)
     ckpt_loaded = ckpt['loaded']  # True if a checkpoint was loaded successfully
 
-    # If checkpoint is not loaded set output_checkpoint_tarball to checkpoint_filename
-    # In this way the user can use checkpoint option to set a custom locatio for checkpoint file
-    if not ckpt_loaded:
-        output_checkpoint_tarball = checkpoint_filename
-
     if ckpt_loaded:
 
         model = ckpt['model']
@@ -657,6 +652,11 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
     else:
 
         logger.info('No checkpoint loaded.')
+
+        # If checkpoint is not loaded set output_checkpoint_tarball to checkpoint_filename
+        # In this way the user can use checkpoint option to set a custom locatio for checkpoint file
+        output_checkpoint_tarball = args.input_checkpoint_tarball
+        logger.info(f'New checkpoint file will be saved as {output_checkpoint_tarball}')
 
         # Get the trimmed count matrix (transformed if called for).
         count_matrix = dataset_obj.get_count_matrix()
