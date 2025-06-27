@@ -134,8 +134,8 @@ def generate_summary_plots(input_file: str,
     adata.var['n_removed'] = adata.var[f'n_{input_layer_key}'] - adata.var[f'n_{out_key}']
     adata.var['fraction_removed'] = adata.var['n_removed'] / (adata.var[f'n_{input_layer_key}'] + 1e-5)
     adata.var['fraction_remaining'] = adata.var[f'n_{out_key}'] / (adata.var[f'n_{input_layer_key}'] + 1e-5)
-    adata.var[f'n_{input_layer_key}_cells'] = np.array(adata.layers[input_layer_key][cells].sum(axis=0)).squeeze()
-    adata.var[f'n_{out_key}_cells'] = np.array(adata.layers[out_key][cells].sum(axis=0)).squeeze()
+    adata.var[f'n_{input_layer_key}_cells'] = np.array(adata.layers[input_layer_key][cells.values].sum(axis=0)).squeeze()
+    adata.var[f'n_{out_key}_cells'] = np.array(adata.layers[out_key][cells.values].sum(axis=0)).squeeze()
     adata.var['n_removed_cells'] = (adata.var[f'n_{input_layer_key}_cells']
                                     - adata.var[f'n_{out_key}_cells'])
     adata.var['fraction_removed_cells'] = (adata.var['n_removed_cells']
@@ -369,8 +369,8 @@ def plot_input_umi_curve(inputfile):
 def assess_overall_count_removal(adata, raw_full_adata, input_layer_key='raw', out_key='cellbender'):
     global warnings
     cells = (adata.obs['cell_probability'] > 0.5)
-    initial_counts = adata.layers[input_layer_key][cells].sum()
-    removed_counts = initial_counts - adata.layers[out_key][cells].sum()
+    initial_counts = adata.layers[input_layer_key][cells.values].sum()
+    removed_counts = initial_counts - adata.layers[out_key][cells.values].sum()
     removed_percentage = removed_counts / initial_counts * 100
     print(f'removed {removed_counts:.0f} counts from non-empty droplets')
     print(f'removed {removed_percentage:.2f}% of the counts in non-empty droplets')
@@ -775,7 +775,7 @@ def plot_counts_and_probs_per_cell(adata, input_layer_key='raw'):
     limit_to_features_analyzed = True
 
     if limit_to_features_analyzed:
-        var_logic = adata.var['cellbender_analyzed']
+        var_logic = adata.var['cellbender_analyzed'].values
     else:
         var_logic = ...
 
