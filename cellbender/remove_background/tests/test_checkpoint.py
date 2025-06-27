@@ -7,11 +7,12 @@ import torch
 from torch.distributions import constraints
 import pyro
 import pyro.optim as optim
+import dill
 
 import cellbender
 from cellbender.remove_background.checkpoint import make_tarball, unpack_tarball, \
     create_workflow_hashcode, save_checkpoint, load_checkpoint, \
-    save_random_state, load_random_state
+    save_random_state, load_random_state, load_param_store
 from cellbender.remove_background.vae.encoder import EncodeZ, EncodeNonZLatents, \
     CompositeEncoder
 from cellbender.remove_background.vae.decoder import Decoder
@@ -600,7 +601,7 @@ def test_optimizer_checkpoint_restart(Optim, config, tmpdir_factory):
     store.clear()
 
     # load from checkpoint
-    store.load(param_filename)
+    load_param_store(param_filename)
     optimizer = Optim(config.copy())
     optimizer.load(optim_filename)
     svi = pyro.infer.SVI(model, guide, optimizer, pyro.infer.Trace_ELBO())
