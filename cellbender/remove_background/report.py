@@ -51,7 +51,7 @@ def _run_notebook(file):
 
 def _to_html(file, output) -> str:
     subprocess.run(to_html_str(file=file, output=output), shell=True)
-    os.replace(file.replace(".ipynb", ".html"), output)
+    shutil.move(file.replace(".ipynb", ".html"), output)
     os.remove(file)
     return output
 
