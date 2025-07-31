@@ -78,7 +78,9 @@ class SingleCellRNACountsDataset:
                  force_empty_umi_prior: Optional[float] = None,
                  fraction_empties: Optional[float] = None,
                  ambient_counts_in_cells_low_limit: float = consts.AMBIENT_COUNTS_IN_CELLS_LOW_LIMIT,
-                 gene_blacklist: List[int] = []):
+                 gene_blacklist: List[int] = [],
+                 max_total_droplets_guessed: int = consts.MAX_TOTAL_DROPLETS_GUESSED,
+                 ):
         assert input_file is not None, "Attempting to load data, but no " \
                                        "input file was specified."
         self.input_file = input_file
@@ -113,7 +115,8 @@ class SingleCellRNACountsDataset:
         # Estimate priors.
         counts = np.array(self.data['matrix']
                           [:, self.analyzed_gene_logic].sum(axis=1)).squeeze()
-        self.priors = get_priors(umi_counts=counts, low_count_threshold=low_count_threshold)
+        self.priors = get_priors(umi_counts=counts, low_count_threshold=low_count_threshold,
+                                 max_total_droplets=max_total_droplets_guessed)
 
         # Overwrite heuristic priors with user inputs.
         if expected_cell_count is not None:
@@ -523,6 +526,11 @@ class SingleCellRNACountsDataset:
 def get_dataset_obj(args: argparse.Namespace) -> SingleCellRNACountsDataset:
     """Helper function that uses the argparse namespace"""
 
+    max_total_droplets_guessed = (
+        int(args.total_droplets * 1.1) if args.total_droplets
+        else consts.MAX_TOTAL_DROPLETS_GUESSED
+    )
+
     return SingleCellRNACountsDataset(
         input_file=args.input_file,
         expected_cell_count=args.expected_cell_count,
@@ -536,4 +544,5 @@ def get_dataset_obj(args: argparse.Namespace) -> SingleCellRNACountsDataset:
         low_count_threshold=args.low_count_threshold,
         ambient_counts_in_cells_low_limit=args.ambient_counts_in_cells_low_limit,
         fpr=args.fpr,
+        max_total_droplets_guessed=max_total_droplets_guessed
     )
