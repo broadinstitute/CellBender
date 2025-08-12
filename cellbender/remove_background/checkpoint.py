@@ -17,7 +17,19 @@ import pickle
 import tempfile
 import shutil
 import traceback
+import weakref
+import copy
+import gc
 
+# Try to use dill as a more robust alternative to pickle
+try:
+    import dill
+    USE_DILL = True
+    logger_dill = logging.getLogger('cellbender')
+    logger_dill.debug('Using dill for enhanced pickling support')
+except ImportError:
+    USE_DILL = False
+    dill = None
 
 logger = logging.getLogger('cellbender')
 
@@ -27,6 +39,136 @@ try:
 except ImportError:
     USE_PYRO = False
 USE_CUDA = torch.cuda.is_available()
+
+
+def _clean_weakrefs_recursive(obj, seen=None):
+    """Recursively clean weak references from an object to make it picklable."""
+    if seen is None:
+        seen = set()
+    
+    # Avoid infinite recursion
+    obj_id = id(obj)
+    if obj_id in seen:
+        return obj
+    seen.add(obj_id)
+    
+    # Handle different object types
+    if isinstance(obj, weakref.ReferenceType):
+        # Replace weak reference with None or the referenced object if still alive
+        referenced = obj()
+        return referenced if referenced is not None else None
+    
+    elif hasattr(obj, '__dict__'):
+        # Clean attributes of objects with __dict__
+        cleaned_obj = copy.copy(obj)
+        for key, value in obj.__dict__.items():
+            try:
+                cleaned_value = _clean_weakrefs_recursive(value, seen)
+                setattr(cleaned_obj, key, cleaned_value)
+            except (TypeError, AttributeError):
+                # If we can't clean it, try to remove it
+                try:
+                    delattr(cleaned_obj, key)
+                except AttributeError:
+                    pass
+        return cleaned_obj
+    
+    elif isinstance(obj, dict):
+        return {k: _clean_weakrefs_recursive(v, seen) for k, v in obj.items()}
+    
+    elif isinstance(obj, (list, tuple)):
+        return type(obj)(_clean_weakrefs_recursive(item, seen) for item in obj)
+    
+    else:
+        return obj
+
+
+def _safe_torch_save(obj, filepath, use_dill=False):
+    """Safely save a PyTorch object, handling weak references and other pickle issues."""
+    
+    # First, try the standard torch.save
+    try:
+        torch.save(obj, filepath)
+        return True, "Standard torch.save succeeded"
+    except (TypeError, pickle.PicklingError) as e:
+        if "weakref" not in str(e).lower():
+            # If it's not a weakref issue, re-raise
+            raise e
+    
+    # Try with dill if available
+    if USE_DILL and use_dill:
+        try:
+            torch.save(obj, filepath, pickle_module=dill)
+            return True, "torch.save with dill succeeded"
+        except Exception as e:
+            logger.debug(f"Dill also failed: {e}")
+    
+    # Try cleaning weak references
+    try:
+        logger.info("Attempting to clean weak references from object...")
+        cleaned_obj = _clean_weakrefs_recursive(obj)
+        torch.save(cleaned_obj, filepath)
+        return True, "torch.save succeeded after cleaning weak references"
+    except Exception as e:
+        logger.debug(f"Cleaning weak references failed: {e}")
+    
+    # Try with dill on cleaned object
+    if USE_DILL:
+        try:
+            cleaned_obj = _clean_weakrefs_recursive(obj)
+            torch.save(cleaned_obj, filepath, pickle_module=dill)
+            return True, "torch.save with dill succeeded after cleaning weak references"
+        except Exception as e:
+            logger.debug(f"Dill on cleaned object failed: {e}")
+    
+    return False, "All save attempts failed"
+
+
+def _prepare_model_for_saving(model_obj):
+    """Prepare a model object for saving by cleaning problematic references."""
+    
+    # Try to detach the model from any computational graph
+    try:
+        if hasattr(model_obj, 'eval'):
+            model_obj.eval()
+    except Exception:
+        pass
+    
+    # Force garbage collection to clean up any dangling references
+    gc.collect()
+    
+    return model_obj
+
+
+def _prepare_optimizer_for_saving(scheduler):
+    """Prepare an optimizer/scheduler for saving by extracting essential state."""
+    
+    # Try to get just the essential state information
+    try:
+        if hasattr(scheduler, 'state_dict'):
+            return {
+                'type': type(scheduler).__name__,
+                'state_dict': scheduler.state_dict(),
+                'param_groups': getattr(scheduler, 'param_groups', None)
+            }
+    except Exception:
+        pass
+    
+    # Fallback to extracting optimizer states manually
+    try:
+        if hasattr(scheduler, 'optim_objs'):
+            optim_states = {}
+            for name, optim in scheduler.optim_objs.items():
+                if hasattr(optim, 'state_dict'):
+                    optim_states[name] = {
+                        'type': type(optim).__name__,
+                        'state_dict': optim.state_dict()
+                    }
+            return {'optim_objs': optim_states}
+    except Exception:
+        pass
+    
+    return None
 
 
 def save_random_state(filebase: str) -> List[str]:
@@ -112,35 +254,118 @@ def save_checkpoint(filebase: str,
 
             file_list = save_random_state(filebase=filebase)
 
-            torch.save(model_obj, filebase + '_model.torch')
-            torch.save(scheduler, filebase + '_optim.torch')
-            scheduler.save(filebase + '_optim.pyro')  # use PyroOptim method
-            pyro.get_param_store().save(filebase + '_params.pyro')
-            file_list = file_list + [filebase + '_model.torch',
-                                     filebase + '_optim.torch',
-                                     filebase + '_optim.pyro',
-                                     filebase + '_params.pyro']
+            # Prepare and save the model using robust methods
+            logger.debug("Preparing model for saving...")
+            prepared_model = _prepare_model_for_saving(model_obj)
+            
+            success, message = _safe_torch_save(prepared_model, filebase + '_model.torch', use_dill=True)
+            if success:
+                file_list.append(filebase + '_model.torch')
+                logger.info(f"Model saved successfully: {message}")
+            else:
+                logger.warning(f"Could not save full model object: {message}")
+                logger.info('Attempting to save model state_dict instead...')
+                try:
+                    # Save model state dict and class info separately
+                    model_checkpoint = {
+                        'state_dict': model_obj.state_dict(),
+                        'model_class': type(model_obj).__name__,
+                        'model_module': type(model_obj).__module__,
+                    }
+                    # Try to save additional model attributes that might be needed
+                    if hasattr(model_obj, '__dict__'):
+                        model_attributes = {}
+                        for key, value in model_obj.__dict__.items():
+                            try:
+                                # Test if the attribute can be pickled
+                                pickle.dumps(value)
+                                model_attributes[key] = value
+                            except (TypeError, pickle.PicklingError):
+                                # Skip unpicklable attributes
+                                logger.debug(f'Skipping unpicklable model attribute: {key}')
+                                continue
+                        model_checkpoint['attributes'] = model_attributes
+                    
+                    torch.save(model_checkpoint, filebase + '_model.torch')
+                    file_list.append(filebase + '_model.torch')
+                    logger.info('Successfully saved model state_dict and attributes')
+                except Exception as e2:
+                    logger.error(f'Could not save model state_dict either: {e2}')
+                    return False
+            
+            # Prepare and save the scheduler/optimizer using robust methods
+            logger.debug("Preparing optimizer/scheduler for saving...")
+            
+            # Try the robust saving approach first
+            success, message = _safe_torch_save(scheduler, filebase + '_optim.torch', use_dill=True)
+            if success:
+                file_list.append(filebase + '_optim.torch')
+                logger.info(f"Optimizer saved successfully: {message}")
+            else:
+                logger.warning(f"Could not save full scheduler object: {message}")
+                
+                # Try to prepare a clean version of the optimizer
+                prepared_optim = _prepare_optimizer_for_saving(scheduler)
+                if prepared_optim is not None:
+                    try:
+                        torch.save(prepared_optim, filebase + '_optim.torch')
+                        file_list.append(filebase + '_optim.torch')
+                        logger.info('Successfully saved prepared optimizer state')
+                    except Exception as e:
+                        logger.warning(f'Could not save prepared optimizer: {e}')
+                else:
+                    logger.warning('Could not prepare optimizer for saving')
+            
+            # Try to use PyroOptim save method if available
+            try:
+                scheduler.save(filebase + '_optim.pyro')  # use PyroOptim method
+                file_list.append(filebase + '_optim.pyro')
+                logger.debug('Saved using PyroOptim method')
+            except (TypeError, AttributeError, pickle.PicklingError) as e:
+                logger.debug(f'Could not save using PyroOptim method: {e}')
+                # Try alternative: save state dict if available
+                try:
+                    if hasattr(scheduler, 'get_state'):
+                        state = scheduler.get_state()
+                        torch.save(state, filebase + '_optim.pyro')
+                        file_list.append(filebase + '_optim.pyro')
+                        logger.debug('Saved optimizer state via get_state')
+                except Exception as e2:
+                    logger.debug(f'Could not save optimizer state via get_state: {e2}')
+            
+            # Save param store
+            try:
+                pyro.get_param_store().save(filebase + '_params.pyro')
+                file_list.append(filebase + '_params.pyro')
+                logger.debug('Saved param store')
+            except Exception as e:
+                logger.warning(f'Could not save param store: {e}')
 
             if train_loader is not None:
-                # train_loader_file = save_dataloader_state(filebase=filebase,
-                #                                           data_loader_state=train_loader.get_state(),
-                #                                           name='train')
-                torch.save(train_loader, filebase + '_train.loaderstate')
-                file_list.append(filebase + '_train.loaderstate')
+                try:
+                    torch.save(train_loader, filebase + '_train.loaderstate')
+                    file_list.append(filebase + '_train.loaderstate')
+                except (TypeError, pickle.PicklingError) as e:
+                    logger.warning(f'Could not save train_loader: {e}')
+                    
             if test_loader is not None:
-                # test_loader_file = save_dataloader_state(filebase=filebase,
-                #                                          data_loader_state=test_loader.get_state(),
-                #                                          name='test')
-                torch.save(test_loader, filebase + '_test.loaderstate')
-                file_list.append(filebase + '_test.loaderstate')
+                try:
+                    torch.save(test_loader, filebase + '_test.loaderstate')
+                    file_list.append(filebase + '_test.loaderstate')
+                except (TypeError, pickle.PicklingError) as e:
+                    logger.warning(f'Could not save test_loader: {e}')
 
             np.save(filebase + '_args.npy', args)
             file_list.append(filebase + '_args.npy')
 
-            make_tarball(files=file_list, tarball_name=tarball_name)
-
-        logger.info(f'Saved checkpoint as {os.path.abspath(tarball_name)}')
-        return True
+            # Only create tarball if we have the essential files
+            if filebase + '_model.torch' in file_list:
+                make_tarball(files=file_list, tarball_name=tarball_name)
+                logger.info(f'Saved checkpoint as {os.path.abspath(tarball_name)}')
+                return True
+            else:
+                logger.error('Could not save essential model file, checkpoint not created')
+                return False
 
     except KeyboardInterrupt:
         logger.warning('Keyboard interrupt: will not save checkpoint')
@@ -218,36 +443,85 @@ def load_from_checkpoint(filebase: Optional[str],
 
         # Load the saved model.
         if 'model' in to_load:
-            model_obj = torch.load(filebase + '_model.torch', **load_kwargs)
-            logger.debug('Model loaded from ' + filebase + '_model.torch')
-            out.update({'model': model_obj})
+            model_data = torch.load(filebase + '_model.torch', **load_kwargs)
+            
+            # Check if this is a full model object or a state_dict checkpoint
+            if isinstance(model_data, dict) and 'state_dict' in model_data:
+                # This is a state_dict-based checkpoint
+                logger.info('Loading model from state_dict checkpoint')
+                logger.warning('State_dict checkpoint detected. You will need to reconstruct the model object manually.')
+                # Return the checkpoint data so the calling code can reconstruct the model
+                out.update({'model_checkpoint': model_data})
+            else:
+                # This is a full model object
+                model_obj = model_data
+                logger.debug('Model loaded from ' + filebase + '_model.torch')
+                out.update({'model': model_obj})
 
         # Load the saved optimizer.
         if 'optim' in to_load:
-            scheduler = torch.load(filebase + '_optim.torch', **load_kwargs)
-            scheduler.load(filebase + '_optim.pyro', **load_kwargs)  # use PyroOptim method
-            logger.debug('Optimizer loaded from ' + filebase + '_optim.*')
-            out.update({'optim': scheduler})
+            try:
+                scheduler_data = torch.load(filebase + '_optim.torch', **load_kwargs)
+                
+                # Check if this is a prepared optimizer state or full scheduler
+                if isinstance(scheduler_data, dict) and ('type' in scheduler_data or 'optim_objs' in scheduler_data):
+                    logger.info('Loading optimizer from prepared state')
+                    logger.warning('Prepared optimizer state detected. You may need to reconstruct the scheduler manually.')
+                    out.update({'optim_state': scheduler_data})
+                else:
+                    # This should be a full scheduler object
+                    scheduler = scheduler_data
+                    
+                    # Try to load additional PyroOptim state if available
+                    if os.path.exists(filebase + '_optim.pyro'):
+                        try:
+                            scheduler.load(filebase + '_optim.pyro', **load_kwargs)  # use PyroOptim method
+                            logger.debug('Loaded additional PyroOptim state')
+                        except AttributeError:
+                            # If load method doesn't exist, try loading as state
+                            try:
+                                state = torch.load(filebase + '_optim.pyro', **load_kwargs)
+                                if hasattr(scheduler, 'set_state'):
+                                    scheduler.set_state(state)
+                                    logger.debug('Set scheduler state from pyro file')
+                            except Exception:
+                                pass  # State might not be critical
+                    
+                    logger.debug('Optimizer loaded from ' + filebase + '_optim.torch')
+                    out.update({'optim': scheduler})
+                    
+            except Exception as e:
+                logger.warning(f'Could not fully load optimizer, will need to reinitialize: {e}')
+                # Note: The calling code should handle reinitializing the optimizer if needed
 
         # Load the pyro param store.
         if 'param_store' in to_load:
-            pyro.get_param_store().load(filebase + '_params.pyro', map_location=force_device)
-            logger.debug('Pyro param store loaded from ' + filebase + '_params.pyro')
+            if os.path.exists(filebase + '_params.pyro'):
+                try:
+                    pyro.get_param_store().load(filebase + '_params.pyro', map_location=force_device)
+                    logger.debug('Pyro param store loaded from ' + filebase + '_params.pyro')
+                except Exception as e:
+                    logger.warning(f'Could not load param store: {e}')
 
         # Load dataloader states.
         if 'dataloader' in to_load:
-            # load_dataloader_state(data_loader=train_loader, file=filebase + '_train.loaderstate')
-            # load_dataloader_state(data_loader=test_loader, file=filebase + '_test.loaderstate')
             train_loader = None
             test_loader = None
             if os.path.exists(filebase + '_train.loaderstate'):
-                train_loader = torch.load(filebase + '_train.loaderstate', **load_kwargs)
-                logger.debug('Train loader loaded from ' + filebase + '_train.loaderstate')
-                out.update({'train_loader': train_loader})
+                try:
+                    train_loader = torch.load(filebase + '_train.loaderstate', **load_kwargs)
+                    logger.debug('Train loader loaded from ' + filebase + '_train.loaderstate')
+                    out.update({'train_loader': train_loader})
+                except Exception as e:
+                    logger.warning(f'Could not load train_loader: {e}')
+                    
             if os.path.exists(filebase + '_test.loaderstate'):
-                test_loader = torch.load(filebase + '_test.loaderstate', **load_kwargs)
-                logger.debug('Test loader loaded from ' + filebase + '_test.loaderstate')
-                out.update({'test_loader': test_loader})
+                try:
+                    test_loader = torch.load(filebase + '_test.loaderstate', **load_kwargs)
+                    logger.debug('Test loader loaded from ' + filebase + '_test.loaderstate')
+                    out.update({'test_loader': test_loader})
+                except Exception as e:
+                    logger.warning(f'Could not load test_loader: {e}')
 
         # Load args, which can be modified in the case of auto-learning-rate updates.
         if 'args' in to_load:
@@ -256,8 +530,11 @@ def load_from_checkpoint(filebase: Optional[str],
 
         # Update states of random number generators across the board.
         if 'random_state' in to_load:
-            load_random_state(filebase=filebase)
-            logger.debug('Loaded random state globally for python, numpy, pytorch, and cuda')
+            try:
+                load_random_state(filebase=filebase)
+                logger.debug('Loaded random state globally for python, numpy, pytorch, and cuda')
+            except Exception as e:
+                logger.warning(f'Could not load random state: {e}')
 
         # Copy the posterior file outside the temp dir so it can be loaded later.
         if 'posterior' in to_load:
