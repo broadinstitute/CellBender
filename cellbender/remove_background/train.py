@@ -167,7 +167,7 @@ def run_training(model: RemoveBackgroundPyroModel,
             if args.debug:
                 # Don't spend time pinging usage stats if we will not use the log.
                 # TODO: use multiprocessing to sample these stats DURING training...
-                logger.debug('\n' + get_hardware_usage(use_cuda=model.use_cuda))
+                logger.debug('\n' + get_hardware_usage(use_cuda=(getattr(model, 'device', 'cpu') == 'cuda')))
 
             # Display duration of an epoch (use 2 to avoid initializations).
             if epoch == start_epoch + 1:
@@ -294,7 +294,15 @@ def run_training(model: RemoveBackgroundPyroModel,
                                 f'exceeds best test loss ({-best_test_elbo:.4f}) by >= '
                                 f'{100 * final_elbo_fail_fraction:.1f}%')
 
-    # Free up all the GPU memory we can once training is complete.
-    torch.cuda.empty_cache()
+    # Free up device memory once training is complete.
+    try:
+        if getattr(model, 'device', 'cpu') == 'cuda' and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif getattr(model, 'device', 'cpu') == 'mps' and hasattr(torch, 'mps'):
+            # PyTorch provides an MPS cache clear in recent versions
+            torch.mps.empty_cache()  # type: ignore[attr-defined]
+    except Exception:
+        # Best-effort cleanup; ignore if backend doesn't support empty_cache
+        pass
 
     return train_elbo, model.loss['test']['elbo']

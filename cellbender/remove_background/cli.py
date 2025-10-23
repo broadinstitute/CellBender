@@ -100,6 +100,12 @@ class CLI(AbstractCLI):
                                              "version is not 12.3+ and/or you do not have "
                                              "an MPS-enabled device on this machine.")
                 args.device = 'mps'
+                # Enable MPS fallback to CPU for unsupported operations
+                os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+                sys.stdout.write("Note: MPS fallback to CPU enabled for unsupported operations.\n"
+                                 "Some operations may run on CPU, which is slower than native MPS "
+                                 "but still faster than CPU-only mode.\n\n")
+                sys.stdout.flush()
             else:
                 if torch.backends.mps.is_available() and torch.backends.mps.is_built():
                     sys.stdout.write("Warning: a MacOS MPS-enabled GPU is "
