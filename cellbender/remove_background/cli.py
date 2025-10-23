@@ -100,8 +100,7 @@ class CLI(AbstractCLI):
                                              "version is not 12.3+ and/or you do not have "
                                              "an MPS-enabled device on this machine.")
                 args.device = 'mps'
-                # Enable MPS fallback to CPU for unsupported operations
-                os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+                # Note: PYTORCH_ENABLE_MPS_FALLBACK is set in base_cli.py before torch import
                 sys.stdout.write("Note: MPS fallback to CPU enabled for unsupported operations.\n"
                                  "Some operations may run on CPU, which is slower than native MPS "
                                  "but still faster than CPU-only mode.\n\n")
