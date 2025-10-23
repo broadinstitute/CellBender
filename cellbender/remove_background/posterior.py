@@ -189,9 +189,8 @@ class Posterior:
             self.vi_model.encoder['z'].eval()
             self.vi_model.encoder['other'].eval()
             self.vi_model.decoder.eval()
-        self.use_cuda = (torch.cuda.is_available() if vi_model is None
-                         else vi_model.use_cuda)
-        self.device = 'cuda' if self.use_cuda else 'cpu'
+        self.device = (vi_model.device if vi_model is not None
+                       else ('cuda' if torch.cuda.is_available() else 'cpu'))
         self.analyzed_gene_inds = (None if (dataset_obj is None)
                                    else dataset_obj.analyzed_gene_inds)
         self.count_matrix_shape = (None if (dataset_obj is None)
@@ -460,7 +459,7 @@ class Posterior:
             batch_size=self.posterior_batch_size,
             fraction_empties=0.,
             shuffle=False,
-            use_cuda=self.use_cuda,
+            device=self.device,
         )
 
         bcs = []  # barcode index
@@ -489,7 +488,7 @@ class Posterior:
 
             if self.debug:
                 logger.debug(f'Posterior minibatch starting with droplet {ind}')
-                logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda))
+                logger.debug('\n' + get_hardware_usage(use_cuda=(self.device == 'cuda')))
 
             # Compute noise count probabilities.
             noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
@@ -844,7 +843,7 @@ class Posterior:
             self._latents = {'z': None, 'd': None, 'p': None, 'phi_loc_scale': None, 'epsilon': None}
             return None
 
-        data_loader = self.dataset_obj.get_dataloader(use_cuda=self.use_cuda,
+        data_loader = self.dataset_obj.get_dataloader(device=self.device,
                                                       analyzed_bcs_only=True,
                                                       batch_size=500,
                                                       shuffle=False)
