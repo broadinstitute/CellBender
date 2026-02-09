@@ -4,6 +4,7 @@ import pytest
 import scipy.sparse as sp
 import numpy as np
 import torch
+import torch.nn as nn
 
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.posterior import Posterior, torch_binary_search, \
@@ -20,6 +21,25 @@ from .conftest import sparse_matrix_equal, simulated_dataset, tensors_equal
 
 USE_CUDA = torch.cuda.is_available()
 
+
+class _DummyModel(nn.Module):
+    """Minimal stand-in for RemoveBackgroundPyroModel used in device tests."""
+
+    def __init__(self, device: str = 'cpu'):
+        super().__init__()
+        self.device = device
+        self.training_device = device
+        self.encoder = {'z': nn.Identity(), 'other': nn.Identity()}
+        self.decoder = nn.Identity()
+        self.use_cuda = (device == 'cuda')
+        self.use_mps = (device == 'mps')
+
+    def eval(self):
+        super().eval()
+        for module in self.encoder.values():
+            module.eval()
+        self.decoder.eval()
+        return self
 
 # NOTE: issues caught
 # - have a test that actually creates a posterior
@@ -443,3 +463,15 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets, m):
                 np.testing.assert_equal(val1[k], val2[k])
         else:
             assert val1 == val2, err_msg
+
+
+def test_posterior_device_override_cpu_for_mps_training():
+    model = _DummyModel(device='mps')
+    posterior = Posterior(
+        dataset_obj=None,
+        vi_model=model,
+        posterior_device='cpu',
+    )
+    assert posterior.device == 'cpu'
+    assert posterior.model_training_device == 'mps'
+    assert posterior.noise_compute_device == 'cpu'

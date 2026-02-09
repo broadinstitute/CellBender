@@ -62,13 +62,27 @@ class TorchNegativeBinomialPoissonConvApprox(Distribution):
 
     @staticmethod
     def _poisson_log_prob(lam, value):
-        return (lam.log() * value) - lam - (value + 1).lgamma()
+        if lam.device.type == 'mps':
+            # MPS: lgamma NaN on non-contiguous expanded tensors
+            value_p1 = (value + 1).contiguous()
+            return (lam.log() * value) - lam - value_p1.lgamma()
+        else:
+            return (lam.log() * value) - lam - (value + 1).lgamma()
 
     @staticmethod
     def _neg_binom_log_prob(mu, alpha, value):
-        return ((value + alpha).lgamma() - (value + 1).lgamma() - alpha.lgamma()
-                + alpha * (alpha.log() - (alpha + mu).log())
-                + value * (mu.log() - (alpha + mu).log()))
+        if mu.device.type == 'mps':
+            # MPS: lgamma NaN on non-contiguous expanded tensors
+            value_alpha = (value + alpha).contiguous()
+            value_p1 = (value + 1).contiguous()
+            alpha_cont = alpha.contiguous()
+            return (value_alpha.lgamma() - value_p1.lgamma() - alpha_cont.lgamma()
+                    + alpha * (alpha.log() - (alpha + mu).log())
+                    + value * (mu.log() - (alpha + mu).log()))
+        else:
+            return ((value + alpha).lgamma() - (value + 1).lgamma() - alpha.lgamma()
+                    + alpha * (alpha.log() - (alpha + mu).log())
+                    + value * (mu.log() - (alpha + mu).log()))
 
     @staticmethod
     def _poisson_log_prob_zero(lam):
@@ -95,9 +109,17 @@ class TorchNegativeBinomialPoissonConvApprox(Distribution):
     @staticmethod
     def _neg_binom_log_prob_two(mu, alpha):
         # log_gamma(3.) = 0.6931 = ln(2.)
-        return ((2. + alpha).lgamma() - 0.69314718 - alpha.lgamma()
-                + alpha * (alpha.log() - (alpha + mu).log())
-                + 2. * (mu.log() - (alpha + mu).log()))
+        if mu.device.type == 'mps':
+            # MPS: lgamma NaN on non-contiguous expanded tensors
+            alpha_2 = (2. + alpha).contiguous()
+            alpha_cont = alpha.contiguous()
+            return (alpha_2.lgamma() - 0.69314718 - alpha_cont.lgamma()
+                    + alpha * (alpha.log() - (alpha + mu).log())
+                    + 2. * (mu.log() - (alpha + mu).log()))
+        else:
+            return ((2. + alpha).lgamma() - 0.69314718 - alpha.lgamma()
+                    + alpha * (alpha.log() - (alpha + mu).log())
+                    + 2. * (mu.log() - (alpha + mu).log()))
 
     def log_prob(self, value):
         """Empirically, it seems that a moment-matched negative binomial is a

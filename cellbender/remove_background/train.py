@@ -11,6 +11,7 @@ from cellbender.remove_background.exceptions import NanException, ElboException
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.checkpoint import save_checkpoint
 from cellbender.monitor import get_hardware_usage
+from cellbender.remove_background.device_utils import empty_cache_if_available
 
 import numpy as np
 
@@ -34,14 +35,14 @@ def is_scheduler(optim):
 
 
 def train_epoch(svi: SVI,
-                train_loader: DataLoader) -> float:
+                train_loader: DataLoader,
+                device: str = 'cpu') -> float:
     """Train a single epoch.
 
     Args:
         svi: The pyro object used for stochastic variational inference.
         train_loader: Dataloader for training set.
-        epoch: Epoch used by the learning rate scheduler.  Use None for normal
-            schedule.  Can co-opt the schedule by setting a value (cool off).
+        device: Device being used for training ('cpu', 'cuda', 'mps')
 
     Returns:
         total_epoch_loss_train: The loss for this epoch of training, which is
@@ -52,27 +53,60 @@ def train_epoch(svi: SVI,
     # Initialize loss accumulator and training set size.
     epoch_loss = 0.
     normalizer_train = 0.
+    batch_losses = []
 
     # Train an epoch by going through each mini-batch.
     for x_cell_batch in train_loader:
 
-        # Perform gradient descent step and accumulate loss.
-        epoch_loss += svi.step(x_cell_batch)
+        # MPS: skip batches affected by intermittent gradient/shape bugs
+        try:
+            batch_loss = svi.step(x_cell_batch)
+        except RuntimeError as e:
+            error_msg = str(e)
+            mps_bug_indicators = [
+                'IndexPutBackward0',
+                'shape mismatch',
+                'cannot be broadcast',
+                'expected shape compatible',
+                'The size of tensor a',  # Forward pass tensor size mismatch
+                'must match the size of tensor b',
+            ]
+            if device == 'mps' and any(indicator in error_msg for indicator in mps_bug_indicators):
+                logger.warning(f"MPS bug detected, skipping batch: {error_msg[:100]}")
+                continue
+            else:
+                raise
+
+        if np.isnan(batch_loss) or np.isinf(batch_loss):
+            if device == 'mps':
+                logger.warning("NaN/Inf detected in batch loss. Skipping batch.")
+                continue
+            else:
+                raise NanException(param='batch_loss', message=f'NaN/Inf in batch loss: {batch_loss}')
+
+        epoch_loss += batch_loss
         normalizer_train += x_cell_batch.size(0)
+        batch_losses.append(batch_loss / x_cell_batch.size(0))
 
         if is_scheduler(svi.optim):
             svi.optim.step()  # for LR scheduling
+
+    # Check for empty epoch (all batches skipped)
+    if normalizer_train == 0:
+        raise NanException(param='epoch', message='All batches in epoch had NaN/Inf loss')
 
     # Return epoch loss.
     total_epoch_loss_train = epoch_loss / normalizer_train
 
     if is_scheduler(svi.optim):
         try:
-            logger.debug(f'Learning rate scheduler: LR = '
-                         f'{list(svi.optim.optim_objs.values())[0].get_last_lr()[0]:.2e}')
-        except IndexError:
+            lr = list(svi.optim.optim_objs.values())[0].get_last_lr()[0]
+            logger.debug(f'Learning rate scheduler: LR = {lr:.2e}')
+            if device == 'mps' and len(batch_losses) > 1:
+                loss_std = np.std(batch_losses)
+                logger.debug(f'Batch loss std: {loss_std:.2f} (high variance may indicate instability)')
+        except (IndexError, AttributeError):
             logger.debug('No values being optimized')
-            pass
 
     return total_epoch_loss_train
 
@@ -167,14 +201,27 @@ def run_training(model: RemoveBackgroundPyroModel,
             if args.debug:
                 # Don't spend time pinging usage stats if we will not use the log.
                 # TODO: use multiprocessing to sample these stats DURING training...
-                logger.debug('\n' + get_hardware_usage(use_cuda=model.use_cuda))
+                logger.debug('\n' + get_hardware_usage(use_cuda=model.use_cuda, device=model.device))
 
             # Display duration of an epoch (use 2 to avoid initializations).
             if epoch == start_epoch + 1:
                 t = time.time()
 
             model.train()
-            total_epoch_loss_train = train_epoch(svi, train_loader)
+            device = str(model.device) if hasattr(model, 'device') else 'cpu'
+            total_epoch_loss_train = train_epoch(svi, train_loader, device=device)
+
+            if device == 'mps' and len(train_elbo) >= 3:
+                recent_mean = np.mean(train_elbo[-3:])
+                # Detect significant spike (loss increased by > 50% of improvement so far)
+                if len(train_elbo) >= 5:
+                    initial_elbo = train_elbo[0]
+                    improvement = recent_mean - initial_elbo
+                    current_spike = -total_epoch_loss_train - recent_mean
+                    # If we're going backwards significantly
+                    if improvement > 0 and current_spike < -0.3 * improvement:
+                        logger.warning(f"MPS: Loss spike detected (ELBO dropped {-current_spike:.2f}). "
+                                       f"This may indicate gradient instability.")
 
             train_elbo.append(-total_epoch_loss_train)
             try:
@@ -295,6 +342,6 @@ def run_training(model: RemoveBackgroundPyroModel,
                                 f'{100 * final_elbo_fail_fraction:.1f}%')
 
     # Free up all the GPU memory we can once training is complete.
-    torch.cuda.empty_cache()
+    empty_cache_if_available(model.device)
 
     return train_elbo, model.loss['test']['elbo']
