@@ -2,6 +2,7 @@
 
 from cellbender.remove_background import consts
 from cellbender.remove_background.data.dataprep import DataLoader
+from cellbender.remove_background.device_utils import is_mps_available
 
 import torch
 import numpy as np
@@ -26,6 +27,29 @@ try:
     import pyro
 except ImportError:
     USE_PYRO = False
+
+# PyTorch 2.6+ requires safe_globals for loading checkpoints with constraint objects.
+# Add common constraint classes that may be in CellBender checkpoints.
+try:
+    import torch.distributions.constraints as constraints
+    _safe_globals = [
+        constraints._Real,
+        constraints._Positive,
+        constraints._Simplex,
+        constraints._GreaterThan,
+        constraints._GreaterThanEq,
+        constraints._LessThan,
+        constraints._Interval,
+        constraints._HalfOpenInterval,
+        constraints._IntegerInterval,
+        constraints._IntegerGreaterThan,
+    ]
+    # Only add if add_safe_globals exists (PyTorch 2.4+)
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        torch.serialization.add_safe_globals(_safe_globals)
+except (ImportError, AttributeError):
+    pass  # Older PyTorch versions don't need this
+
 USE_CUDA = torch.cuda.is_available()
 
 
@@ -112,26 +136,53 @@ def save_checkpoint(filebase: str,
 
             file_list = save_random_state(filebase=filebase)
 
-            torch.save(model_obj, filebase + '_model.torch')
-            torch.save(scheduler, filebase + '_optim.torch')
-            scheduler.save(filebase + '_optim.pyro')  # use PyroOptim method
+            # Save model state dict with a format marker so the loader can
+            # distinguish new-format (state_dict) from old-format (full object).
+            torch.save({'format': 'state_dict',
+                        'state_dict': model_obj.state_dict()},
+                       filebase + '_model.torch')
+
+            # Save optimizer state via Pyro's native method (saves get_state() dict).
+            # We wrap it with a format marker so the loader knows to call set_state().
+            scheduler.save(filebase + '_optim.torch')
             pyro.get_param_store().save(filebase + '_params.pyro')
             file_list = file_list + [filebase + '_model.torch',
                                      filebase + '_optim.torch',
-                                     filebase + '_optim.pyro',
                                      filebase + '_params.pyro']
 
+            # Helper function to save with pickle error fallback
+            def safe_torch_save(obj, filename, obj_name):
+                try:
+                    torch.save(obj, filename)
+                    return True
+                except (TypeError, pickle.PicklingError) as e:
+                    if 'weakref' in str(e) or "cannot pickle" in str(e):
+                        logger.warning(f'Direct {obj_name} save failed due to pickle error, saving state instead')
+                        # For DataLoader, save enough state to reconstruct
+                        if hasattr(obj, 'get_state'):
+                            state = obj.get_state()
+                        elif hasattr(obj, '__dict__'):
+                            # Filter out non-pickleable items
+                            state = {}
+                            for k, v in obj.__dict__.items():
+                                try:
+                                    pickle.dumps(v)
+                                    state[k] = v
+                                except (TypeError, pickle.PicklingError):
+                                    logger.debug(f'Skipping non-pickleable attribute: {k}')
+                        else:
+                            state = {'_save_format': 'empty'}
+                        state['_save_format'] = 'state'
+                        torch.save(state, filename)
+                        return True
+                    else:
+                        raise
+
             if train_loader is not None:
-                # train_loader_file = save_dataloader_state(filebase=filebase,
-                #                                           data_loader_state=train_loader.get_state(),
-                #                                           name='train')
-                torch.save(train_loader, filebase + '_train.loaderstate')
+                safe_torch_save(train_loader, filebase + '_train.loaderstate', 'train_loader')
                 file_list.append(filebase + '_train.loaderstate')
             if test_loader is not None:
-                # test_loader_file = save_dataloader_state(filebase=filebase,
-                #                                          data_loader_state=test_loader.get_state(),
-                #                                          name='test')
-                torch.save(test_loader, filebase + '_test.loaderstate')
+                safe_torch_save(test_loader, filebase + '_test.loaderstate', 'test_loader')
                 file_list.append(filebase + '_test.loaderstate')
 
             np.save(filebase + '_args.npy', args)
@@ -178,9 +229,21 @@ def load_from_checkpoint(filebase: Optional[str],
                          force_use_checkpoint: bool = False) -> Dict:
     """Load specific files from a checkpoint tarball."""
 
-    load_kwargs = {}
+    # PyTorch 2.6+ changed default weights_only to True. Set to False for
+    # backward compatibility with checkpoints that contain constraint objects.
+    load_kwargs = {'weights_only': False}
     if force_device is not None:
-        load_kwargs.update({'map_location': torch.device(force_device)})
+        # Map device appropriately - MPS may need special handling
+        device = force_device
+        if device.startswith('cuda') and not torch.cuda.is_available():
+            # CUDA requested but not available, try MPS
+            if is_mps_available():
+                device = 'mps'
+                logger.info(f'Mapping checkpoint device from {force_device} to mps')
+            else:
+                device = 'cpu'
+                logger.info(f'Mapping checkpoint device from {force_device} to cpu')
+        load_kwargs.update({'map_location': torch.device(device)})
 
     # Work in a temporary directory.
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -217,22 +280,58 @@ def load_from_checkpoint(filebase: Optional[str],
         out = {}
 
         # Load the saved model.
+        # Handles two formats:
+        #   - New format: dict with {'format': 'state_dict', 'state_dict': ...}
+        #   - Old format: full model object (pre-PyTorch 2.x checkpoints)
         if 'model' in to_load:
-            model_obj = torch.load(filebase + '_model.torch', **load_kwargs)
-            logger.debug('Model loaded from ' + filebase + '_model.torch')
-            out.update({'model': model_obj})
+            model_data = torch.load(filebase + '_model.torch', **load_kwargs)
+            if isinstance(model_data, dict) and model_data.get('format') == 'state_dict':
+                # New format: store the state_dict; caller must construct model
+                # and call model.load_state_dict()
+                out.update({'model': model_data['state_dict'],
+                            'model_format': 'state_dict'})
+                logger.debug('Model state_dict loaded from ' + filebase + '_model.torch')
+            elif isinstance(model_data, dict) and 'format' not in model_data:
+                # Bare state_dict saved without the format marker (transitional)
+                out.update({'model': model_data,
+                            'model_format': 'state_dict'})
+                logger.debug('Model state_dict (bare) loaded from ' + filebase + '_model.torch')
+            else:
+                # Old format: full model object
+                out.update({'model': model_data,
+                            'model_format': 'full_object'})
+                logger.debug('Model object loaded from ' + filebase + '_model.torch')
 
         # Load the saved optimizer.
+        # Handles two formats:
+        #   - New format: state dict saved by scheduler.save() — needs set_state()
+        #   - Old format: full scheduler object + separate _optim.pyro file
         if 'optim' in to_load:
-            scheduler = torch.load(filebase + '_optim.torch', **load_kwargs)
-            scheduler.load(filebase + '_optim.pyro', **load_kwargs)  # use PyroOptim method
-            logger.debug('Optimizer loaded from ' + filebase + '_optim.*')
-            out.update({'optim': scheduler})
+            optim_data = torch.load(filebase + '_optim.torch', **load_kwargs)
+            if isinstance(optim_data, dict):
+                # New format: optimizer state dict — caller must construct
+                # scheduler and call scheduler.set_state()
+                out.update({'optim': optim_data,
+                            'optim_format': 'state_dict'})
+                logger.debug('Optimizer state loaded from ' + filebase + '_optim.torch')
+            else:
+                # Old format: full scheduler object, may have additional _optim.pyro
+                if hasattr(optim_data, 'load'):
+                    pyro_file = filebase + '_optim.pyro'
+                    if os.path.exists(pyro_file):
+                        optim_data.load(pyro_file, **load_kwargs)
+                out.update({'optim': optim_data,
+                            'optim_format': 'full_object'})
+                logger.debug('Optimizer object loaded from ' + filebase + '_optim.*')
 
         # Load the pyro param store.
+        # NOTE: Pyro's param_store.load() uses torch.load() internally without weights_only=False,
+        # which fails on PyTorch 2.6+. We load manually and set params instead.
         if 'param_store' in to_load:
-            pyro.get_param_store().load(filebase + '_params.pyro', map_location=force_device)
-            logger.debug('Pyro param store loaded from ' + filebase + '_params.pyro')
+            params_file = filebase + '_params.pyro'
+            param_state = torch.load(params_file, map_location=force_device, weights_only=False)
+            pyro.get_param_store().set_state(param_state)
+            logger.debug('Pyro param store loaded from ' + params_file)
 
         # Load dataloader states.
         if 'dataloader' in to_load:

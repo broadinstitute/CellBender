@@ -57,15 +57,113 @@ def _to_html(file, output) -> str:
 
 
 def _postprocess_html(file: str, title: str):
+    """Post-process HTML report to improve formatting and styling."""
+    import re
+
+    # Custom CSS for cleaner report viewing
+    custom_css = '''
+<style>
+/* CellBender Report Styling */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+    line-height: 1.6;
+    background-color: #fafafa;
+}
+.jp-Cell {
+    margin-bottom: 20px;
+}
+.jp-RenderedMarkdown {
+    padding: 10px 0;
+}
+.jp-RenderedMarkdown h1, .jp-RenderedMarkdown h2 {
+    border-bottom: 2px solid #2196F3;
+    padding-bottom: 10px;
+    margin-top: 30px;
+}
+.jp-OutputArea-output img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 20px auto;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+/* Style stderr/warnings subtly */
+.output_stderr, .jp-OutputArea-output[data-mime-type="application/vnd.jupyter.stderr"] {
+    font-size: 0.75em;
+    color: #999;
+    background-color: #f8f8f8;
+    border-left: 2px solid #ddd;
+    padding: 4px 8px;
+    margin: 4px 0;
+    max-height: 60px;
+    overflow-y: auto;
+}
+/* Hide warning pre blocks entirely */
+.cellbender-warning-hidden {
+    display: none;
+}
+/* Tables styling */
+table {
+    border-collapse: collapse;
+    margin: 20px auto;
+    background: white;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+table th, table td {
+    border: 1px solid #ddd;
+    padding: 8px 12px;
+    text-align: left;
+}
+table th {
+    background-color: #2196F3;
+    color: white;
+}
+table tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+/* Print-friendly */
+@media print {
+    body { max-width: none; }
+    .output_stderr, .cellbender-warning-hidden { display: none; }
+}
+</style>
+'''
     try:
         with open(file, mode='r', encoding="utf8", errors="surrogateescape") as f:
             html = f.read()
+
+        # Update title
         html = html.replace('<title>tmp.report.nbconvert</title>',
                             f'<title>{title}</title>')
+
+        # Inject custom CSS after opening head tag
+        html = html.replace('<head>', f'<head>\n{custom_css}')
+
+        # Remove or hide warning blocks containing FutureWarning, DeprecationWarning, UserWarning
+        # Match <pre> blocks containing warnings and add hidden class
+        warning_patterns = [
+            r'FutureWarning',
+            r'DeprecationWarning',
+            r'UserWarning',
+            r'RuntimeWarning',
+        ]
+        for pattern in warning_patterns:
+            # Find <pre> tags containing warnings and wrap/hide them
+            html = re.sub(
+                rf'(<pre[^>]*>)([^<]*{pattern}[^<]*)(</pre>)',
+                r'<pre class="cellbender-warning-hidden">\2</pre>',
+                html,
+                flags=re.IGNORECASE | re.DOTALL
+            )
+
         with open(file, mode='w', encoding="utf8", errors="surrogateescape") as f:
             f.write(html)
-    except:
-        logger.warning('Failed to overwrite default HTML report title. '
+    except Exception as e:
+        logger.warning(f'Failed to post-process HTML report: {e}. '
                        'This is purely aesthetic and does not affect output.')
 
 
@@ -130,7 +228,8 @@ def generate_summary_plots(input_file: str,
     print(adata)
 
     # bit of pre-compute
-    cells = (adata.obs['cell_probability'] > consts.CELL_PROB_CUTOFF)
+    # .values converts pandas Series to numpy array for scipy sparse matrix compatibility
+    cells = (adata.obs['cell_probability'] > consts.CELL_PROB_CUTOFF).values
     adata.var['n_removed'] = adata.var[f'n_{input_layer_key}'] - adata.var[f'n_{out_key}']
     adata.var['fraction_removed'] = adata.var['n_removed'] / (adata.var[f'n_{input_layer_key}'] + 1e-5)
     adata.var['fraction_remaining'] = adata.var[f'n_{out_key}'] / (adata.var[f'n_{input_layer_key}'] + 1e-5)
@@ -368,7 +467,8 @@ def plot_input_umi_curve(inputfile):
 
 def assess_overall_count_removal(adata, raw_full_adata, input_layer_key='raw', out_key='cellbender'):
     global warnings
-    cells = (adata.obs['cell_probability'] > 0.5)
+    # .values converts pandas Series to numpy array for scipy sparse matrix compatibility
+    cells = (adata.obs['cell_probability'] > 0.5).values
     initial_counts = adata.layers[input_layer_key][cells].sum()
     removed_counts = initial_counts - adata.layers[out_key][cells].sum()
     removed_percentage = removed_counts / initial_counts * 100
@@ -775,7 +875,7 @@ def plot_counts_and_probs_per_cell(adata, input_layer_key='raw'):
     limit_to_features_analyzed = True
 
     if limit_to_features_analyzed:
-        var_logic = adata.var['cellbender_analyzed']
+        var_logic = adata.var['cellbender_analyzed'].values  # Convert to numpy for sparse indexing
     else:
         var_logic = ...
 
@@ -789,7 +889,7 @@ def plot_counts_and_probs_per_cell(adata, input_layer_key='raw'):
                                       if limit_to_features_analyzed else ''))
     plt.legend(loc='lower left', title='UMI counts')
     plt.gca().twinx()
-    plt.plot(adata.obs['cell_probability'][order].values, '.', ms=2, alpha=0.2, color='red')
+    plt.plot(adata.obs['cell_probability'].iloc[order].values, '.', ms=2, alpha=0.2, color='red')
     plt.ylabel('Inferred cell probability', color='red')
     plt.yticks([0, 0.25, 0.5, 0.75, 1.0], color='red')
     plt.ylim([-0.05, 1.05])
@@ -811,7 +911,8 @@ def plot_validation_plots(adata, input_layer_key='raw',
                      'for inferred cell-containing droplets, and exclude the '
                      'empty droplets.'))
 
-    cells = (adata.obs['cell_probability'] > 0.5)
+    # .values converts pandas Series to numpy array for scipy sparse matrix compatibility
+    cells = (adata.obs['cell_probability'] > 0.5).values
 
     # counts per barcode
     plt.figure(figsize=(9, 4))
@@ -842,7 +943,8 @@ def plot_validation_plots(adata, input_layer_key='raw',
     plt.tight_layout()
     plt.show()
 
-    cells = (adata.obs['cell_probability'] >= 0.5)
+    # .values converts pandas Series to numpy array for scipy sparse matrix compatibility
+    cells = (adata.obs['cell_probability'] >= 0.5).values
 
     if extended:
 
@@ -1015,10 +1117,11 @@ def plot_gene_expression_pca(adata, key='cellbender_embedding',
     adata.obsm['X_pca'] = pca_2d(adata.obsm[key]).detach().numpy()
 
     # plot z PCA colored by latent size
-    sizeorder = np.argsort(adata.obs['cell_size'][cells])
+    cell_size_vals = adata.obs['cell_size'][cells].values  # Convert to numpy to avoid FutureWarning
+    sizeorder = np.argsort(cell_size_vals)
     s = plt.scatter(x=adata.obsm['X_pca'][:, 0][cells][sizeorder],
                     y=adata.obsm['X_pca'][:, 1][cells][sizeorder],
-                    c=np.log10(adata.obs['cell_size'][cells][sizeorder]),
+                    c=np.log10(cell_size_vals[sizeorder]),
                     s=2,
                     cmap='brg',
                     alpha=0.5)
@@ -1183,7 +1286,7 @@ def cluster_and_compare_expression_to_truth(adata, embedding_key='cellbender_emb
         if k == 0:
             continue
         # get chi from mean cell expression in that cluster
-        summmed_expression = np.array(adata.layers['cellbender'][adata.obs['cluster'] == k, :]
+        summmed_expression = np.array(adata.layers['cellbender'][(adata.obs['cluster'] == k).values, :]
                                       .sum(axis=0)).squeeze()
         learned_chi[k, :] = summmed_expression / summmed_expression.sum()
 

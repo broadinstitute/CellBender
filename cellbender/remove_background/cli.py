@@ -3,10 +3,16 @@
 import torch
 import cellbender
 
+# Apply Pyro MPS patch before importing other modules (for Apple Silicon support)
+from cellbender.remove_background import pyro_mps_patch  # noqa: F401
+
 from cellbender.base_cli import AbstractCLI, get_version
 from cellbender.remove_background.checkpoint import create_workflow_hashcode
 from cellbender.remove_background.run import run_remove_background
 from cellbender.remove_background.posterior import Posterior
+from cellbender.remove_background.device_utils import (
+    get_device_for_args, is_gpu_available, is_mps_available
+)
 
 import logging
 import os
@@ -75,15 +81,38 @@ class CLI(AbstractCLI):
         assert args.training_fraction > 0, "training-fraction must be > 0"
         assert args.training_fraction <= 1., "training-fraction must be <= 1"
 
-        # If cuda is requested, make sure it is available.
-        if args.use_cuda:
-            assert torch.cuda.is_available(), "Trying to use CUDA, " \
-                                              "but CUDA is not available."
+        # Handle use_mps attribute for backward compatibility
+        if not hasattr(args, 'use_mps'):
+            args.use_mps = False
+
+        # Validate GPU flags
+        if args.use_cuda and args.use_mps:
+            raise AssertionError(
+                "Cannot use both --cuda and --mps flags. Choose one."
+            )
+
+        if args.use_mps:
+            if not is_mps_available():
+                raise AssertionError(
+                    "Trying to use MPS acceleration (--mps flag), but MPS "
+                    "(Apple Silicon) is not available."
+                )
+            sys.stdout.write("Using MPS (Apple Silicon GPU).\n")
+            sys.stdout.write("WARNING: MPS support is experimental. If you encounter NaN errors,\n")
+            sys.stdout.write("         try running without --mps flag (uses CPU instead).\n\n")
+            sys.stdout.flush()
+        elif args.use_cuda:
+            if not torch.cuda.is_available():
+                raise AssertionError(
+                    "Trying to use CUDA acceleration (--cuda flag), but CUDA "
+                    "is not available. Use --mps for Apple Silicon GPU."
+                )
         else:
-            # Warn the user in case the CUDA flag was forgotten by mistake.
-            if torch.cuda.is_available():
-                sys.stdout.write("Warning: CUDA is available, but will not be "
-                                 "used.  Use the flag --cuda for "
+            # Warn the user in case the GPU flag was forgotten by mistake.
+            if is_gpu_available():
+                gpu_type = "CUDA (--cuda)" if torch.cuda.is_available() else "MPS (--mps)"
+                sys.stdout.write(f"Warning: GPU is available, but will not be "
+                                 f"used.  Use the flag {gpu_type} for "
                                  "significant speed-ups.\n\n")
                 sys.stdout.flush()  # Write immediately
 
