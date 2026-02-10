@@ -286,15 +286,21 @@ def write_posterior_coo_to_h5(
                             obj=list(noise_count_offsets.values()), filters=filters)
 
         # posterior COO
-        group = f.create_group("/", "posterior_noise_log_prob", "Posterior noise count log probabilities")
-        f.create_carray(group, "log_prob", obj=posterior_coo.data, filters=filters)
-        f.create_carray(group, "m_index", obj=posterior_coo.row, filters=filters)
-        f.create_carray(group, "noise_count", obj=posterior_coo.col, filters=filters)
-        f.create_carray(group, "shape", atom=tables.Int64Atom(),
-                        obj=np.array(posterior_coo.shape, dtype=np.int64), filters=filters)
+        # Check for empty posterior (can happen when model doesn't converge properly)
+        if posterior_coo.nnz > 0:
+            group = f.create_group("/", "posterior_noise_log_prob", "Posterior noise count log probabilities")
+            f.create_carray(group, "log_prob", obj=posterior_coo.data, filters=filters)
+            f.create_carray(group, "m_index", obj=posterior_coo.row, filters=filters)
+            f.create_carray(group, "noise_count", obj=posterior_coo.col, filters=filters)
+            f.create_carray(group, "shape", atom=tables.Int64Atom(),
+                            obj=np.array(posterior_coo.shape, dtype=np.int64), filters=filters)
+        else:
+            logger.warning("Posterior is empty, skipping save. "
+                          "This may indicate the model did not converge properly.")
 
         # regularized posterior COO
-        if regularized_posterior_coo is not None:
+        # Skip if None or empty (can happen when model doesn't converge properly)
+        if regularized_posterior_coo is not None and regularized_posterior_coo.nnz > 0:
             group = f.create_group("/", "regularized_posterior_noise_log_prob",
                                    "Regularized posterior noise count log probabilities")
             f.create_carray(group, "log_prob", obj=regularized_posterior_coo.data, filters=filters)
@@ -302,6 +308,9 @@ def write_posterior_coo_to_h5(
             f.create_carray(group, "noise_count", obj=regularized_posterior_coo.col, filters=filters)
             f.create_carray(group, "shape", atom=tables.Int64Atom(),
                             obj=np.array(regularized_posterior_coo.shape, dtype=np.int64), filters=filters)
+        elif regularized_posterior_coo is not None:
+            logger.warning("Regularized posterior is empty, skipping save. "
+                          "This may indicate the model did not converge properly.")
 
         # latents
         droplet_latent_group = f.create_group("/", "droplet_latents_map", "Latent variables per droplet")

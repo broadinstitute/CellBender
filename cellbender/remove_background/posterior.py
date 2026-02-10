@@ -1,15 +1,26 @@
 """Posterior generation and regularization."""
 
-import pyro
-import pyro.distributions as dist
-import torch
+import os
+import logging
+import argparse
+import tempfile
+import shutil
+import time
+from typing import Tuple, List, Dict, Optional, Union, Callable
+from abc import ABC, abstractmethod
+
 import numpy as np
 import scipy.sparse as sp
 import pandas as pd
+import torch
+import pyro
+import pyro.distributions as dist
 
 import cellbender.remove_background.consts as consts
-from cellbender.remove_background.model import calculate_mu, calculate_lambda
 from cellbender.monitor import get_hardware_usage
+from cellbender.remove_background.device_utils import (
+    get_device_for_args, empty_cache_if_available
+)
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataset import get_dataset_obj
 from cellbender.remove_background.estimation import EstimationMethod, \
@@ -21,14 +32,23 @@ from cellbender.remove_background.checkpoint import load_from_checkpoint, \
 from cellbender.remove_background.data.io import \
     write_posterior_coo_to_h5, load_posterior_from_h5
 
-from typing import Tuple, List, Dict, Optional, Union, Callable
-from abc import ABC, abstractmethod
-import logging
-import argparse
-import tempfile
-import shutil
-import time
-import os
+# Enable MPS debugging via environment variable: export CELLBENDER_MPS_DEBUG=1
+MPS_DEBUG = os.environ.get('CELLBENDER_MPS_DEBUG', '0') == '1'
+
+# Minimum floor for numerical stability in posterior log_prob computations.
+# MPS can produce underflow/NaN with smaller values; this ensures log(rate)
+# remains finite even for very small rates.
+_EPS_FLOOR = 1e-6
+
+
+def _safe_clamp(tensor: torch.Tensor) -> torch.Tensor:
+    """Replace NaN/Inf with _EPS_FLOOR and clamp to minimum _EPS_FLOOR.
+
+    MPS can produce NaN or underflow in sampled values; this ensures
+    downstream log_prob computations remain finite.
+    """
+    out = torch.nan_to_num(tensor, nan=_EPS_FLOOR, posinf=1e6, neginf=_EPS_FLOOR)
+    return torch.clamp(out, min=_EPS_FLOOR)
 
 
 logger = logging.getLogger('cellbender')
@@ -56,22 +76,25 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
 
     """
 
-    assert os.path.exists(args.input_checkpoint_tarball), \
-        f'Checkpoint file {args.input_checkpoint_tarball} does not exist, ' \
-        f'presumably because saving of the checkpoint file has been manually ' \
-        f'interrupted. load_or_compute_posterior_and_save() will not work ' \
-        f'properly without an existing checkpoint file. Please re-run and ' \
-        f'allow a checkpoint file to be saved.'
+    checkpoint_exists = os.path.exists(args.input_checkpoint_tarball)
+    if not checkpoint_exists:
+        logger.warning(
+            f'Checkpoint file {args.input_checkpoint_tarball} does not exist. '
+            f'Will compute posterior without checkpoint (no resume capability).'
+        )
 
     def _do_posterior_regularization(posterior: Posterior):
 
         # Optional posterior regularization.
+        # Determine device for regularization
+        reg_device = posterior.device if posterior.device != 'cpu' else 'cpu'
+
         if args.posterior_regularization is not None:
             if args.posterior_regularization == 'PRq':
                 posterior.regularize_posterior(
                     regularization=PRq,
                     alpha=args.prq_alpha,
-                    device='cuda',
+                    device=reg_device,
                 )
             elif args.posterior_regularization == 'PRmu':
                 posterior.regularize_posterior(
@@ -79,7 +102,7 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
                     raw_count_matrix=dataset_obj.data['matrix'],
                     fpr=args.fpr[0],
                     per_gene=False,
-                    device='cuda',
+                    device=reg_device,
                 )
             elif args.posterior_regularization == 'PRmu_gene':
                 posterior.regularize_posterior(
@@ -87,7 +110,7 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
                     raw_count_matrix=dataset_obj.data['matrix'],
                     fpr=args.fpr[0],
                     per_gene=True,
-                    device='cuda',
+                    device=reg_device,
                 )
             else:
                 raise ValueError(f'Got a posterior regularization input of '
@@ -103,19 +126,29 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         vi_model=inferred_model,
         posterior_batch_size=args.posterior_batch_size,
         debug=args.debug,
+        posterior_device=getattr(args, 'posterior_device_resolved', None),
+        posterior_debug=getattr(args, 'posterior_debug', False),
     )
-    try:
-        ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
-                                              filebase=args.checkpoint_filename,
-                                              to_load=['posterior'],
-                                              force_use_checkpoint=args.force_use_checkpoint)
-    except ValueError:
-        # input checkpoint tarball was not a match for this workflow
-        # but we still may have saved a new tarball
-        ckpt_posterior = load_from_checkpoint(tarball_name=consts.CHECKPOINT_FILE_NAME,
-                                              filebase=args.checkpoint_filename,
-                                              to_load=['posterior'],
-                                              force_use_checkpoint=args.force_use_checkpoint)
+    # Try to load posterior from checkpoint
+    ckpt_posterior = None
+    ckpt_tarball = args.input_checkpoint_tarball
+
+    if os.path.exists(ckpt_tarball):
+        try:
+            ckpt_posterior = load_from_checkpoint(tarball_name=ckpt_tarball,
+                                                  filebase=args.checkpoint_filename,
+                                                  to_load=['posterior'],
+                                                  force_use_checkpoint=args.force_use_checkpoint)
+            if ckpt_posterior.get('loaded', False):
+                logger.info(f'Loaded checkpoint from {ckpt_tarball}')
+        except (ValueError, FileNotFoundError) as e:
+            logger.info(f'Could not load checkpoint from {ckpt_tarball}: {e}')
+            ckpt_posterior = None
+
+    if ckpt_posterior is None:
+        logger.info(f'Checkpoint file {ckpt_tarball} does not exist or could not be loaded. '
+                    'Will compute posterior without checkpoint (no resume capability).')
+        ckpt_posterior = {'loaded': False}
     if os.path.exists(ckpt_posterior.get('posterior_file', 'does_not_exist')):
         # Load posterior if it was saved in the checkpoint.
         posterior.load(file=ckpt_posterior['posterior_file'])
@@ -132,15 +165,23 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         saved = posterior.save(file=posterior_file)
         success = False
         if saved:
+            # Try to find an existing checkpoint tarball to add posterior to
+            save_tarball = args.input_checkpoint_tarball
+            if not os.path.exists(save_tarball):
+                # Try hashed checkpoint
+                hashed_tarball = f'ckpt_{args.checkpoint_filename}.tar.gz'
+                if os.path.exists(hashed_tarball):
+                    save_tarball = hashed_tarball
+
             with tempfile.TemporaryDirectory() as tmp_dir:
-                unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball,
+                unpacked = unpack_tarball(tarball_name=save_tarball,
                                           directory=tmp_dir)
                 if unpacked:
                     shutil.copy(posterior_file, os.path.join(tmp_dir, 'posterior.h5'))
                     all_ckpt_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
                                       if os.path.isfile(os.path.join(tmp_dir, f))]
                     success = make_tarball(files=all_ckpt_files,
-                                           tarball_name=args.input_checkpoint_tarball)
+                                           tarball_name=save_tarball)
         if success:
             logger.info('Added posterior object to checkpoint file.')
         else:
@@ -181,32 +222,56 @@ class Posterior:
                  posterior_batch_size: int = 128,
                  counts_dtype: np.dtype = np.uint32,
                  float_threshold: Optional[float] = 0.5,
-                 debug: bool = False):
+                 debug: bool = False,
+                 posterior_device: Optional[str] = None,
+                 posterior_debug: bool = False):
         self.dataset_obj = dataset_obj
         self.vi_model = vi_model
+        self.posterior_batch_size = posterior_batch_size
+        self.dtype = counts_dtype
+        self.debug = debug
+        self.posterior_debug = posterior_debug
+        self.float_threshold = float_threshold
+        self._noise_count_posterior_coo = None
+        self._noise_count_posterior_kwargs = None
+        self._noise_count_posterior_coo_offsets = None
+        self._noise_count_regularized_posterior_coo = None
+        self._noise_count_regularized_posterior_kwargs = None
+
+        model_device = None
+        training_device = None
+
         if vi_model is not None:
             self.vi_model.eval()
             self.vi_model.encoder['z'].eval()
             self.vi_model.encoder['other'].eval()
             self.vi_model.decoder.eval()
-        self.use_cuda = (torch.cuda.is_available() if vi_model is None
-                         else vi_model.use_cuda)
-        self.device = 'cuda' if self.use_cuda else 'cpu'
+            model_device = str(vi_model.device)
+            training_device = getattr(vi_model, 'training_device', model_device)
+        else:
+            model_device = get_device_for_args(False, False)
+            training_device = model_device
+
+        resolved_device = posterior_device or model_device
+        self.model_training_device = training_device
+        self.device = resolved_device
+        self.use_cuda = (resolved_device == 'cuda')
+        self.use_mps = (resolved_device == 'mps')
+        # Noise log-prob calculations always fall back to CPU when training used MPS.
+        if self.model_training_device == 'mps':
+            self.noise_compute_device = 'cpu'
+        else:
+            self.noise_compute_device = self.device
+        if self.noise_compute_device != self.device:
+            logger.info(f"Noise log probabilities will be evaluated on {self.noise_compute_device.upper()} "
+                        f"while posterior sampling runs on {self.device.upper()}.")
+
         self.analyzed_gene_inds = (None if (dataset_obj is None)
                                    else dataset_obj.analyzed_gene_inds)
         self.count_matrix_shape = (None if (dataset_obj is None)
                                    else dataset_obj.data['matrix'].shape)
         self.barcode_inds = (None if (dataset_obj is None)
                              else np.arange(0, self.count_matrix_shape[0]))
-        self.dtype = counts_dtype
-        self.debug = debug
-        self.float_threshold = float_threshold
-        self.posterior_batch_size = posterior_batch_size
-        self._noise_count_posterior_coo = None
-        self._noise_count_posterior_kwargs = None
-        self._noise_count_posterior_coo_offsets = None
-        self._noise_count_regularized_posterior_coo = None
-        self._noise_count_regularized_posterior_kwargs = None
         self._latents = None
         if dataset_obj is not None:
             self.index_converter = IndexConverter(
@@ -432,7 +497,7 @@ class Posterior:
         logger.debug('Computing full posterior noise counts')
 
         # Compute posterior in mini-batches.
-        torch.cuda.empty_cache()
+        empty_cache_if_available(self.device)
 
         # Dataloader for cells only.
         analyzed_bcs_only = True
@@ -461,6 +526,7 @@ class Posterior:
             fraction_empties=0.,
             shuffle=False,
             use_cuda=self.use_cuda,
+            use_mps=self.use_mps,
         )
 
         bcs = []  # barcode index
@@ -489,7 +555,7 @@ class Posterior:
 
             if self.debug:
                 logger.debug(f'Posterior minibatch starting with droplet {ind}')
-                logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda))
+                logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda, device=self.device))
 
             # Compute noise count probabilities.
             noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
@@ -507,10 +573,17 @@ class Posterior:
             tensor_for_nonzeros.data[noise_log_pdf_NGC < smallest_log_probability] = 0.
 
             # Convert to sparse format using "m" indices.
-            bcs_i_chunk, genes_i_analyzed, c_i, log_prob_i = dense_to_sparse_op_torch(
-                noise_log_pdf_NGC,
-                tensor_for_nonzeros=tensor_for_nonzeros,
-            )
+            # MPS: torch.nonzero returns wrong indices on MPS; use CPU.
+            if str(noise_log_pdf_NGC.device).startswith('mps'):
+                bcs_i_chunk, genes_i_analyzed, c_i, log_prob_i = dense_to_sparse_op_torch(
+                    noise_log_pdf_NGC.cpu(),
+                    tensor_for_nonzeros=tensor_for_nonzeros.cpu(),
+                )
+            else:
+                bcs_i_chunk, genes_i_analyzed, c_i, log_prob_i = dense_to_sparse_op_torch(
+                    noise_log_pdf_NGC,
+                    tensor_for_nonzeros=tensor_for_nonzeros,
+                )
 
             # Get the original gene index from gene index in the trimmed dataset.
             genes_i = analyzed_gene_inds[genes_i_analyzed.cpu()]
@@ -584,12 +657,17 @@ class Posterior:
         mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
 
         # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
+        mu_safe = _safe_clamp(mu_sample)
+        lambda_safe = _safe_clamp(lambda_sample * lambda_multiplier)
+        alpha_safe = _safe_clamp(alpha_sample)
+
         log_prob_noise_counts_NGC, poisson_values_low_NG = self._log_prob_noise_count_tensor(
             data=data,
-            mu_est=mu_sample + 1e-30,
-            lambda_est=lambda_sample * lambda_multiplier + 1e-30,
-            alpha_est=alpha_sample + 1e-30,
-            debug=self.debug,
+            mu_est=mu_safe,
+            lambda_est=lambda_safe,
+            alpha_est=alpha_safe,
+            debug=(self.debug or self.posterior_debug),
+            compute_device=self.noise_compute_device,
         )
 
         # Use those probabilities to draw a sample of c_{ng}^{noise}
@@ -675,16 +753,27 @@ class Posterior:
         for s in range(1, n_samples + 1):
 
             # Sample all the latent variables in the model and get mu, lambda, alpha.
-            mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
+            # Enable debug logging for first sample if MPS_DEBUG or posterior_debug is set
+            debug_sampling = (self.posterior_debug or (MPS_DEBUG and (s == 1)))
+            mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(
+                data,
+                y_map=y_map,
+                debug_mps=debug_sampling,
+            )
 
             # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
+            mu_safe = _safe_clamp(mu_sample)
+            lambda_safe = _safe_clamp(lambda_sample * lambda_multiplier)
+            alpha_safe = _safe_clamp(alpha_sample)
+
             log_prob_noise_counts_NGC, noise_count_offset_NG = self._log_prob_noise_count_tensor(
                 data=data,
-                mu_est=mu_sample + 1e-30,
-                lambda_est=lambda_sample * lambda_multiplier + 1e-30,
-                alpha_est=alpha_sample + 1e-30,
+                mu_est=mu_safe,
+                lambda_est=lambda_safe,
+                alpha_est=alpha_safe,
                 n_counts_max=n_counts_max,
-                debug=self.debug,
+                debug=(self.debug or self.posterior_debug),
+                compute_device=self.noise_compute_device,
             )
 
             # Normalize the PDFs (not necessarily normalized over the count range).
@@ -699,9 +788,10 @@ class Posterior:
                 noise_log_pdf_NGC = log_prob_noise_counts_NGC
             else:
                 # This is a (normalized) running sum over samples in log-probability space.
+                # Use float32 for MPS compatibility
                 noise_log_pdf_NGC = torch.logaddexp(
-                    noise_log_pdf_NGC + torch.log(torch.tensor(1. - 1. / s).to(device=data.device)),
-                    log_prob_noise_counts_NGC + torch.log(torch.tensor(1. / s).to(device=data.device)),
+                    noise_log_pdf_NGC + torch.log(torch.tensor(1. - 1. / s, dtype=torch.float32).to(device=data.device)),
+                    log_prob_noise_counts_NGC + torch.log(torch.tensor(1. / s, dtype=torch.float32).to(device=data.device)),
                 )
 
         return noise_log_pdf_NGC, noise_count_offset_NG
@@ -709,7 +799,8 @@ class Posterior:
     @torch.no_grad()
     def sample_mu_lambda_alpha(self,
                                data: torch.Tensor,
-                               y_map: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                               y_map: bool,
+                               debug_mps: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Calculate a single sample estimate of mu, the mean of the true count
         matrix, and lambda, the rate parameter of the Poisson background counts.
 
@@ -719,6 +810,7 @@ class Posterior:
                 sampling y. This prevents some samples from having a cell and
                 some not, which can lead to strange summary statistics over
                 many samples.
+            debug_mps: If True, log detailed info about sampled values for MPS debugging.
 
         Returns:
             mu_sample: Dense tensor sample of Negative Binomial mean for true
@@ -734,6 +826,33 @@ class Posterior:
 
         # Use pyro poutine to trace the guide and sample parameter values.
         guide_trace = pyro.poutine.trace(self.vi_model.guide).get_trace(x=data)
+
+        debug_enabled = debug_mps or self.posterior_debug
+
+        # Debug: log sampled values from guide trace
+        if debug_enabled:
+
+            def _log_stats(name: str, tensor: Optional[torch.Tensor]):
+                if tensor is None:
+                    return
+                flat = tensor.detach().float().flatten()
+                if flat.numel() == 0:
+                    return
+                logger.info(
+                    f"[Posterior Debug] {name}: mean={flat.mean():.4f}, "
+                    f"std={flat.std(unbiased=False):.4f}, min={flat.min():.4f}, max={flat.max():.4f}"
+                )
+
+            epsilon = guide_trace.nodes.get('epsilon', {}).get('value')
+            d_empty = guide_trace.nodes.get('d_empty', {}).get('value')
+            z_latent = guide_trace.nodes.get('z', {}).get('value')
+            _log_stats('epsilon', epsilon)
+            _log_stats('d_empty', d_empty)
+            _log_stats('z_latent', z_latent)
+
+            if 'chi_ambient' in pyro.get_param_store().keys():
+                chi_ambient = pyro.param('chi_ambient')
+                _log_stats('chi_ambient', chi_ambient)
 
         # If using MAP for y (so that you never get samples of cell and no cell),
         # then intervene and replace a sampled y with the MAP
@@ -752,6 +871,17 @@ class Posterior:
         lambda_sample = replayed_model_output['lam']
         alpha_sample = replayed_model_output['alpha']
 
+        # Debug: log computed lambda, mu, alpha
+        if debug_enabled:
+            lam_total = lambda_sample.sum(dim=-1)  # Per-cell total lambda
+            mu_total = mu_sample.sum(dim=-1)  # Per-cell total mu
+            alpha_total = alpha_sample.sum(dim=-1)
+            logger.info(f"[Posterior Debug] lambda_total: mean={lam_total.mean():.4f}, min={lam_total.min():.4f}, max={lam_total.max():.4f}")
+            logger.info(f"[Posterior Debug] mu_total: mean={mu_total.mean():.4f}, min={mu_total.min():.4f}, max={mu_total.max():.4f}")
+            logger.info(f"[Posterior Debug] alpha_total: mean={alpha_total.mean():.4f}, min={alpha_total.min():.4f}, max={alpha_total.max():.4f}")
+            ratio = lam_total / (mu_total + 1e-10)
+            logger.info(f"[Posterior Debug] lambda/mu ratio: mean={ratio.mean():.6f}, min={ratio.min():.6f}, max={ratio.max():.6f}")
+
         return mu_sample, lambda_sample, alpha_sample
 
     @staticmethod
@@ -761,7 +891,8 @@ class Posterior:
                                      lambda_est: torch.Tensor,
                                      alpha_est: Optional[torch.Tensor],
                                      n_counts_max: int = 100,
-                                     debug: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+                                     debug: bool = False,
+                                     compute_device: Optional[Union[str, torch.device]] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the log prob of noise counts [n, g, c] given mu, lambda, alpha, and the data.
 
         NOTE: this is un-normalized log probability
@@ -775,6 +906,7 @@ class Posterior:
                 use an all-Poisson model
             n_counts_max: Size of noise count dimension c
             debug: True will go slow and check for NaNs and zero-probability entries
+            compute_device: Device to use for probability calculations (defaults to data.device)
 
         Returns:
             log_prob_tensor: Probability of each noise count value.
@@ -782,6 +914,25 @@ class Posterior:
                 cell and gene, because they can be different.
 
         """
+
+        original_device = data.device
+        target_device = compute_device or original_device
+        try:
+            target_device = torch.device(target_device)
+        except (TypeError, RuntimeError):
+            target_device = torch.device(original_device)
+        same_device = (target_device == original_device)
+
+        def _maybe_to_target(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            if tensor is None or same_device:
+                return tensor
+            return tensor.to(target_device)
+
+        if not same_device:
+            data = data.to(target_device)
+            mu_est = mu_est.to(target_device)
+            lambda_est = lambda_est.to(target_device)
+            alpha_est = _maybe_to_target(alpha_est)
 
         # Estimate a reasonable low-end to begin the Poisson summation.
         n = min(n_counts_max, data.max().item())  # No need to exceed the max value
@@ -794,7 +945,7 @@ class Posterior:
         # shape (batch_cells, n_genes, max_noise_counts)
         noise_count_tensor = torch.arange(start=0, end=n) \
             .expand([data.shape[0], data.shape[1], -1]) \
-            .float().to(device=data.device)
+            .float().to(device=target_device)
         noise_count_tensor = noise_count_tensor + poisson_values_low.unsqueeze(-1)
 
         # Compute probabilities of each number of noise counts.
@@ -808,13 +959,28 @@ class Posterior:
                                .log_prob(data.unsqueeze(-1) - noise_count_tensor))
             logger.debug('Using all poisson model (since alpha is not supplied to posterior)')
         else:
-            logits = (mu_est.log() - alpha_est.log()).unsqueeze(-1)
-            log_prob_tensor = (dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False)
+            # Compute logits with NaN protection - clamp log values to avoid -inf
+            log_mu = torch.clamp(mu_est.log(), min=-20)  # min corresponds to exp(-20) ≈ 2e-9
+            log_alpha = torch.clamp(alpha_est.log(), min=-20)
+            logits = (log_mu - log_alpha).unsqueeze(-1)
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=20, neginf=-20)
+
+            # Compute Poisson log probability for noise counts
+            poisson_log_prob = dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False) \
                                .log_prob(noise_count_tensor)
-                               + dist.NegativeBinomial(total_count=alpha_est.unsqueeze(-1),
-                                                       logits=logits,
-                                                       validate_args=False)
-                               .log_prob(data.unsqueeze(-1) - noise_count_tensor))
+
+            # Compute NegativeBinomial log probability for true counts (data - noise)
+            true_counts = data.unsqueeze(-1) - noise_count_tensor
+            nb_log_prob = dist.NegativeBinomial(total_count=alpha_est.unsqueeze(-1),
+                                                logits=logits,
+                                                validate_args=False) \
+                          .log_prob(true_counts)
+
+            # Replace NaN with -inf (these will be filtered out later)
+            poisson_log_prob = torch.nan_to_num(poisson_log_prob, nan=-1e10)
+            nb_log_prob = torch.nan_to_num(nb_log_prob, nan=-1e10)
+
+            log_prob_tensor = poisson_log_prob + nb_log_prob
 
         # Set log_prob to -inf if noise > data.
         neg_inf_tensor = torch.ones_like(log_prob_tensor) * -np.inf
@@ -832,6 +998,10 @@ class Posterior:
                 raise AssertionError('There is at least one log_prob_tensor[n, g, :] '
                                      'that has all-zero probability')
 
+        if not same_device:
+            log_prob_tensor = log_prob_tensor.to(original_device)
+            poisson_values_low = poisson_values_low.to(original_device)
+
         return log_prob_tensor, poisson_values_low
 
     @torch.no_grad()
@@ -845,6 +1015,7 @@ class Posterior:
             return None
 
         data_loader = self.dataset_obj.get_dataloader(use_cuda=self.use_cuda,
+                                                      use_mps=self.use_mps,
                                                       analyzed_bcs_only=True,
                                                       batch_size=500,
                                                       shuffle=False)
@@ -890,74 +1061,6 @@ class Posterior:
                          'p': p,
                          'phi_loc_scale': [phi_loc.item(), phi_scale.item()],
                          'epsilon': epsilon}
-
-    @torch.no_grad()
-    def _get_mu_alpha_lambda_map(self,
-                                 data: torch.Tensor,
-                                 chi_ambient: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Calculate MAP estimates of mu, the mean of the true count matrix, and
-        lambda, the rate parameter of the Poisson background counts.
-
-        Args:
-            data: Dense tensor minibatch of cell by gene count data.
-            chi_ambient: Point estimate of inferred ambient gene expression.
-
-        Returns:
-            mu_map: Dense tensor of Negative Binomial means for true counts.
-            lambda_map: Dense tensor of Poisson rate params for noise counts.
-            alpha_map: Dense tensor of Dirichlet concentration params that
-                inform the overdispersion of the Negative Binomial.
-
-        """
-
-        logger.debug('Computing MAP esitmate of mu, lambda, alpha')
-
-        # Encode latents.
-        enc = self.vi_model.encoder(x=data,
-                                    chi_ambient=chi_ambient,
-                                    cell_prior_log=self.vi_model.d_cell_loc_prior)
-        z_map = enc['z']['loc']
-
-        chi_map = self.vi_model.decoder(z_map)
-        phi_loc = pyro.param('phi_loc')
-        phi_scale = pyro.param('phi_scale')
-        phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
-        phi_rate = phi_loc / phi_scale.pow(2)
-        alpha_map = 1. / dist.Gamma(phi_conc, phi_rate).mean
-
-        y = (enc['p_y'] > 0).float()
-        d_empty = dist.LogNormal(loc=pyro.param('d_empty_loc'),
-                                 scale=pyro.param('d_empty_scale')).mean
-        d_cell = dist.LogNormal(loc=enc['d_loc'],
-                                scale=pyro.param('d_cell_scale')).mean
-        epsilon = dist.Gamma(enc['epsilon'] * self.vi_model.epsilon_prior,
-                             self.vi_model.epsilon_prior).mean
-
-        if self.vi_model.include_rho:
-            rho = pyro.param("rho_alpha") / (pyro.param("rho_alpha")
-                                             + pyro.param("rho_beta"))
-        else:
-            rho = None
-
-        # Calculate MAP estimates of mu and lambda.
-        mu_map = calculate_mu(
-            epsilon=epsilon,
-            d_cell=d_cell,
-            chi=chi_map,
-            y=y,
-            rho=rho,
-        )
-        lambda_map = calculate_lambda(
-            epsilon=epsilon,
-            chi_ambient=chi_ambient,
-            d_empty=d_empty,
-            y=y,
-            d_cell=d_cell,
-            rho=rho,
-            chi_bar=self.vi_model.avg_gene_expression,
-        )
-
-        return {'mu': mu_map, 'lam': lambda_map, 'alpha': alpha_map}
 
 
 class PosteriorRegularization(ABC):
@@ -1074,9 +1177,15 @@ class PRq(PosteriorRegularization):
 
         # Compute using dense chunks, chunked on m-index.
         if n_chunks is None:
+            offset_values = list(noise_offsets.values())
+            if len(offset_values) == 0:
+                # No valid posterior entries - return empty sparse matrix
+                logger.warning("No valid posterior entries found for regularization. "
+                              "This may indicate the model did not converge properly.")
+                return sp.coo_matrix(noise_count_posterior_coo.shape)
+            max_offset = np.array(offset_values).max()
             dense_size_gb = (len(np.unique(noise_count_posterior_coo.row))
-                             * (noise_count_posterior_coo.shape[1]
-                                + np.array(list(noise_offsets.values())).max())) * 4 / 1e9  # GB
+                             * (noise_count_posterior_coo.shape[1] + max_offset)) * 4 / 1e9  # GB
             n_chunks = max(1, int(dense_size_gb // 1))  # approx 1 GB each
 
         # Make the sparse matrix compact in the sense that it should use contiguous row values.
@@ -1260,7 +1369,8 @@ class PRmu(PosteriorRegularization):
             else:
                 noise_counts = map_noise_csr.sum()
 
-            return torch.tensor(noise_counts).to(device)
+            # Use float32 for MPS compatibility
+            return torch.tensor(noise_counts, dtype=torch.float32).to(device)
 
         # Perform binary search for beta.
         per_gene = False
@@ -1296,9 +1406,15 @@ class PRmu(PosteriorRegularization):
 
         # Compute using dense chunks, chunked on m-index.
         if n_chunks is None:
+            offset_values = list(noise_offsets.values())
+            if len(offset_values) == 0:
+                # No valid posterior entries - return empty sparse matrix
+                logger.warning("No valid posterior entries found for regularization. "
+                              "This may indicate the model did not converge properly.")
+                return sp.coo_matrix(noise_count_posterior_coo.shape)
+            max_offset = np.array(offset_values).max()
             dense_size_gb = (len(np.unique(noise_count_posterior_coo.row))
-                             * (noise_count_posterior_coo.shape[1]
-                                + np.array(list(noise_offsets.values())).max())) * 4 / 1e9  # GB
+                             * (noise_count_posterior_coo.shape[1] + max_offset)) * 4 / 1e9  # GB
             n_chunks = max(1, int(dense_size_gb // 1))  # approx 1 GB each
 
         # Make the sparse matrix compact in the sense that it should use contiguous row values.
@@ -1606,7 +1722,8 @@ def compute_mean_target_removal_as_function(noise_count_posterior_coo: sp.coo_ma
             target = target + fpr * approx_signal_csr.sum()
 
         # Return target scaled to be per-cell.
-        return torch.tensor(target / n_cells).to(device)
+        # Use float32 for MPS compatibility
+        return torch.tensor(target / n_cells, dtype=torch.float32).to(device)
 
     return _target_fun
 

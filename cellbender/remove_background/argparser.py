@@ -45,6 +45,25 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            dest="use_cuda", action="store_true",
                            help="Including the flag --cuda will run the "
                                 "inference on a GPU.")
+    subparser.add_argument("--mps",
+                           dest="use_mps", action="store_true",
+                           help="Including the flag --mps will run the "
+                                "inference on Apple Silicon GPU (MPS). "
+                                "This is experimental and may produce different "
+                                "results than CUDA.")
+    subparser.add_argument("--posterior-device",
+                           type=str,
+                           choices=['auto', 'model', 'cpu', 'cuda', 'mps'],
+                           default='auto',
+                           help="Device to use when computing the posterior. "
+                                "'auto' (default) mirrors CUDA runs but forces "
+                                "CPU evaluation after MPS training to stabilize "
+                                "noise estimation.")
+    subparser.add_argument("--posterior-debug",
+                           action="store_true",
+                           help="Log detailed posterior diagnostics, including "
+                                "summary statistics of sampled latents. Useful "
+                                "when comparing CUDA vs. MPS results.")
     subparser.add_argument("--checkpoint", nargs=None, type=str,
                            dest='input_checkpoint_tarball',
                            required=False, default=consts.CHECKPOINT_FILE_NAME,

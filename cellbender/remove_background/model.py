@@ -13,6 +13,7 @@ import pyro.poutine as poutine
 
 from cellbender.remove_background.vae import encoder as encoder_module
 import cellbender.remove_background.consts as consts
+from cellbender.remove_background.device_utils import get_device_for_args
 from cellbender.remove_background.distributions.NegativeBinomialPoissonConv \
     import NegativeBinomialPoissonConv as NBPC
 from cellbender.remove_background.distributions.NegativeBinomialPoissonConvApprox \
@@ -33,6 +34,20 @@ def calculate_lambda(model_type: str,
                      rho: Union[torch.Tensor, None] = None,
                      chi_bar: Union[torch.Tensor, None] = None):
     """Calculate noise rate based on the model."""
+
+    # MPS: non-contiguous tensors from expand() cause silent wrong results
+    if str(epsilon.device).startswith('mps'):
+        epsilon = epsilon.contiguous()
+        d_empty = d_empty.contiguous()
+        chi_ambient = chi_ambient.contiguous()
+        if d_cell is not None:
+            d_cell = d_cell.contiguous()
+        if y is not None:
+            y = y.contiguous()
+        if rho is not None:
+            rho = rho.contiguous()
+        if chi_bar is not None:
+            chi_bar = chi_bar.contiguous()
 
     if model_type == "simple" or model_type == "ambient":
         lam = epsilon.unsqueeze(-1) * d_empty.unsqueeze(-1) * chi_ambient
@@ -60,6 +75,16 @@ def calculate_mu(model_type: str,
                  y: Union[torch.Tensor, None] = None,
                  rho: Union[torch.Tensor, None] = None):
     """Calculate mean expression based on the model."""
+
+    # MPS: non-contiguous tensors from expand() cause silent wrong results
+    if str(epsilon.device).startswith('mps'):
+        epsilon = epsilon.contiguous()
+        d_cell = d_cell.contiguous()
+        chi = chi.contiguous()
+        if y is not None:
+            y = y.contiguous()
+        if rho is not None:
+            rho = rho.contiguous()
 
     if model_type == 'simple':
         mu = epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
@@ -117,6 +142,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                  empty_UMI_threshold: int,
                  log_counts_crossover: float,
                  use_cuda: bool,
+                 use_mps: bool = False,
                  phi_loc_prior: float = consts.PHI_LOC_PRIOR,
                  phi_scale_prior: float = consts.PHI_SCALE_PRIOR,
                  rho_alpha_prior: float = consts.RHO_ALPHA_PRIOR,
@@ -147,20 +173,24 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.log_counts_crossover = log_counts_crossover
         self.counts_crossover = np.exp(log_counts_crossover)
 
-        # Determine whether we are working on a GPU.
-        if use_cuda:
-            # Calling cuda() here will put all the parameters of
-            # the encoder and decoder networks into GPU memory.
-            self.cuda()
+        self.device = get_device_for_args(use_cuda, use_mps)
+        self.training_device = self.device
+        self.use_cuda = use_cuda
+        self.use_mps = use_mps
+        # Pyro's use_cuda must be True only for actual CUDA (not MPS)
+        self._pyro_use_cuda = use_cuda and self.device == 'cuda'
+
+        if self.device != 'cpu':
+            self.to(self.device)
             try:
                 for key, value in self.encoder.items():
-                    value.cuda()
+                    value.to(self.device)
             except KeyError:
                 pass
-            self.device = 'cuda'
-        else:
-            self.device = 'cpu'
-        self.use_cuda = use_cuda
+
+            # MPS: in-place ops (addcmul_, addcdiv_) fail on non-contiguous tensors
+            if self.device == 'mps':
+                self._make_all_parameters_contiguous()
 
         # Priors
         assert dataset_obj_priors['d_std'] > 0, \
@@ -224,6 +254,23 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.rho_alpha_prior = rho_alpha_prior * torch.ones(torch.Size([])).to(self.device)
         self.rho_beta_prior = rho_beta_prior * torch.ones(torch.Size([])).to(self.device)
 
+    def _make_all_parameters_contiguous(self):
+        """Ensure all parameters are contiguous (required for MPS in-place ops)."""
+        for param in self.parameters():
+            if not param.is_contiguous():
+                param.data = param.data.contiguous()
+
+        if hasattr(self, 'encoder'):
+            for key, module in self.encoder.items():
+                for param in module.parameters():
+                    if not param.is_contiguous():
+                        param.data = param.data.contiguous()
+
+        if hasattr(self, 'decoder'):
+            for param in self.decoder.parameters():
+                if not param.is_contiguous():
+                    param.data = param.data.contiguous()
+
     def _calculate_mu(self, **kwargs):
         return calculate_mu(model_type=self.model_type, **kwargs)
 
@@ -247,6 +294,8 @@ class RemoveBackgroundPyroModel(nn.Module):
                                      self.chi_ambient_init *
                                      torch.ones(torch.Size([])).to(self.device),
                                      constraint=constraints.simplex)
+            if str(self.device).startswith('mps') and not chi_ambient.is_contiguous():
+                chi_ambient = chi_ambient.contiguous()
         else:
             chi_ambient = None
 
@@ -260,7 +309,7 @@ class RemoveBackgroundPyroModel(nn.Module):
 
         # Happens in parallel for each data point (cell barcode) independently:
         with pyro.plate("data", x.shape[0],
-                        use_cuda=self.use_cuda, device=self.device):
+                        use_cuda=self._pyro_use_cuda, device=self.device):
 
             # Sample z from prior.
             z = pyro.sample("z",
@@ -428,6 +477,21 @@ class RemoveBackgroundPyroModel(nn.Module):
                     dist.Normal(loc=epsilon_median_empty, scale=0.01),
                     obs=torch.ones_like(epsilon_median_empty))
 
+        # MPS: penalize epsilon deviation from 1.0 to prevent excessive noise removal
+        if self.use_mps and probably_cell_mask.sum() >= 2:
+            epsilon_cell_mean = epsilon[probably_cell_mask].mean()
+            with poutine.scale(scale=0.1):
+                pyro.sample("mps_epsilon_cell_reg",
+                            dist.Normal(loc=epsilon_cell_mean, scale=0.05),
+                            obs=torch.ones_like(epsilon_cell_mean))
+
+            if probably_empty_mask.sum() >= 2:
+                epsilon_empty_mean = epsilon[probably_empty_mask].mean()
+                with poutine.scale(scale=0.1):
+                    pyro.sample("mps_epsilon_ratio_reg",
+                                dist.Normal(loc=epsilon_cell_mean / (epsilon_empty_mean + 1e-6), scale=0.1),
+                                obs=torch.ones_like(epsilon_cell_mean))
+
         return {'chi_ambient': chi_ambient, 'z': z,
                 'mu': mu_cell, 'lam': lam, 'alpha': alpha, 'counts': c}
 
@@ -474,6 +538,8 @@ class RemoveBackgroundPyroModel(nn.Module):
                                      self.chi_ambient_init *
                                      torch.ones(torch.Size([])).to(self.device),
                                      constraint=constraints.simplex)
+            if str(self.device).startswith('mps') and not chi_ambient.is_contiguous():
+                chi_ambient = chi_ambient.contiguous()
 
         # Initialize variational parameters for rho.
         if self.include_rho:
@@ -505,7 +571,7 @@ class RemoveBackgroundPyroModel(nn.Module):
 
         # Happens in parallel for each data point (cell barcode) independently:
         with pyro.plate("data", x.shape[0],
-                        use_cuda=self.use_cuda, device=self.device):
+                        use_cuda=self._pyro_use_cuda, device=self.device):
 
             # Sample swapping fraction rho.
             if self.include_rho:
@@ -560,6 +626,14 @@ class RemoveBackgroundPyroModel(nn.Module):
 
                 # Gate epsilon and sample.
                 epsilon_gated = (prob * enc['epsilon'] + (1 - prob) * 1.)
+
+                # MPS: regularize encoder epsilon to prevent noise-removal drift
+                if self.use_mps:
+                    with poutine.scale(scale=1.0):
+                        pyro.sample("mps_enc_epsilon_reg",
+                                    dist.Normal(loc=enc['epsilon'].mean(), scale=0.1),
+                                    obs=torch.ones(1, device=self.device))
+
                 epsilon = pyro.sample("epsilon",
                                       dist.Gamma(concentration=epsilon_gated * self.epsilon_prior,
                                                  rate=self.epsilon_prior))

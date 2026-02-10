@@ -23,11 +23,18 @@ from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 from cellbender.remove_background.report import run_notebook_make_html, plot_summary
 from cellbender.remove_background.checkpoint import create_workflow_hashcode
+from cellbender.remove_background.device_utils import (
+    get_device_for_args,
+    move_model_to_device,
+    resolve_posterior_device,
+    set_manual_seed,
+)
 
 import pyro
 from pyro.infer import SVI, JitTraceEnum_ELBO, JitTrace_ELBO, \
     TraceEnum_ELBO, Trace_ELBO
 from pyro.optim import ClippedAdam
+import math
 import numpy as np
 import scipy.sparse as sp
 import pandas as pd
@@ -80,8 +87,9 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
 
     # Handle initial random state.
     pyro.util.set_rng_seed(consts.RANDOM_SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(consts.RANDOM_SEED)
+    use_mps = getattr(args, 'use_mps', False)
+    device = get_device_for_args(args.use_cuda, use_mps)
+    set_manual_seed(consts.RANDOM_SEED, device)
 
     # Load dataset, run inference, and write the output to a file.
 
@@ -111,8 +119,29 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
     if args.model == 'naive':
         inferred_model = None
     else:
-        inferred_model, _, _, _ = run_inference(dataset_obj=dataset_obj, args=args)
+        # Use workflow hash in checkpoint filename to avoid conflicts between runs
+        output_ckpt_tarball = f'ckpt_{args.checkpoint_filename}.tar.gz'
+        inferred_model, _, _, _ = run_inference(dataset_obj=dataset_obj, args=args,
+                                                output_checkpoint_tarball=output_ckpt_tarball)
         inferred_model.eval()
+        # Update input_checkpoint_tarball to use the same hashed name for posterior loading
+        args.input_checkpoint_tarball = output_ckpt_tarball
+    training_device = device
+    if inferred_model is not None:
+        training_device = getattr(inferred_model, 'training_device', str(inferred_model.device))
+
+    posterior_device = resolve_posterior_device(
+        preference=getattr(args, 'posterior_device', 'auto'),
+        training_device=training_device,
+        model_device=str(inferred_model.device) if inferred_model is not None else device,
+    )
+    args.posterior_device_resolved = posterior_device
+
+    if inferred_model is not None:
+        if str(inferred_model.device) != posterior_device:
+            logger.info(f"Moving inferred model to {posterior_device} for posterior computations "
+                        f"(training device was {training_device}).")
+        inferred_model = move_model_to_device(inferred_model, posterior_device)
 
     try:
 
@@ -252,7 +281,7 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
             index_converter=posterior.index_converter,
             raw_count_csr_for_cells=cell_counts,
             n_cells=len(cell_inds),
-            device='cuda' if args.use_cuda else 'cpu',  # TODO check this
+            device=get_device_for_args(args.use_cuda, getattr(args, 'use_mps', False)),
             per_gene=True,
         )
         noise_target_fun = lambda x: noise_target_fun_per_cell(x) * len(cell_inds)
@@ -274,7 +303,7 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
                 raw_count_matrix=posterior.dataset_obj.data['matrix'],
                 fpr=fpr,
                 per_gene=True if (args.posterior_regularization == 'PRmu_gene') else False,
-                device='cuda',
+                device=get_device_for_args(args.use_cuda, getattr(args, 'use_mps', False)),
             )
         else:
             # Other posterior regularizations were already performed in
@@ -296,7 +325,7 @@ def compute_output_denoised_counts_reports_metrics(posterior: Posterior,
             noise_targets_per_gene=noise_targets,
             q=args.cdf_threshold_q,
             alpha=args.prq_alpha,
-            device='cuda' if args.use_cuda else 'cpu',
+            device=get_device_for_args(args.use_cuda, getattr(args, 'use_mps', False)),
             use_multiple_processes=args.use_multiprocessing_estimation,
         )
 
@@ -566,29 +595,38 @@ def get_optimizer(n_batches: int,
                   epochs: int,
                   learning_rate: float,
                   constant_learning_rate: bool,
-                  total_epochs_for_testing_only: Optional[int] = None) \
+                  total_epochs_for_testing_only: Optional[int] = None,
+                  device: str = 'cpu') \
         -> Union[pyro.optim.PyroOptim, pyro.optim.lr_scheduler.PyroLRScheduler]:
     """Get optimizer or learning rate scheduler (if using one)"""
 
     # Set up the optimizer.
     optimizer = pyro.optim.clipped_adam.ClippedAdam  # just ClippedAdam does not work
-    optimizer_args = {'lr': learning_rate, 'clip_norm': 10.}
+
+    # Same optimizer settings for all devices (CUDA, MPS, CPU).
+    clip_norm = 10.0
+    optimizer_args = {'lr': learning_rate, 'clip_norm': clip_norm}
 
     # Set up a learning rate scheduler.
     if total_epochs_for_testing_only is not None:
         total_steps = n_batches * total_epochs_for_testing_only
     else:
         total_steps = n_batches * epochs
+
+    # Use standard OneCycleLR for all devices (CUDA, CPU, MPS)
     scheduler_args = {'optimizer': optimizer,
                       'max_lr': learning_rate * 10,
                       'total_steps': total_steps,
                       'optim_args': optimizer_args}
     scheduler = pyro.optim.OneCycleLR(scheduler_args)
 
+    if device == 'mps':
+        logger.info(f'MPS: OneCycleLR with 10x peak (same as CUDA, clip_norm={clip_norm})')
+
     # Constant learning rate overrides the above and uses no scheduler.
     if constant_learning_rate:
         logger.info('Using ClippedAdam --constant-learning-rate rather than '
-                    'the OneCycleLR schedule. This is not usually recommended.')
+                    'the scheduled learning rate. This is not usually recommended.')
         scheduler = ClippedAdam(optimizer_args)
 
     return scheduler
@@ -624,41 +662,31 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
     # Set random seed, updating global state of python, numpy, and torch RNGs.
     pyro.clear_param_store()
     pyro.set_rng_seed(consts.RANDOM_SEED)
-    if args.use_cuda:
-        torch.cuda.manual_seed_all(consts.RANDOM_SEED)
+    device = get_device_for_args(args.use_cuda, getattr(args, 'use_mps', False))
+    set_manual_seed(consts.RANDOM_SEED, device)
 
     # Attempt to load from a previously-saved checkpoint.
+    force_device = 'cuda:0' if device == 'cuda' else device
+
+    # Try hashed checkpoint filename first, then fall back to user-specified or default
+    hashed_ckpt_tarball = f'ckpt_{checkpoint_filename}.tar.gz'
+    if os.path.exists(hashed_ckpt_tarball) and args.input_checkpoint_tarball == consts.CHECKPOINT_FILE_NAME:
+        # Use hashed checkpoint if it exists and user didn't specify a specific checkpoint
+        checkpoint_to_load = hashed_ckpt_tarball
+    else:
+        checkpoint_to_load = args.input_checkpoint_tarball
+
     ckpt = attempt_load_checkpoint(filebase=checkpoint_filename,
-                                   tarball_name=args.input_checkpoint_tarball,
-                                   force_device='cuda:0' if args.use_cuda else 'cpu',
+                                   tarball_name=checkpoint_to_load,
+                                   force_device=force_device,
                                    force_use_checkpoint=args.force_use_checkpoint)
     ckpt_loaded = ckpt['loaded']  # True if a checkpoint was loaded successfully
 
-    if ckpt_loaded:
-
-        model = ckpt['model']
-        scheduler = ckpt['optim']
-        train_loader = ckpt['train_loader']
-        test_loader = ckpt['test_loader']
-        if hasattr(ckpt['args'], 'num_failed_attempts'):
-            # update this from the checkpoint file, if present
-            args.num_failed_attempts = ckpt['args'].num_failed_attempts
-        for obj in [model, scheduler, train_loader, test_loader, args]:
-            assert obj is not None, \
-                f'Expected checkpoint to contain model, scheduler, train_loader, ' \
-                f'test_loader, and args; but some are None:\n{ckpt}'
-        logger.info('Checkpoint loaded successfully.')
-
-    else:
-
-        logger.info('No checkpoint loaded.')
-
-        # Get the trimmed count matrix (transformed if called for).
+    # Helper: construct model, dataloaders, and scheduler from scratch.
+    # Used both for fresh starts and for loading state_dict-format checkpoints.
+    def _construct_model_and_loaders():
         count_matrix = dataset_obj.get_count_matrix()
 
-        # Set up the variational autoencoder:
-
-        # Encoder.
         encoder_z = EncodeZ(input_dim=count_matrix.shape[1],
                             hidden_dims=args.z_hidden_dims,
                             output_dim=args.z_dim,
@@ -677,48 +705,102 @@ def run_inference(dataset_obj: SingleCellRNACountsDataset,
         encoder = CompositeEncoder({'z': encoder_z,
                                     'other': encoder_other})
 
-        # Decoder.
         decoder = Decoder(input_dim=args.z_dim,
                           hidden_dims=args.z_hidden_dims[::-1],
                           use_batch_norm=True,
                           use_layer_norm=False,
                           output_dim=count_matrix.shape[1])
 
-        # Set up the pyro model for variational inference.
-        model = RemoveBackgroundPyroModel(model_type=args.model,
-                                          encoder=encoder,
-                                          decoder=decoder,
-                                          dataset_obj_priors=dataset_obj.priors,
-                                          n_analyzed_genes=dataset_obj.analyzed_gene_inds.size,
-                                          n_droplets=dataset_obj.analyzed_barcode_inds.size,
-                                          analyzed_gene_names=dataset_obj.data['gene_names'][dataset_obj.analyzed_gene_inds],
-                                          empty_UMI_threshold=dataset_obj.empty_UMI_threshold,
-                                          log_counts_crossover=dataset_obj.priors['log_counts_crossover'],
-                                          use_cuda=args.use_cuda)
+        _model = RemoveBackgroundPyroModel(model_type=args.model,
+                                           encoder=encoder,
+                                           decoder=decoder,
+                                           dataset_obj_priors=dataset_obj.priors,
+                                           n_analyzed_genes=dataset_obj.analyzed_gene_inds.size,
+                                           n_droplets=dataset_obj.analyzed_barcode_inds.size,
+                                           analyzed_gene_names=dataset_obj.data['gene_names'][dataset_obj.analyzed_gene_inds],
+                                           empty_UMI_threshold=dataset_obj.empty_UMI_threshold,
+                                           log_counts_crossover=dataset_obj.priors['log_counts_crossover'],
+                                           use_cuda=args.use_cuda,
+                                           use_mps=getattr(args, 'use_mps', False))
 
-        # Load the dataset into DataLoaders.
-        frac = args.training_fraction  # Fraction of barcodes to use for training
+        frac = args.training_fraction
         batch_size = int(min(consts.MAX_BATCH_SIZE, frac * dataset_obj.analyzed_barcode_inds.size / 2))
 
-        # Set up dataloaders.
-        train_loader, test_loader = \
+        _train_loader, _test_loader = \
             prep_data_for_training(dataset=count_matrix,
                                    empty_drop_dataset=dataset_obj.get_count_matrix_empties(),
                                    batch_size=batch_size,
                                    training_fraction=frac,
                                    fraction_empties=args.fraction_empties,
                                    shuffle=True,
-                                   use_cuda=args.use_cuda)
+                                   use_cuda=args.use_cuda,
+                                   use_mps=getattr(args, 'use_mps', False))
 
-        # Set up optimizer (optionally wrapped in a learning rate scheduler).
-        scheduler = get_optimizer(
-            n_batches=len(train_loader),
-            batch_size=train_loader.batch_size,
+        _scheduler = get_optimizer(
+            n_batches=len(_train_loader),
+            batch_size=_train_loader.batch_size,
             epochs=args.epochs,
             learning_rate=args.learning_rate,
             constant_learning_rate=args.constant_learning_rate,
             total_epochs_for_testing_only=total_epochs_for_testing_only,
+            device=device,
         )
+        return _model, _train_loader, _test_loader, _scheduler
+
+    if ckpt_loaded:
+
+        if hasattr(ckpt['args'], 'num_failed_attempts'):
+            args.num_failed_attempts = ckpt['args'].num_failed_attempts
+
+        model_format = ckpt.get('model_format', 'full_object')
+        optim_format = ckpt.get('optim_format', 'full_object')
+
+        if model_format == 'state_dict' or optim_format == 'state_dict':
+            # New checkpoint format: reconstruct objects and load state into them.
+            model, train_loader, test_loader, scheduler = _construct_model_and_loaders()
+
+            if model_format == 'state_dict':
+                model.load_state_dict(ckpt['model'])
+                logger.info('Loaded model weights from state_dict checkpoint.')
+            else:
+                model = ckpt['model']
+
+            if optim_format == 'state_dict':
+                # Skip restoring optimizer/scheduler state for state_dict checkpoints.
+                # OneCycleLR tracks total_steps internally, so restoring a scheduler
+                # state from a run with different epochs causes step-count overflow.
+                # The model weights (restored above) are what matter for continuation;
+                # training converges quickly with warm weights and fresh optimizer state.
+                logger.info('Using fresh optimizer with loaded model weights '
+                            '(OneCycleLR is not compatible with state restore across epoch counts).')
+            else:
+                scheduler = ckpt['optim']
+
+            # Checkpoint dataloaders are not needed when we reconstructed fresh ones,
+            # but try to use them if they were saved as full objects.
+            if 'train_loader' in ckpt and not isinstance(ckpt['train_loader'], dict):
+                train_loader = ckpt['train_loader']
+            if 'test_loader' in ckpt and not isinstance(ckpt['test_loader'], dict):
+                test_loader = ckpt['test_loader']
+
+        else:
+            # Old checkpoint format: full objects, use directly.
+            model = ckpt['model']
+            scheduler = ckpt['optim']
+            train_loader = ckpt['train_loader']
+            test_loader = ckpt['test_loader']
+
+        for obj in [model, scheduler, train_loader, test_loader, args]:
+            assert obj is not None, \
+                f'Expected checkpoint to contain model, scheduler, train_loader, ' \
+                f'test_loader, and args; but some are None:\n{ckpt}'
+        logger.info('Checkpoint loaded successfully.')
+
+    else:
+
+        logger.info('No checkpoint loaded.')
+
+        model, train_loader, test_loader, scheduler = _construct_model_and_loaders()
 
     # Determine the loss function.
     if args.use_jit:

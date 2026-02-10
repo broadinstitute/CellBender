@@ -143,7 +143,8 @@ class Mean(EstimationMethod):
         # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
         def _torch_mean(x):
-            c = torch.arange(x.shape[1], dtype=float).to(x.device)
+            # Use float32 for MPS compatibility
+            c = torch.arange(x.shape[1], dtype=torch.float32).to(x.device)
             return torch.matmul(x.exp(), c.t())
 
         result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
@@ -794,7 +795,8 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
     a = 0
 
     for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
-        dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
+        # Use float32 for MPS compatibility (MPS doesn't support float64)
+        dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo), dtype=torch.float32).to(device)
         if torch.numel(dense_tensor) == 0:
             # github issue 207
             continue

@@ -446,6 +446,7 @@ class SingleCellRNACountsDataset:
 
     def get_dataloader(self,
                        use_cuda: bool = True,
+                       use_mps: bool = False,
                        batch_size: int = 200,
                        shuffle: bool = False,
                        analyzed_bcs_only: bool = True,
@@ -455,6 +456,7 @@ class SingleCellRNACountsDataset:
 
         Args:
             use_cuda: Whether to load data into GPU memory.
+            use_mps: Whether to load data into MPS (Apple Silicon) GPU memory.
             batch_size: Size of minibatch of data yielded by dataloader.
             shuffle: Whether dataloader should shuffle the data.
             analyzed_bcs_only: Only include the barcodes that have been
@@ -482,6 +484,7 @@ class SingleCellRNACountsDataset:
             shuffle=shuffle,
             sort_by=sort_by,
             use_cuda=use_cuda,
+            use_mps=use_mps,
         )
         return data_loader
 
