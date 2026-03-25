@@ -112,8 +112,8 @@ def save_checkpoint(filebase: str,
 
             file_list = save_random_state(filebase=filebase)
 
-            torch.save(model_obj, filebase + '_model.torch')
-            torch.save(scheduler, filebase + '_optim.torch')
+            torch.save(model_obj.state_dict(), filebase + '_model.torch')
+            scheduler.save(filebase + '_optim.torch')
             scheduler.save(filebase + '_optim.pyro')  # use PyroOptim method
             pyro.get_param_store().save(filebase + '_params.pyro')
             file_list = file_list + [filebase + '_model.torch',
