@@ -17,6 +17,7 @@ import pickle
 import tempfile
 import shutil
 import traceback
+import dill
 
 
 logger = logging.getLogger('cellbender')
@@ -112,10 +113,10 @@ def save_checkpoint(filebase: str,
 
             file_list = save_random_state(filebase=filebase)
 
-            torch.save(model_obj, filebase + '_model.torch')
-            torch.save(scheduler, filebase + '_optim.torch')
+            torch.save(model_obj, filebase + '_model.torch', pickle_module=dill)
+            torch.save(scheduler, filebase + '_optim.torch', pickle_module=dill)
             scheduler.save(filebase + '_optim.pyro')  # use PyroOptim method
-            pyro.get_param_store().save(filebase + '_params.pyro')
+            save_param_store(filebase + '_params.pyro')
             file_list = file_list + [filebase + '_model.torch',
                                      filebase + '_optim.torch',
                                      filebase + '_optim.pyro',
@@ -218,20 +219,20 @@ def load_from_checkpoint(filebase: Optional[str],
 
         # Load the saved model.
         if 'model' in to_load:
-            model_obj = torch.load(filebase + '_model.torch', **load_kwargs)
+            model_obj = torch.load(filebase + '_model.torch', **load_kwargs, pickle_module=dill)
             logger.debug('Model loaded from ' + filebase + '_model.torch')
             out.update({'model': model_obj})
 
         # Load the saved optimizer.
         if 'optim' in to_load:
-            scheduler = torch.load(filebase + '_optim.torch', **load_kwargs)
+            scheduler = torch.load(filebase + '_optim.torch', **load_kwargs, pickle_module=dill)
             scheduler.load(filebase + '_optim.pyro', **load_kwargs)  # use PyroOptim method
             logger.debug('Optimizer loaded from ' + filebase + '_optim.*')
             out.update({'optim': scheduler})
 
         # Load the pyro param store.
         if 'param_store' in to_load:
-            pyro.get_param_store().load(filebase + '_params.pyro', map_location=force_device)
+            load_param_store(filebase + '_params.pyro', force_device)
             logger.debug('Pyro param store loaded from ' + filebase + '_params.pyro')
 
         # Load dataloader states.
@@ -241,11 +242,11 @@ def load_from_checkpoint(filebase: Optional[str],
             train_loader = None
             test_loader = None
             if os.path.exists(filebase + '_train.loaderstate'):
-                train_loader = torch.load(filebase + '_train.loaderstate', **load_kwargs)
+                train_loader = torch.load(filebase + '_train.loaderstate', **load_kwargs, pickle_module=dill)
                 logger.debug('Train loader loaded from ' + filebase + '_train.loaderstate')
                 out.update({'train_loader': train_loader})
             if os.path.exists(filebase + '_test.loaderstate'):
-                test_loader = torch.load(filebase + '_test.loaderstate', **load_kwargs)
+                test_loader = torch.load(filebase + '_test.loaderstate', **load_kwargs, pickle_module=dill)
                 logger.debug('Test loader loaded from ' + filebase + '_test.loaderstate')
                 out.update({'test_loader': test_loader})
 
@@ -376,3 +377,18 @@ def create_workflow_hashcode(module_path: str,
         return ''
 
     return hasher.hexdigest()
+
+def save_param_store(filename: str) -> None:
+    """Save parameters to file."""
+
+    # Modified from pyro to allow alternate pickle_module
+    with open(filename, "wb") as output_file:
+        torch.save(pyro.get_param_store().get_state(), output_file, pickle_module=dill)
+
+def load_param_store(filename: str, force_device: Optional[str] = None) -> None:
+    """Load parameters to file."""
+
+    # Modified from pyro to allow alternate pickle_module
+    with open(filename, "rb") as input_file:
+        state = torch.load(input_file, force_device, pickle_module=dill)
+    pyro.get_param_store().set_state(state)

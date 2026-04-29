@@ -26,7 +26,7 @@ packages you may have installed.
 
 .. code-block:: console
 
-  $ conda create -n cellbender python=3.7
+  $ conda create -n cellbender python=3.9
   $ conda activate cellbender
   (cellbender) $ pip install cellbender
 
@@ -38,7 +38,7 @@ Create a conda environment and activate it:
 
 .. code-block:: console
 
-  $ conda create -n cellbender python=3.7
+  $ conda create -n cellbender python=3.9
   $ conda activate cellbender
 
 Install the `pytables <https://www.pytables.org>`_ module:
