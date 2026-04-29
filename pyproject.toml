@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.2"]
+requires = ["setuptools>=61.2", "setuptools-git-versioning>=2.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,11 +8,14 @@ authors = [{name = "Stephen Fleming"}, {name = "Mehrtash Babadi"}]
 license = {text = "BSD (3-Clause)"}
 description = "A software package for eliminating technical artifacts from high-throughput single-cell RNA sequencing (scRNA-seq) data"
 keywords = ["scRNA-seq", "bioinformatics"]
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dynamic = ["version", "dependencies", "optional-dependencies"]
@@ -36,10 +39,26 @@ include-package-data = true
 find = {namespaces = false}
 
 [tool.setuptools.dynamic]
-version = {attr = "cellbender.__version__"}
 dependencies = {file = ["requirements.txt"]}
 optional-dependencies.dev = {file = ["requirements-dev.txt"]}
 optional-dependencies.docs = {file = ["requirements-rtd.txt"]}
 
 [tool.setuptools.package-data]
-"*" = ["cellbender.remove_background.report.ipynb", "cellbender.VERSION.txt"]
+"*" = ["cellbender.remove_background.report.ipynb"]
+
+[tool.setuptools-git-versioning]
+enabled = true
+starting_version = "0.3.2"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I"]
+
+[tool.mypy]
+ignore_missing_imports = true
+python_version = "3.10"

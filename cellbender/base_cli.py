@@ -10,20 +10,17 @@ import argparse
 from abc import ABC, abstractmethod
 from typing import Dict
 import importlib
-import codecs
+from importlib.metadata import version as _importlib_version, PackageNotFoundError
 
 # New tools should be added to this list.
 TOOL_NAME_LIST = ['remove-background']
 
 
-def read(rel_path):
-    here = os.path.abspath(os.path.dirname(__file__))
-    with codecs.open(os.path.join(here, rel_path), 'r') as fp:
-        return fp.read()
-
-
 def get_version() -> str:
-    return read('VERSION.txt').splitlines()[0]
+    try:
+        return _importlib_version("cellbender")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 class AbstractCLI(ABC):
