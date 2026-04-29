@@ -387,8 +387,9 @@ def _mckp_chunk_estimate_noise(
 
     # Now we want the smallest additional_noise_counts_per_gene deltas for each gene.
     # https://stackoverflow.com/questions/55179493/
-    df_out = df[['m', 'g', 'delta', 'topk']].groupby('g', group_keys=False).apply(
-        lambda x: x.nsmallest(x['topk'].iat[0], columns='delta')
+    df_out = df[['m', 'g', 'delta', 'topk']].groupby('g').apply(
+        lambda x: x.nsmallest(x['topk'].iat[0], columns='delta'),
+        include_groups=False
     )
     logger.debug(f'{timestamp()} Computing nsmallest done')
 
@@ -683,8 +684,9 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
         # Now we want the smallest additional_noise_counts_per_gene deltas for each gene.
         # https://stackoverflow.com/questions/55179493/
-        df_out = df[['m', 'g', 'delta', 'topk']].groupby('g', group_keys=False).apply(
-            lambda x: x.nsmallest(x['topk'].iat[0], columns='delta')
+        df_out = df[['m', 'g', 'delta', 'topk']].groupby('g').apply(
+            lambda x: x.nsmallest(x['topk'].iat[0], columns='delta'),
+            include_groups=False
         )
         logger.debug(f'{timestamp()} Computing nsmallest done')
 
