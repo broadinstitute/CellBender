@@ -1,10 +1,6 @@
 """Test functions in dataset.py"""
 
 import pytest
-import scipy.sparse as sp
-import numpy as np
-
-from conftest import sparse_matrix_equal
 
 
 @pytest.mark.skip

@@ -1,16 +1,16 @@
 """Utility functions for working with scipy sparse matrices"""
 
-import torch
+from typing import Iterable, Optional, Tuple
+
 import numpy as np
 import scipy.sparse as sp
-
-from typing import Optional, Tuple, Iterable
+import torch
 
 
 @torch.no_grad()
-def dense_to_sparse_op_torch(t: torch.Tensor,
-                             tensor_for_nonzeros: Optional[torch.Tensor] = None) \
-        -> Tuple[torch.Tensor, ...]:
+def dense_to_sparse_op_torch(
+    t: torch.Tensor, tensor_for_nonzeros: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, ...]:
     """Converts dense matrix to sparse COO format tuple of numpy arrays (*indices, data)
 
     Args:
@@ -55,8 +55,7 @@ def todense_fill(coo: sp.coo_matrix, fill_value: float) -> np.ndarray:
     return out
 
 
-def csr_set_rows_to_zero(csr: sp.csr_matrix,
-                         row_inds: Iterable[int]) -> sp.csr_matrix:
+def csr_set_rows_to_zero(csr: sp.csr_matrix, row_inds: Iterable[int]) -> sp.csr_matrix:
     """Set all nonzero elements in rows "row_inds" to zero.
     Happens in-place, although output is returned as well.
 
@@ -67,16 +66,16 @@ def csr_set_rows_to_zero(csr: sp.csr_matrix,
         try:
             csr = csr.tocsr()
         except Exception:
-            raise ValueError('Matrix given must be of CSR format.')
+            raise ValueError("Matrix given must be of CSR format.")
     for row in row_inds:
-        csr.data[csr.indptr[row]:csr.indptr[row + 1]] = 0
+        csr.data[csr.indptr[row] : csr.indptr[row + 1]] = 0
     csr.eliminate_zeros()
     return csr
 
 
-def overwrite_matrix_with_columns_from_another(mat1: sp.csc_matrix,
-                                               mat2: sp.csc_matrix,
-                                               column_inds: np.ndarray) -> sp.csc_matrix:
+def overwrite_matrix_with_columns_from_another(
+    mat1: sp.csc_matrix, mat2: sp.csc_matrix, column_inds: np.ndarray
+) -> sp.csc_matrix:
     """Given two sparse matrices of the same shape, replace columns that are not
     in `column_inds` in `mat1` with the entries from `mat2`.
     """
