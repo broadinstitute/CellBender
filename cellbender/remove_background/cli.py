@@ -76,9 +76,11 @@ class CLI(AbstractCLI):
         assert args.training_fraction <= 1., "training-fraction must be <= 1"
 
         # If cuda is requested, make sure it is available.
+        args.device = 'cpu'
         if args.use_cuda:
             assert torch.cuda.is_available(), "Trying to use CUDA, " \
                                               "but CUDA is not available."
+            args.device = 'cuda'
         else:
             # Warn the user in case the CUDA flag was forgotten by mistake.
             if torch.cuda.is_available():
@@ -86,6 +88,30 @@ class CLI(AbstractCLI):
                                  "used.  Use the flag --cuda for "
                                  "significant speed-ups.\n\n")
                 sys.stdout.flush()  # Write immediately
+
+            # If MPS is requested, make sure it is available (CUDA takes precedence).
+            if args.use_mps:
+                if not torch.backends.mps.is_available():
+                    if not torch.backends.mps.is_built():
+                        raise AssertionError("MPS not available because the current "
+                                             "PyTorch install was not built with MPS enabled.")
+                    else:
+                        raise AssertionError("MPS not available because the current MacOS "
+                                             "version is not 12.3+ and/or you do not have "
+                                             "an MPS-enabled device on this machine.")
+                args.device = 'mps'
+                # Note: PYTORCH_ENABLE_MPS_FALLBACK is set in base_cli.py before torch import
+                sys.stdout.write("Note: MPS fallback to CPU enabled for unsupported operations.\n"
+                                 "Some operations may run on CPU, which is slower than native MPS "
+                                 "but still faster than CPU-only mode.\n\n")
+                sys.stdout.flush()
+            else:
+                if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+                    sys.stdout.write("Warning: a MacOS MPS-enabled GPU is "
+                                     "available, but will not be "
+                                     "used.  Use the flag --mps for "
+                                     "significant speed-ups.\n\n")
+                    sys.stdout.flush()  # Write immediately
 
         # Make sure n_threads makes sense.
         if args.n_threads is not None:

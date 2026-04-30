@@ -45,6 +45,12 @@ def add_subparser_args(subparsers: argparse) -> argparse:
                            dest="use_cuda", action="store_true",
                            help="Including the flag --cuda will run the "
                                 "inference on a GPU.")
+    subparser.add_argument("--mps",
+                           dest="use_mps", action="store_true",
+                           help="Including the flag --mps will run the "
+                                "inference on MacOS devices with an "
+                                "MPS-enabled GPU, see "
+                                "https://pytorch.org/docs/stable/notes/mps.html")
     subparser.add_argument("--checkpoint", nargs=None, type=str,
                            dest='input_checkpoint_tarball',
                            required=False, default=consts.CHECKPOINT_FILE_NAME,

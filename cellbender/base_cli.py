@@ -104,6 +104,12 @@ def main():
 
     """
 
+    # CRITICAL: Enable MPS fallback BEFORE any module imports torch
+    # This must be the FIRST thing we do, before generate_cli_dictionary()
+    # which imports cli.py which imports torch
+    if '--mps' in sys.argv:
+        os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
     parser = get_populated_argparser()
     cli_dict = generate_cli_dictionary()
 
