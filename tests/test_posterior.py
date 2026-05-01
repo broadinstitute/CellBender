@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 import torch
-from conftest import sparse_matrix_equal
 
 from cellbender.remove_background.estimation import Mean
 from cellbender.remove_background.posterior import (
@@ -369,7 +368,6 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets, m):
     """Test that a round trip through save and load gives the same thing"""
     from pathlib import Path
 
-    import pyarrow as pa
     import pyarrow.parquet as pq
 
     from cellbender.remove_background.data.io import (
@@ -392,7 +390,7 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets, m):
     offset_vals = np.zeros(num_nonzeros, dtype=np.int16)
     if not blank_noise_offsets:
         offset_vals[:5] = 1
-    log_probs = (np.random.rand(num_nonzeros).astype(np.float32) * -10)
+    log_probs = np.random.rand(num_nonzeros).astype(np.float32) * -10
 
     with pq.ParquetWriter(src_file, schema=POSTERIOR_SCHEMA) as writer:
         write_posterior_batch_to_parquet(
@@ -421,15 +419,15 @@ def test_save_and_load(tmpdir_factory, blank_noise_offsets, m):
     posterior2.load(file=dst_file)
 
     # check: parquet path set correctly
-    assert posterior2._posterior_parquet_path == Path(dst_file), (
-        "Posterior parquet path not set correctly after load"
-    )
+    assert posterior2._posterior_parquet_path == Path(dst_file), "Posterior parquet path not set correctly after load"
 
     # check: latents preserved
     assert posterior2._latents is not None, "_latents should be loaded from CSV sidecar"
     for key in latents:
         np.testing.assert_allclose(
-            posterior2._latents[key], latents[key], rtol=1e-12,
+            posterior2._latents[key],
+            latents[key],
+            rtol=1e-12,
             err_msg=f"Latent '{key}' not preserved after save/load round-trip",
         )
 

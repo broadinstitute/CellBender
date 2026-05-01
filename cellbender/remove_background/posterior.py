@@ -8,9 +8,9 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Union, cast
 
 import pyarrow.parquet as pq
-from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Union, cast
 
 if TYPE_CHECKING:
     from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
@@ -430,14 +430,14 @@ class Posterior:
             path: Destination parquet path.  If *None* a temporary file is used.
             **kwargs: Passed to _compute_and_stream_posterior().
         """
-        if self._posterior_parquet_path is not None and (
-            kwargs == {} or kwargs == self._noise_count_posterior_kwargs
-        ):
+        if self._posterior_parquet_path is not None and (kwargs == {} or kwargs == self._noise_count_posterior_kwargs):
             return
         if path is None:
             import tempfile
+
             fd, tmp = tempfile.mkstemp(suffix="_posterior.parquet")
             import os as _os
+
             _os.close(fd)
             path = Path(tmp)
         self._compute_and_stream_posterior(path=path, **kwargs)

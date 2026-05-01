@@ -1,13 +1,12 @@
 """Classes and methods for estimation of noise counts, given a posterior."""
 
-import concurrent.futures
 import logging
 import multiprocessing as mp
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, Generator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from cellbender.remove_background.posterior import IndexConverter
@@ -254,9 +253,7 @@ def _register_posterior(
     converted to a PyArrow Table and registered in-process.
     """
     if isinstance(source, Path):
-        conn.execute(
-            f"CREATE OR REPLACE VIEW posterior AS SELECT * FROM read_parquet('{source}')"
-        )
+        conn.execute(f"CREATE OR REPLACE VIEW posterior AS SELECT * FROM read_parquet('{source}')")
     else:
         # COO matrix path: build Arrow table with embedded offsets
         coo = source
@@ -264,19 +261,15 @@ def _register_posterior(
         cols = coo.col.astype("int16")
         data = coo.data.astype("float32")
         cell_ids, gene_ids = index_converter.get_ng_indices(m_inds=rows)
-        offsets = np.array(
-            [noise_offsets.get(int(m), 0) for m in rows], dtype="int16"
-        )
+        offsets = np.array([noise_offsets.get(int(m), 0) for m in rows], dtype="int16")
         table = pa.table(
             {
-                "cell_id":    pa.array(cell_ids.astype("int32"), type=pa.int32()),
-                "gene_id":    pa.array(gene_ids.astype("int32"), type=pa.int32()),
-                "c":          pa.array(cols, type=pa.int16()),
+                "cell_id": pa.array(cell_ids.astype("int32"), type=pa.int32()),
+                "gene_id": pa.array(gene_ids.astype("int32"), type=pa.int32()),
+                "c": pa.array(cols, type=pa.int16()),
                 "noise_offset": pa.array(offsets, type=pa.int16()),
-                "log_prob":   pa.array(data, type=pa.float32()),
-                "regularized": pa.array(
-                    np.zeros(len(rows), dtype=bool), type=pa.bool_()
-                ),
+                "log_prob": pa.array(data, type=pa.float32()),
+                "regularized": pa.array(np.zeros(len(rows), dtype=bool), type=pa.bool_()),
             }
         )
         conn.register("posterior", table)
@@ -380,11 +373,13 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
         # Step 2: Build gene-level targets table
         all_gene_ids = np.arange(self.index_converter.total_n_genes, dtype=np.int32)
-        gene_targets_df = pd.DataFrame({
-            "gene_id":        all_gene_ids,
-            "step_direction": step_dir,
-            "topk":           topk,
-        })
+        gene_targets_df = pd.DataFrame(
+            {
+                "gene_id": all_gene_ids,
+                "step_direction": step_dir,
+                "topk": topk,
+            }
+        )
         gene_targets_df = gene_targets_df[gene_targets_df["step_direction"] != 0].reset_index(drop=True)
 
         if len(gene_targets_df) == 0:
@@ -392,13 +387,14 @@ class MultipleChoiceKnapsack(EstimationMethod):
             logger.info("Total MCKP time = %.2f sec", time.time() - t0)
             return map_csr
 
-        conn.register("gene_targets",  gene_targets_df)
+        conn.register("gene_targets", gene_targets_df)
         conn.register("map_estimates", map_df[["cell_id", "gene_id", "map_c"]])
 
         if verbose:
             logger.debug(
                 "Positive-step genes: %d  Negative-step genes: %d",
-                (step_dir > 0).sum(), (step_dir < 0).sum(),
+                (step_dir > 0).sum(),
+                (step_dir < 0).sum(),
             )
 
         # Step 3: Compute deltas and select cheapest topk steps per gene
