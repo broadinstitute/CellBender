@@ -15,7 +15,7 @@ from pyro.util import ignore_jit_warnings
 
 import cellbender.remove_background.consts as consts
 from cellbender.monitor import get_hardware_usage
-from cellbender.remove_background.checkpoint import save_checkpoint
+from cellbender.remove_background.checkpoint import flush_pending_checkpoint, save_checkpoint, save_checkpoint_async
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.exceptions import ElboException, NanException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
@@ -225,7 +225,7 @@ def run_training(
             if (ckpt_tarball_name != "none") and (
                 ((checkpoint_freq > 0) and (epoch % epoch_checkpoint_freq == 0)) or (epoch == epochs)
             ):  # checkpoint at final epoch
-                save_checkpoint(
+                save_checkpoint_async(
                     filebase=output_filename,
                     tarball_name=ckpt_tarball_name,
                     args=args,
@@ -296,5 +296,8 @@ def run_training(
 
     # Free up all the GPU memory we can once training is complete.
     torch.cuda.empty_cache()
+
+    # Ensure the last async checkpoint write has landed before returning.
+    flush_pending_checkpoint()
 
     return train_elbo, model.loss["test"]["elbo"]

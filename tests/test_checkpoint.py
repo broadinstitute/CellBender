@@ -17,10 +17,12 @@ from torch.distributions import constraints
 import cellbender
 from cellbender.remove_background.checkpoint import (
     create_workflow_hashcode,
+    flush_pending_checkpoint,
     load_checkpoint,
     load_param_store,
     load_random_state,
     save_checkpoint,
+    save_checkpoint_async,
     save_random_state,
 )
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
@@ -518,6 +520,175 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     #         print(f'number of values that disagree: {disagreement}')
     #         assert disagreement == 0, \
     #             'Guide traces disagree with and without checkpoint restart'
+
+
+# ---------------------------------------------------------------------------
+# Fixtures and helpers shared by async checkpoint tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def reset_async_state():
+    """Reset module-level async checkpoint state before and after each test."""
+    import cellbender.remove_background.checkpoint as ckpt_module
+
+    ckpt_module._pending_ckpt = None
+    yield
+    # Best-effort cleanup: drain any future left over by a failing test.
+    if ckpt_module._pending_ckpt is not None:
+        try:
+            ckpt_module._pending_ckpt.result(timeout=10)
+        except Exception:
+            pass
+        ckpt_module._pending_ckpt = None
+
+
+def _make_trained_model(dim: int = 8, n_epochs: int = 2, batch_size: int = 32):
+    """Return (model, scheduler, train_loader) after a short training run."""
+    import pyro.optim as optim
+
+    dataset = torch.randn((64, dim))
+    loader = new_train_loader(data=dataset, batch_size=batch_size)
+    create_random_state_blank_slate(0)
+    pyro.clear_param_store()
+    model = PyroModel(dim=dim)
+    scheduler = optim.ClippedAdam({"lr": 1e-2, "clip_norm": 10.0})
+    svi = pyro.infer.SVI(model.model, model.guide, scheduler, loss=pyro.infer.Trace_ELBO())
+    train_pyro(n_epochs=n_epochs, data_loader=loader, svi=svi)
+    return model, scheduler, loader
+
+
+# ---------------------------------------------------------------------------
+# Tests for async checkpoint functions
+# ---------------------------------------------------------------------------
+
+
+def test_flush_pending_checkpoint_no_op_when_nothing_pending(reset_async_state):
+    """flush_pending_checkpoint returns True immediately when nothing is queued."""
+    result = flush_pending_checkpoint()
+    assert result is True
+
+
+def test_save_checkpoint_async_returns_future_and_produces_tarball(tmpdir_factory, reset_async_state):
+    """save_checkpoint_async should return a Future and write a readable tarball."""
+    filedir = tmpdir_factory.mktemp("async_ckpt")
+    filebase = str(filedir.join("ckpt"))
+    tarball = filebase + ".tar.gz"
+
+    model, scheduler, train_loader = _make_trained_model()
+
+    future = save_checkpoint_async(
+        filebase=filebase,
+        args=argparse.Namespace(),
+        model_obj=model,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        tarball_name=tarball,
+    )
+    assert future is not None, "save_checkpoint_async should return a Future"
+
+    success = flush_pending_checkpoint()
+    assert success is True, "flush_pending_checkpoint should return True on success"
+    assert os.path.exists(tarball), "Tarball must exist after flush"
+
+    # The tarball must be loadable and contain the correct model weights.
+    pyro.clear_param_store()
+    ckpt = load_checkpoint(filebase=filebase, tarball_name=tarball, force_device="cpu")
+    assert ckpt["loaded"] is True
+    assert _check_all_close(
+        _get_params(ckpt["model"].encoder),
+        _get_params(model.encoder),
+    ), "Loaded model weights must match saved model weights"
+
+
+def test_flush_pending_checkpoint_returns_true_on_success(tmpdir_factory, reset_async_state):
+    """flush_pending_checkpoint returns True when the background write succeeded."""
+    filedir = tmpdir_factory.mktemp("flush_true")
+    filebase = str(filedir.join("ckpt"))
+    model, scheduler, train_loader = _make_trained_model()
+    save_checkpoint_async(
+        filebase=filebase,
+        args=argparse.Namespace(),
+        model_obj=model,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        tarball_name=filebase + ".tar.gz",
+    )
+    result = flush_pending_checkpoint()
+    assert result is True
+    # A second flush with nothing pending should also return True.
+    assert flush_pending_checkpoint() is True
+
+
+def test_save_checkpoint_async_second_call_waits_for_first(tmpdir_factory, reset_async_state):
+    """Calling save_checkpoint_async twice in a row must complete both writes."""
+    filedir = tmpdir_factory.mktemp("async_seq")
+    filebase = str(filedir.join("ckpt"))
+    tarball1 = filebase + "_1.tar.gz"
+    tarball2 = filebase + "_2.tar.gz"
+
+    model, scheduler, train_loader = _make_trained_model()
+
+    # First async save.
+    save_checkpoint_async(
+        filebase=filebase,
+        args=argparse.Namespace(),
+        model_obj=model,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        tarball_name=tarball1,
+    )
+    # Second async save — implementation must drain _pending_ckpt first.
+    save_checkpoint_async(
+        filebase=filebase,
+        args=argparse.Namespace(),
+        model_obj=model,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        tarball_name=tarball2,
+    )
+    flush_pending_checkpoint()
+
+    assert os.path.exists(tarball1), "First checkpoint tarball must exist"
+    assert os.path.exists(tarball2), "Second checkpoint tarball must exist"
+
+
+def test_async_checkpoint_matches_sync_checkpoint(tmpdir_factory, reset_async_state):
+    """Async and sync checkpoints of the same state should produce equivalent model weights."""
+    filedir = tmpdir_factory.mktemp("async_vs_sync")
+    filebase = str(filedir.join("ckpt"))
+    tarball_sync = filebase + "_sync.tar.gz"
+    tarball_async = filebase + "_async.tar.gz"
+
+    model, scheduler, train_loader = _make_trained_model()
+
+    # Synchronous save.
+    save_checkpoint(
+        filebase=filebase,
+        args=argparse.Namespace(),
+        model_obj=model,
+        scheduler=scheduler,
+        tarball_name=tarball_sync,
+    )
+    # Async save of the *same* model state.
+    save_checkpoint_async(
+        filebase=filebase,
+        args=argparse.Namespace(),
+        model_obj=model,
+        scheduler=scheduler,
+        tarball_name=tarball_async,
+    )
+    flush_pending_checkpoint()
+
+    pyro.clear_param_store()
+    ckpt_sync = load_checkpoint(filebase=filebase, tarball_name=tarball_sync, force_device="cpu")
+    pyro.clear_param_store()
+    ckpt_async = load_checkpoint(filebase=filebase, tarball_name=tarball_async, force_device="cpu")
+
+    assert _check_all_close(
+        _get_params(ckpt_sync["model"].encoder),
+        _get_params(ckpt_async["model"].encoder),
+    ), "Async checkpoint encoder weights must match sync checkpoint encoder weights"
 
 
 @pytest.mark.parametrize(

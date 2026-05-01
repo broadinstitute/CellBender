@@ -1,8 +1,10 @@
 """Handle the saving and loading of models from checkpoint files."""
 
 import argparse
+import concurrent.futures
 import glob
 import hashlib
+import io
 import logging
 import os
 import pickle
@@ -31,6 +33,11 @@ try:
 except ImportError:
     USE_PYRO = False
 USE_CUDA = torch.cuda.is_available()
+
+_ckpt_executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="checkpoint"
+)
+_pending_ckpt: Optional[concurrent.futures.Future] = None
 
 
 def save_random_state(filebase: str) -> List[str]:
@@ -98,6 +105,107 @@ def load_random_state(filebase: str):
         torch.cuda.set_rng_state_all(cuda_random_state)
 
 
+def _serialize_checkpoint_to_buffers(
+    filebase: str,
+    model_obj: "RemoveBackgroundPyroModel",
+    scheduler: pyro.optim.PyroOptim,
+    args: argparse.Namespace,
+    train_loader: Optional[DataLoader] = None,
+    test_loader: Optional[DataLoader] = None,
+) -> Dict[str, bytes]:
+    """Serialize all checkpoint state to in-memory byte buffers on the calling thread.
+
+    This is the CPU-bound capture phase of async checkpointing. After this
+    returns, the caller is free to resume training; the background thread can
+    write the bytes to disk without touching any shared mutable state.
+
+    Returns:
+        Dict mapping bare filename to bytes content, ready to be written to a
+        tarball by :func:`_write_checkpoint_buffers`.
+    """
+    buffers: Dict[str, bytes] = {}
+    basename = os.path.basename(filebase)
+
+    # Random state — save_random_state requires a file path, so we use a
+    # short-lived temp directory and read the bytes back immediately.
+    with tempfile.TemporaryDirectory() as rng_tmp:
+        tmp_base = os.path.join(rng_tmp, basename)
+        rng_files = save_random_state(filebase=tmp_base)
+        for path in rng_files:
+            with open(path, "rb") as f:
+                buffers[os.path.basename(path)] = f.read()
+
+    # Model
+    buf = io.BytesIO()
+    torch.save(model_obj, buf, pickle_module=dill)
+    buffers[basename + "_model.torch"] = buf.getvalue()
+
+    # Optimizer — torch part
+    buf = io.BytesIO()
+    torch.save(scheduler, buf, pickle_module=dill)
+    buffers[basename + "_optim.torch"] = buf.getvalue()
+
+    # Optimizer — pyro part: PyroOptim.save() requires a real file path.
+    ntf_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix="_optim.pyro", delete=False) as ntf:
+            ntf_path = ntf.name
+        scheduler.save(ntf_path)
+        with open(ntf_path, "rb") as f:
+            buffers[basename + "_optim.pyro"] = f.read()
+    finally:
+        if ntf_path is not None:
+            try:
+                os.unlink(ntf_path)
+            except OSError:
+                pass
+
+    # Param store (inline to avoid requiring a file path)
+    buf = io.BytesIO()
+    torch.save(pyro.get_param_store().get_state(), buf, pickle_module=dill)
+    buffers[basename + "_params.pyro"] = buf.getvalue()
+
+    # Data loaders (match existing save_checkpoint: no pickle_module override)
+    if train_loader is not None:
+        buf = io.BytesIO()
+        torch.save(train_loader, buf)
+        buffers[basename + "_train.loaderstate"] = buf.getvalue()
+    if test_loader is not None:
+        buf = io.BytesIO()
+        torch.save(test_loader, buf)
+        buffers[basename + "_test.loaderstate"] = buf.getvalue()
+
+    # Args
+    buf = io.BytesIO()
+    np.save(buf, args)
+    buffers[basename + "_args.npy"] = buf.getvalue()
+
+    return buffers
+
+
+def _write_checkpoint_buffers(buffers: Dict[str, bytes], tarball_name: str) -> bool:
+    """Write buffered checkpoint bytes to disk and create a tarball.
+
+    Intended to run in a background thread started by
+    :func:`save_checkpoint_async`.
+    """
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_list = []
+            for name, data in buffers.items():
+                fpath = os.path.join(tmp_dir, name)
+                with open(fpath, "wb") as f:
+                    f.write(data)
+                file_list.append(fpath)
+            make_tarball(files=file_list, tarball_name=tarball_name)
+        logger.info(f"Checkpoint written asynchronously to {os.path.abspath(tarball_name)}")
+        return True
+    except Exception:
+        logger.warning("Async checkpoint write failed")
+        logger.warning(traceback.format_exc())
+        return False
+
+
 def save_checkpoint(
     filebase: str,
     model_obj: "RemoveBackgroundPyroModel",
@@ -160,6 +268,98 @@ def save_checkpoint(
         logger.warning("Could not save checkpoint")
         logger.warning(traceback.format_exc())
         return False
+
+
+def save_checkpoint_async(
+    filebase: str,
+    model_obj: "RemoveBackgroundPyroModel",
+    scheduler: pyro.optim.PyroOptim,
+    args: argparse.Namespace,
+    train_loader: Optional[DataLoader] = None,
+    test_loader: Optional[DataLoader] = None,
+    tarball_name: str = consts.CHECKPOINT_FILE_NAME,
+) -> Optional[concurrent.futures.Future]:
+    """Serialize checkpoint state on the calling thread, then write to disk in
+    a background thread so training can resume immediately.
+
+    The serialization phase (the slow part on CPU — model pickle + gzip) still
+    blocks the caller briefly, but the I/O-heavy tarball write happens off the
+    training thread.  Call :func:`flush_pending_checkpoint` before reading the
+    output file to guarantee the write has completed.
+
+    If serialization raises, this falls back transparently to
+    :func:`save_checkpoint` so callers never need to check for None in the
+    normal path.
+
+    Returns:
+        The :class:`concurrent.futures.Future` for the background write, or
+        ``None`` if serialization failed (sync fallback was used instead).
+    """
+    global _pending_ckpt
+
+    # Wait for any previous background write before capturing a new snapshot.
+    if _pending_ckpt is not None:
+        try:
+            _pending_ckpt.result()
+        except Exception:
+            logger.warning("Previous async checkpoint write raised an exception:")
+            logger.warning(traceback.format_exc())
+        _pending_ckpt = None
+
+    logger.info("Serializing checkpoint state...")
+    try:
+        buffers = _serialize_checkpoint_to_buffers(
+            filebase=filebase,
+            model_obj=model_obj,
+            scheduler=scheduler,
+            args=args,
+            train_loader=train_loader,
+            test_loader=test_loader,
+        )
+    except KeyboardInterrupt:
+        logger.warning("Keyboard interrupt during checkpoint serialization: not saving")
+        return None
+    except Exception:
+        logger.warning("Could not serialize checkpoint state; falling back to synchronous save")
+        logger.warning(traceback.format_exc())
+        save_checkpoint(
+            filebase=filebase,
+            model_obj=model_obj,
+            scheduler=scheduler,
+            args=args,
+            train_loader=train_loader,
+            test_loader=test_loader,
+            tarball_name=tarball_name,
+        )
+        return None
+
+    _pending_ckpt = _ckpt_executor.submit(_write_checkpoint_buffers, buffers, tarball_name)
+    logger.info(f"Writing checkpoint to {os.path.abspath(tarball_name)} in background")
+    return _pending_ckpt
+
+
+def flush_pending_checkpoint() -> bool:
+    """Block until any in-flight async checkpoint write completes.
+
+    Call this after the training loop (and before reading the checkpoint file)
+    to guarantee the last :func:`save_checkpoint_async` has landed on disk.
+
+    Returns:
+        ``True`` if the pending checkpoint succeeded (or nothing was pending),
+        ``False`` if the background write raised an exception.
+    """
+    global _pending_ckpt
+    if _pending_ckpt is None:
+        return True
+    try:
+        result = _pending_ckpt.result()
+        return bool(result)
+    except Exception:
+        logger.warning("Async checkpoint write failed:")
+        logger.warning(traceback.format_exc())
+        return False
+    finally:
+        _pending_ckpt = None
 
 
 def load_checkpoint(
