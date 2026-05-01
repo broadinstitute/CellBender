@@ -175,7 +175,7 @@ def test_save_and_load_random_state(tmpdir_factory, perturbed_random_state_dict,
 
 
 def new_train_loader(data: torch.Tensor, batch_size: int, shuffle: bool = True):
-    return torch.utils.data.DataLoader(torch.utils.data.TensorDataset(data), batch_size=batch_size, shuffle=shuffle)
+    return torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=shuffle)  # type: ignore[arg-type]
 
 
 class PyroModel(torch.nn.Module):
