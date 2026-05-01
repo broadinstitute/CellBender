@@ -1,6 +1,7 @@
 """Test utility functions and session-scoped fixtures."""
 
 import shutil
+from typing import Generator
 
 import numpy as np
 import pytest
@@ -105,7 +106,7 @@ def simulated_dataset():
 
 
 @pytest.fixture(scope="session")
-def h5_v3_file(tmpdir_factory, simulated_dataset) -> "SavedFileH5":
+def h5_v3_file(tmpdir_factory, simulated_dataset) -> Generator["SavedFileH5", None, None]:
     """Save an h5 file once and make it visible to all tests."""
     tmp_dir = tmpdir_factory.mktemp("data")
     filename = tmp_dir.join("tmp_v3.h5")
@@ -131,7 +132,7 @@ def h5_v3_file(tmpdir_factory, simulated_dataset) -> "SavedFileH5":
 
 
 @pytest.fixture(scope="session")
-def h5_v2_file(tmpdir_factory, simulated_dataset) -> "SavedFileH5":
+def h5_v2_file(tmpdir_factory, simulated_dataset) -> Generator["SavedFileH5", None, None]:
     """Save an h5 file once and make it visible to all tests."""
     tmp_dir = tmpdir_factory.mktemp("data")
     filename = tmp_dir.join("tmp_v2.h5")
@@ -154,7 +155,7 @@ def h5_v2_file(tmpdir_factory, simulated_dataset) -> "SavedFileH5":
 
 
 @pytest.fixture(scope="session")
-def h5_v2_file_missing_ids(tmpdir_factory, simulated_dataset) -> "SavedFileH5":
+def h5_v2_file_missing_ids(tmpdir_factory, simulated_dataset) -> Generator["SavedFileH5", None, None]:
     """Save an h5 file once and make it visible to all tests."""
     tmp_dir = tmpdir_factory.mktemp("data")
     filename = tmp_dir.join("tmp_v2.h5")
@@ -187,7 +188,7 @@ def h5_file(request, h5_v2_file, h5_v3_file):
 
 
 @pytest.fixture(scope="session")
-def h5_v3_file_post_inference(tmpdir_factory, simulated_dataset) -> "SavedFileH5":
+def h5_v3_file_post_inference(tmpdir_factory, simulated_dataset) -> Generator["SavedFileH5", None, None]:
     """Save an h5 file once and make it visible to all tests."""
     tmp_dir = tmpdir_factory.mktemp("data")
     filename = tmp_dir.join("tmp_v3_inferred.h5")

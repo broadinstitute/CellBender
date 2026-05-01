@@ -3,7 +3,7 @@ import argparse
 from cellbender.remove_background import consts
 
 
-def add_subparser_args(subparsers: argparse) -> argparse:
+def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubParsersAction:
     """Add tool-specific arguments for remove-background.
 
     Args:

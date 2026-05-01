@@ -11,7 +11,7 @@ import shutil
 import tarfile
 import tempfile
 import traceback
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 if TYPE_CHECKING:
     from cellbender.remove_background.model import RemoveBackgroundPyroModel
@@ -191,9 +191,11 @@ def load_from_checkpoint(
 ) -> Dict:
     """Load specific files from a checkpoint tarball."""
 
-    load_kwargs = {}
+    load_kwargs: dict[str, Any] = {}
+    map_location: torch.device | None = None
     if force_device is not None:
-        load_kwargs.update({"map_location": torch.device(force_device)})
+        map_location = torch.device(force_device)
+        load_kwargs["map_location"] = map_location
 
     # Work in a temporary directory.
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -228,13 +230,13 @@ def load_from_checkpoint(
 
         # Load the saved model.
         if "model" in to_load:
-            model_obj = torch.load(filebase + "_model.torch", **load_kwargs, pickle_module=dill)
+            model_obj = torch.load(filebase + "_model.torch", map_location=map_location, pickle_module=dill)
             logger.debug("Model loaded from " + filebase + "_model.torch")
             out.update({"model": model_obj})
 
         # Load the saved optimizer.
         if "optim" in to_load:
-            scheduler = torch.load(filebase + "_optim.torch", **load_kwargs, pickle_module=dill)
+            scheduler = torch.load(filebase + "_optim.torch", map_location=map_location, pickle_module=dill)
             scheduler.load(filebase + "_optim.pyro", **load_kwargs)  # use PyroOptim method
             logger.debug("Optimizer loaded from " + filebase + "_optim.*")
             out.update({"optim": scheduler})
@@ -251,11 +253,13 @@ def load_from_checkpoint(
             train_loader = None
             test_loader = None
             if os.path.exists(filebase + "_train.loaderstate"):
-                train_loader = torch.load(filebase + "_train.loaderstate", **load_kwargs, pickle_module=dill)
+                train_loader = torch.load(
+                    filebase + "_train.loaderstate", map_location=map_location, pickle_module=dill
+                )
                 logger.debug("Train loader loaded from " + filebase + "_train.loaderstate")
                 out.update({"train_loader": train_loader})
             if os.path.exists(filebase + "_test.loaderstate"):
-                test_loader = torch.load(filebase + "_test.loaderstate", **load_kwargs, pickle_module=dill)
+                test_loader = torch.load(filebase + "_test.loaderstate", map_location=map_location, pickle_module=dill)
                 logger.debug("Test loader loaded from " + filebase + "_test.loaderstate")
                 out.update({"test_loader": test_loader})
 

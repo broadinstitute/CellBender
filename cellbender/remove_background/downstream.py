@@ -184,10 +184,13 @@ def load_anndata_from_input(input_file: str) -> anndata.AnnData:
             d[key] = d.pop(key + "s")
 
     # Create anndata object from dict.
+    barcodes = d.pop("barcode")
+    gene_names = d.pop("gene_name")
+    assert isinstance(barcodes, np.ndarray) and isinstance(gene_names, np.ndarray)
     adata = anndata.AnnData(
         X=d.pop("matrix"),
-        obs={"barcode": d.pop("barcode").astype(str)},
-        var={"gene_name": d.pop("gene_name").astype(str)},
+        obs={"barcode": barcodes.astype(str)},
+        var={"gene_name": gene_names.astype(str)},
         dtype=int,
     )
     adata.obs.set_index("barcode", inplace=True)

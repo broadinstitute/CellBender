@@ -2,7 +2,7 @@ name: 'validate WDL'
 
 on: 
   pull_request:
-    branches: [ master, dev ]
+    branches: [ main ]
 
 env:
   MINIWDL_VERSION: 1.8.0

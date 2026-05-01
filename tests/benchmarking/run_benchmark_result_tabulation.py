@@ -72,9 +72,10 @@ def get_cromshell_output_h5(workflow: str, grep: str = "_out.h5") -> Union[str, 
         return out[0]
 
 
-def sample_name_from_h5(h5: str) -> str:
+def sample_name_from_h5(h5: str | List[str]) -> str:
     """Get sample name by parsing h5 file name"""
-    return os.path.basename(h5).replace("_out.h5", "")
+    h5_str = h5[0] if isinstance(h5, list) else h5
+    return os.path.basename(h5_str).replace("_out.h5", "")
 
 
 def grep_from_command(command: List[str], grep: str) -> bytes:

@@ -39,7 +39,7 @@ class AbstractCLI(ABC):
 
     @staticmethod
     @abstractmethod
-    def validate_args(parser: argparse) -> argparse.Namespace:
+    def validate_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
         """Do tool-specific argument validation, returning args."""
         pass
 
@@ -52,7 +52,7 @@ class AbstractCLI(ABC):
 
 def generate_cli_dictionary() -> Dict[str, AbstractCLI]:
     # Add the tool-specific arguments using sub-parsers.
-    cli_dict = dict(keys=TOOL_NAME_LIST)
+    cli_dict: Dict[str, AbstractCLI] = {}
     for tool_name in TOOL_NAME_LIST:
         # Note: tool name contains a dash, while folder name uses an underscore.
         # Generate the name of the module that contains the tool.

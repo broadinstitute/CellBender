@@ -48,8 +48,8 @@ def log_prob_coo_base() -> Dict[str, Union[sp.coo_matrix, np.ndarray, Dict[int, 
     maps = np.argmax(m, axis=1)
     maps = maps + np.array([offset_dict[m] for m in offset_dict.keys()])
     cdf_logic = torch.logcumsumexp(torch.tensor(m), dim=-1) > np.log(0.5)
-    cdfs = [np.where(a)[0][0] for a in cdf_logic]
-    cdfs = cdfs + np.array([offset_dict[m] for m in offset_dict.keys()])
+    cdfs_list = [np.where(a)[0][0] for a in cdf_logic]
+    cdfs: np.ndarray = cdfs_list + np.array([offset_dict[m] for m in offset_dict.keys()])
 
     return {
         "coo": sp.coo_matrix((vals, (rows, cols)), shape=shape),

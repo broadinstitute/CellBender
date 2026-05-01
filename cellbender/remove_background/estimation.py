@@ -41,7 +41,7 @@ class EstimationMethod(ABC):
 
     @abstractmethod
     def estimate_noise(
-        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Dict[int, int], **kwargs
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], **kwargs
     ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts.
         Args:
@@ -91,7 +91,7 @@ class SingleSample(EstimationMethod):
 
     @torch.no_grad()
     def estimate_noise(
-        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Dict[int, int], device: str = "cpu", **kwargs
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
     ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts by
         taking a single sample from each probability distribution.
@@ -118,7 +118,7 @@ class Mean(EstimationMethod):
     """Posterior mean"""
 
     def estimate_noise(
-        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Dict[int, int], device: str = "cpu", **kwargs
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
     ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts by
         taking the mean of each probability distribution.
@@ -151,7 +151,7 @@ class MAP(EstimationMethod):
         return x.argmax(dim=-1)
 
     def estimate_noise(
-        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Dict[int, int], device: str = "cpu", **kwargs
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
     ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts by
         taking the maximum a posteriori (MAP) of each probability distribution.
@@ -182,7 +182,7 @@ class ThresholdCDF(EstimationMethod):
     def estimate_noise(
         self,
         noise_log_prob_coo: sp.coo_matrix,
-        noise_offsets: Dict[int, int],
+        noise_offsets: Optional[Dict[int, int]],
         q: float = 0.5,
         device: str = "cpu",
         **kwargs,
@@ -423,8 +423,8 @@ class MultipleChoiceKnapsack(EstimationMethod):
     def estimate_noise(
         self,
         noise_log_prob_coo: sp.coo_matrix,
-        noise_offsets: Dict[int, int],
-        noise_targets_per_gene: np.ndarray,
+        noise_offsets: Optional[Dict[int, int]],
+        noise_targets_per_gene: np.ndarray | None = None,
         verbose: bool = False,
         n_chunks: Optional[int] = None,
         use_multiple_processes: bool = False,
@@ -449,6 +449,11 @@ class MultipleChoiceKnapsack(EstimationMethod):
         if n_chunks is None:
             n_chunks = max(1, self.index_converter.total_n_genes // 5000)
             logger.debug(f"Running MCKP estimator in {n_chunks} chunks")
+
+        assert noise_offsets is not None, "noise_offsets is required for MultipleChoiceKnapsack.estimate_noise"
+        assert noise_targets_per_gene is not None, (
+            "noise_targets_per_gene is required for MultipleChoiceKnapsack.estimate_noise"
+        )
 
         t0 = time.time()
 
@@ -547,7 +552,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
     def _chunk_estimate_noise(
         self,
         noise_log_prob_coo: sp.coo_matrix,
-        noise_offsets: Dict[int, int],
+        noise_offsets: Optional[Dict[int, int]],
         noise_targets_per_gene: np.ndarray,
         verbose: bool = False,
     ) -> sp.csr_matrix:
@@ -699,7 +704,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
 def chunked_iterator(
     coo: sp.coo_matrix, max_dense_batch_size_GB: float = 1.0
-) -> Generator[Tuple[sp.coo_matrix, np.ndarray], None, None]:
+) -> Generator[Tuple[sp.coo_matrix, np.ndarray, np.ndarray], None, None]:
     """Return an iterator which yields the full dataset in chunks.
 
     NOTE: Idea is to prevent memory overflow. The use case is for worst-case
@@ -740,7 +745,7 @@ def chunked_iterator(
 
 
 def apply_function_dense_chunks(
-    noise_log_prob_coo: sp.coo_matrix, fun: Callable[[torch.Tensor], torch.Tensor], device: str = "cpu", **kwargs
+    noise_log_prob_coo: sp.coo_matrix, fun: Callable[..., torch.Tensor], device: str = "cpu", **kwargs
 ) -> Dict[str, np.ndarray]:
     """Uses chunked_iterator to densify chunked portions of a COO sparse
     matrix and then applies a function to the dense chunks, keeping track
@@ -794,7 +799,7 @@ def pandas_grouped_apply(
     extra_data: Optional[Dict[str, np.ndarray]] = None,
     sort_first: bool = False,
     parallel: bool = False,
-) -> Dict[str, np.array]:
+) -> Dict[str, np.ndarray]:
     """Apply function on a sparse COO format (noise log probs) to compute output
     noise counts using pandas groupby and apply operations on CPU.
 

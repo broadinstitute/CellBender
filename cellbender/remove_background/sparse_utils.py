@@ -79,18 +79,18 @@ def overwrite_matrix_with_columns_from_another(
     """Given two sparse matrices of the same shape, replace columns that are not
     in `column_inds` in `mat1` with the entries from `mat2`.
     """
-    column_inds = set(column_inds)
+    column_inds_set: set = set(column_inds)
 
     mat1 = mat1.copy().tocsr()
     mat2 = mat2.copy().tocsr()  # failure to copy could overwrite actual count data
 
     # Zero out values in mat2 that are in the specified columns.
-    inds = np.where([i in column_inds for i in mat2.indices])[0]
+    inds = np.where([i in column_inds_set for i in mat2.indices])[0]
     mat2.data[inds] = 0
     mat2.eliminate_zeros()
 
     # Zero out values in mat1 that are not in the specified columns.
-    inds = np.where([i not in column_inds for i in mat1.indices])[0]
+    inds = np.where([i not in column_inds_set for i in mat1.indices])[0]
     mat1.data[inds] = 0
     mat1.eliminate_zeros()
 

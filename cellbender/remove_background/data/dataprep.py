@@ -200,8 +200,8 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
                                   batch_size: int = consts.DEFAULT_BATCH_SIZE,
                                   shuffle: bool = True,
                                   use_cuda: bool = True) -> Tuple[
-                                      torch.utils.data.DataLoader,
-                                      torch.utils.data.DataLoader]:
+                                      "DataLoader",
+                                      "DataLoader"]:
     """Create torch.utils.data.DataLoaders for train and tests set.
 
     The dataset is not loaded into memory as a dense matrix upfront.  Instead

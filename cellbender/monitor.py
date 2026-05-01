@@ -22,7 +22,7 @@ def get_hardware_usage(use_cuda: bool) -> str:
         gpu_query = "utilization.gpu"
         format = "csv,nounits,noheader"
         result = subprocess.run(
-            [shutil.which("nvidia-smi"), f"--query-gpu={gpu_query}", f"--format={format}"],
+            [shutil.which("nvidia-smi") or "nvidia-smi", f"--query-gpu={gpu_query}", f"--format={format}"],
             encoding="utf-8",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,  # for backward compatibility with python version 3.6

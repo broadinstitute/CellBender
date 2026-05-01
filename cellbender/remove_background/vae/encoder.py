@@ -90,7 +90,9 @@ class EncodeZ(FullyConnectedNetwork):
 
     """
 
-    def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int, input_transform: str = None, **kwargs):
+    def __init__(
+        self, input_dim: int, hidden_dims: List[int], output_dim: int, input_transform: str | None = None, **kwargs
+    ):
         assert len(hidden_dims) > 0, "EncodeZ needs to have at least one hidden layer"
         super(EncodeZ, self).__init__(
             input_dim=input_dim,
@@ -107,7 +109,7 @@ class EncodeZ(FullyConnectedNetwork):
         self.loc_out = nn.Linear(hidden_dims[-1], output_dim)
         self.sig_out = nn.Linear(hidden_dims[-1], output_dim)
 
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
 
         # Transform input.
         x = x.reshape(-1, self.input_dim)
@@ -230,7 +232,7 @@ class EncodeNonZLatents(nn.Module):
         self.dropout50 = nn.Dropout1d(p=0.5)
 
         # Set up the initial biases.
-        self.offset = None
+        self.offset: dict | None = None
 
         # Set up the initial scaling for values of x.
         self.x_scaling = None
@@ -338,7 +340,7 @@ class EncodeNonZLatents(nn.Module):
         return {"p_y": p_y_logit, "d_loc": d_loc, "epsilon": epsilon}
 
 
-def transform_input(x: torch.Tensor, transform: str, eps: float = 1e-5) -> torch.Tensor:
+def transform_input(x: torch.Tensor, transform: str | None, eps: float = 1e-5) -> torch.Tensor:
     """Transform input to encoder.
 
     Args:

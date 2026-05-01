@@ -2,7 +2,7 @@
 
 import gzip
 import shutil
-from typing import Dict, List, Optional
+from typing import Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 import pytest
@@ -142,7 +142,7 @@ def test_load_mtx(simulated_dataset, mtx_directory):
     )
 
 
-def save_dge(tmpdir_factory, simulated_dataset, do_gzip) -> str:
+def save_dge(tmpdir_factory, simulated_dataset, do_gzip) -> Tuple:
     """Save data files in DGE format and return the file path"""
     sep = "\t"
     name = "dge.txt"
@@ -152,7 +152,7 @@ def save_dge(tmpdir_factory, simulated_dataset, do_gzip) -> str:
     filename = tmp_dir.join(name)
     load_fcn = gzip.open if do_gzip else open
 
-    def row_generator(mat: sp.csc_matrix) -> List[str]:
+    def row_generator(mat: sp.csc_matrix) -> Generator[List[str], None, None]:
         for i in range(mat.shape[1]):
             yield np.array(mat[:, i].todense()).squeeze().astype(int).astype(str).tolist()
 

@@ -6,7 +6,7 @@ import os
 import sys
 import traceback
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, cast
 
 import matplotlib
 import matplotlib.backends.backend_pdf  # issue #287
@@ -150,6 +150,7 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
 
         # Save cell barcodes in a CSV file.
         analyzed_barcode_logic = posterior.latents_map["p"] > consts.CELL_PROB_CUTOFF
+        assert dataset_obj.data is not None
         cell_barcodes = dataset_obj.data["barcodes"][dataset_obj.analyzed_barcode_inds[analyzed_barcode_logic]]
         bc_file_name = os.path.join(file_dir, file_name + "_cell_barcodes.csv")
         write_cell_barcodes_csv(bc_file_name=bc_file_name, cell_barcodes=cell_barcodes)
@@ -184,13 +185,14 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
             os.remove(filtered_file)
 
         logger.info("Keyboard interrupt.  Terminated without saving.\n")
+        sys.exit(1)
 
 
 def save_output_plots(
     file_dir: str,
     file_name: str,
     dataset_obj: SingleCellRNACountsDataset,
-    inferred_model: RemoveBackgroundPyroModel,
+    inferred_model: Optional[RemoveBackgroundPyroModel],
     p: np.ndarray,
     z: np.ndarray,
 ) -> bool:
@@ -202,7 +204,8 @@ def save_output_plots(
 
         # Three-panel output summary plot.
         counts = np.array(dataset_obj.get_count_matrix().sum(axis=1)).squeeze()
-        fig = plot_summary(loss=inferred_model.loss, umi_counts=counts, p=p, z=z)
+        loss = inferred_model.loss if inferred_model is not None else {}
+        fig = plot_summary(loss=loss, umi_counts=counts, p=p, z=z)
         fig.savefig(summary_fig_name, bbox_inches="tight", format="pdf")
         logger.info(f"Saved summary plots as {summary_fig_name}")
         return True
@@ -235,7 +238,13 @@ def compute_output_denoised_counts_reports_metrics(
     # TODO: when we make the properties non-private, then this should become obsolete
     posterior.cell_noise_count_posterior_coo()
 
+    assert posterior.dataset_obj is not None and posterior.dataset_obj.data is not None
+    assert posterior.vi_model is not None
+
     # Choose output count matrix estimation method.
+    from cellbender.remove_background.estimation import EstimationMethod
+
+    estimator: type[EstimationMethod]
     noise_target_fun = None
     if args.estimator == "map":
         estimator = MAP
@@ -327,6 +336,9 @@ def compute_output_denoised_counts_reports_metrics(
         filtered_output_file = os.path.join(file_dir, file_name + name_suffix + "_filtered.h5")
 
         def _writer_helper(file, **kwargs) -> bool:
+            _dataset_obj = posterior.dataset_obj
+            _vi_model = posterior.vi_model
+            assert _dataset_obj is not None and _vi_model is not None
             return write_denoised_count_matrix(
                 file=file,
                 denoised_count_matrix=denoised_counts,
@@ -335,8 +347,8 @@ def compute_output_denoised_counts_reports_metrics(
                 estimator=args.estimator,
                 estimator_kwargs=None if (args.cdf_threshold_q is None) else {"q": args.cdf_threshold_q},
                 latents=posterior.latents_map,
-                dataset_obj=posterior.dataset_obj,
-                learning_curve=posterior.vi_model.loss,
+                dataset_obj=_dataset_obj,
+                learning_curve=_vi_model.loss,
                 fpr=fpr,
                 **kwargs,
             )
@@ -399,12 +411,14 @@ def write_denoised_count_matrix(
     estimator_kwargs: Optional[Dict[str, float]],
     latents: Dict[str, np.ndarray],
     dataset_obj: SingleCellRNACountsDataset,
-    learning_curve: Dict[str, np.ndarray],  # inferred_model.loss
+    learning_curve: Any,  # inferred_model.loss
     fpr: float,
-    analyzed_barcode_logic: np.ndarray = ...,
-    barcode_inds: np.ndarray = ...,
+    analyzed_barcode_logic: Any = ...,
+    barcode_inds: Any = ...,
 ) -> bool:
     """Helper function for writing output h5 files"""
+
+    assert dataset_obj.data is not None
 
     z = latents["z"][analyzed_barcode_logic, :]
     d = latents["d"][analyzed_barcode_logic]
@@ -476,9 +490,9 @@ def write_denoised_count_matrix(
         },
         global_latents={
             "ambient_expression": ambient_expression,
-            "empty_droplet_size_lognormal_loc": pyro.param("d_empty_loc").item(),
-            "empty_droplet_size_lognormal_scale": pyro.param("d_empty_scale").item(),
-            "cell_size_lognormal_std": pyro.param("d_cell_scale").item(),
+            "empty_droplet_size_lognormal_loc": np.array(pyro.param("d_empty_loc").item()),
+            "empty_droplet_size_lognormal_scale": np.array(pyro.param("d_empty_scale").item()),
+            "cell_size_lognormal_std": np.array(pyro.param("d_cell_scale").item()),
             "swapping_fraction_dist_params": rho,
         },
         metadata=metadata,
@@ -496,6 +510,7 @@ def collect_output_metrics(
     """Create a table with a few output metrics. The idea is for these to
     potentially be used by people creating automated pipelines."""
 
+    assert dataset_obj.data is not None
     # Compute some metrics
     input_count_matrix = dataset_obj.data["matrix"][dataset_obj.analyzed_barcode_inds, :]
     total_raw_counts = dataset_obj.data["matrix"].sum()
@@ -596,7 +611,8 @@ def get_optimizer(
         "total_steps": total_steps,
         "optim_args": optimizer_args,
     }
-    scheduler = pyro.optim.OneCycleLR(scheduler_args)
+    OneCycleLR_cls = getattr(pyro.optim, "OneCycleLR")
+    scheduler = cast(pyro.optim.PyroOptim, OneCycleLR_cls(scheduler_args))
 
     # Constant learning rate overrides the above and uses no scheduler.
     if constant_learning_rate:
@@ -630,6 +646,8 @@ def run_inference(
 
     """
 
+    assert dataset_obj.data is not None
+
     # Get the checkpoint file base name with hash, which we stored in args.
     checkpoint_filename = args.checkpoint_filename
 
@@ -653,10 +671,10 @@ def run_inference(
     ckpt_loaded = ckpt["loaded"]  # True if a checkpoint was loaded successfully
 
     if ckpt_loaded:
-        model = ckpt["model"]
-        scheduler = ckpt["optim"]
-        train_loader = ckpt["train_loader"]
-        test_loader = ckpt["test_loader"]
+        model = cast(RemoveBackgroundPyroModel, ckpt["model"])
+        scheduler = cast(pyro.optim.PyroOptim, ckpt["optim"])
+        train_loader = cast(DataLoader, ckpt["train_loader"])
+        test_loader = cast(DataLoader, ckpt["test_loader"])
         if hasattr(ckpt["args"], "num_failed_attempts"):
             # update this from the checkpoint file, if present
             args.num_failed_attempts = ckpt["args"].num_failed_attempts
@@ -751,7 +769,7 @@ def run_inference(
         # model.guide(torch.zeros([10, dataset_obj.analyzed_gene_inds.size]).to(model.device))
 
         if args.model == "simple":
-            loss_function = JitTrace_ELBO()
+            loss_function: JitTrace_ELBO | JitTraceEnum_ELBO | Trace_ELBO | TraceEnum_ELBO = JitTrace_ELBO()
         else:
             loss_function = JitTraceEnum_ELBO(max_plate_nesting=1, strict_enumeration_warning=False)
     else:

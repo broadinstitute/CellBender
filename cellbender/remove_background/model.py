@@ -1,7 +1,7 @@
 """Definition of the model and the inference setup, with helper functions."""
 
 from numbers import Number
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, cast
 
 import numpy as np
 import pyro
@@ -38,6 +38,7 @@ def calculate_lambda(
         lam = epsilon.unsqueeze(-1) * d_empty.unsqueeze(-1) * chi_ambient
 
     elif model_type == "swapping":
+        assert rho is not None and chi_bar is not None and y is not None and d_cell is not None
         lam = (
             rho.unsqueeze(-1)
             * chi_bar
@@ -46,6 +47,7 @@ def calculate_lambda(
         )
 
     elif model_type == "full":
+        assert rho is not None and chi_bar is not None and y is not None and d_cell is not None
         lam = epsilon.unsqueeze(-1) * (
             (1.0 - rho.unsqueeze(-1)) * chi_ambient * d_empty.unsqueeze(-1)
             + rho.unsqueeze(-1) * chi_bar * (y.unsqueeze(-1) * d_cell.unsqueeze(-1) + d_empty.unsqueeze(-1))
@@ -70,9 +72,11 @@ def calculate_mu(
         mu = epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
 
     elif model_type == "ambient":
+        assert y is not None
         mu = y.unsqueeze(-1) * epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
 
     elif model_type == "swapping" or model_type == "full":
+        assert rho is not None and y is not None
         mu = (1.0 - rho.unsqueeze(-1)) * y.unsqueeze(-1) * epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
 
     else:
@@ -110,9 +114,9 @@ class RemoveBackgroundPyroModel(nn.Module):
     def __init__(
         self,
         model_type: str,
-        encoder: Union[nn.Module, encoder_module.CompositeEncoder],
+        encoder: encoder_module.CompositeEncoder,
         decoder: nn.Module,
-        dataset_obj_priors: Dict[str, float],
+        dataset_obj_priors: Dict[str, Any],
         n_analyzed_genes: int,
         n_droplets: int,
         analyzed_gene_names: np.ndarray,
@@ -139,16 +143,16 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.n_genes = n_analyzed_genes
         self.n_droplets = n_droplets
         self.analyzed_gene_names = analyzed_gene_names
-        self.z_dim = decoder.input_dim
+        self.z_dim: int = cast(int, decoder.input_dim)
         self.encoder = encoder
         self.decoder = decoder
         self.use_exact_log_prob = use_exact_log_prob
-        self.loss = {
+        self.loss: Dict[str, Dict[str, list]] = {
             "train": {"epoch": [], "elbo": []},
             "test": {"epoch": [], "elbo": []},
             "learning_rate": {"epoch": [], "value": []},
         }
-        self.empty_UMI_threshold = empty_UMI_threshold
+        self.empty_UMI_threshold: int | torch.Tensor = empty_UMI_threshold
         self.log_counts_crossover = log_counts_crossover
         self.counts_crossover = np.exp(log_counts_crossover)
 
@@ -355,6 +359,8 @@ class RemoveBackgroundPyroModel(nn.Module):
 
             if self.include_empties:
                 # Put a prior on p_y_logit to maintain balance.
+                assert y is not None
+                assert d_empty is not None
                 pyro.sample(
                     "p_logit_reg",
                     dist.Normal(loc=self.p_logit_prior, scale=(consts.P_LOGIT_SCALE * torch.ones([1]).to(self.device))),
@@ -365,9 +371,12 @@ class RemoveBackgroundPyroModel(nn.Module):
                 counts = x.sum(dim=-1, keepdim=False)
                 surely_cell_mask = (counts >= self.d_cell_loc_prior.exp()).bool().to(self.device)
 
-                with poutine.mask(mask=y.detach().bool().logical_not()):  # surely_empty_mask):
+                with poutine.mask(
+                    mask=cast(torch.BoolTensor, cast(torch.Tensor, y).detach().bool().logical_not())
+                ):  # surely_empty_mask):
                     with poutine.scale(scale=consts.REG_SCALE_AMBIENT_EXPRESSION):
                         if self.include_rho:
+                            assert rho is not None
                             r = rho.detach()
                         else:
                             r = None
@@ -541,7 +550,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 prob = enc["p_y"].sigmoid().detach()  # Logits to probability
 
                 # Mask out empty droplets.
-                with poutine.mask(mask=y.bool().detach()):
+                with poutine.mask(mask=cast(torch.BoolTensor, y.bool().detach())):
                     # Sample latent code z for the barcodes containing cells.
                     _z = pyro.sample("z", dist.Normal(loc=enc["z"]["loc"], scale=enc["z"]["scale"]).to_event(1))
 
@@ -567,15 +576,17 @@ class RemoveBackgroundPyroModel(nn.Module):
 
 def get_p_logit_prior(
     log_counts: torch.Tensor,
-    log_cell_prior_counts: float,
-    surely_empty_counts: torch.Tensor,
-    naive_p_logit_prior: float,
+    log_cell_prior_counts: torch.Tensor | float,
+    surely_empty_counts: torch.Tensor | int,
+    naive_p_logit_prior: torch.Tensor | float,
 ) -> torch.Tensor:
     """Compute the logit cell probability prior per droplet based on counts"""
     ones = torch.ones_like(log_counts)
     p_logit_prior = ones * naive_p_logit_prior
     p_logit_prior = torch.where(
-        log_counts <= (surely_empty_counts.log() + log_cell_prior_counts) / 2, ones * -100.0, p_logit_prior
+        log_counts <= (torch.as_tensor(surely_empty_counts, dtype=log_counts.dtype).log() + log_cell_prior_counts) / 2,
+        ones * -100.0,
+        p_logit_prior,
     )
     p_logit_prior = torch.where(log_counts >= log_cell_prior_counts, ones * consts.REG_LOGIT_MEAN, p_logit_prior)
     return p_logit_prior

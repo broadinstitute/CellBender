@@ -1,6 +1,6 @@
 """Base neural network architectures, for convenience"""
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 
@@ -54,7 +54,7 @@ class FullyConnectedLayer(torch.nn.Module):
         self,
         input_dim: int,
         output_dim: int,
-        activation: torch.nn.Module = torch.nn.ReLU,
+        activation: type[torch.nn.Module] | torch.nn.Module | None = torch.nn.ReLU,
         use_batch_norm: bool = False,
         use_layer_norm: bool = False,
         dropout_rate: Optional[float] = None,
@@ -64,7 +64,7 @@ class FullyConnectedLayer(torch.nn.Module):
         self.output_dim = output_dim
 
         # set up layers as a list of Linear modules with appropriate extras
-        modules = []
+        modules: list[torch.nn.Module] = []
         if dropout_rate is not None:
             modules.append(torch.nn.Dropout(p=dropout_rate))
         modules.append(torch.nn.Linear(in_features=input_dim, out_features=output_dim))
@@ -73,7 +73,7 @@ class FullyConnectedLayer(torch.nn.Module):
         if use_layer_norm:
             modules.append(torch.nn.LayerNorm(normalized_shape=output_dim, elementwise_affine=False))
         if activation is not None:
-            modules.append(activation)
+            modules.append(activation() if isinstance(activation, type) else activation)
 
         # concatenate Linear layers using Sequential
         self.layer = torch.nn.Sequential(*modules)
@@ -144,5 +144,5 @@ class FullyConnectedNetwork(torch.nn.Module):
         # concatenate Linear layers using Sequential
         self.network = torch.nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Any:
         return self.network(x)

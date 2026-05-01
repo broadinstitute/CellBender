@@ -33,7 +33,9 @@ def get_parser() -> argparse.ArgumentParser:
     return parser_
 
 
-def compute_noise_counts(posterior, fpr: float, estimator_constructor: "EstimationMethod", **kwargs) -> sp.csr_matrix:
+def compute_noise_counts(
+    posterior, fpr: float, estimator_constructor: "type[EstimationMethod]", **kwargs
+) -> sp.csr_matrix:
     """Probably the most important method: computation of the clean output count matrix.
 
     Args:

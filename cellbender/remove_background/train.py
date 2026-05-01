@@ -114,8 +114,8 @@ def run_training(
     epochs: int,
     output_filename: str,
     test_freq: int = 10,
-    final_elbo_fail_fraction: float = None,
-    epoch_elbo_fail_fraction: float = None,
+    final_elbo_fail_fraction: float | None = None,
+    epoch_elbo_fail_fraction: float | None = None,
     ckpt_tarball_name: str = consts.CHECKPOINT_FILE_NAME,
     checkpoint_freq: int = 10,
 ) -> Tuple[List[float], List[float]]:

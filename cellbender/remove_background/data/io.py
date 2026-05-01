@@ -8,7 +8,7 @@ import scipy.io as io
 
 from cellbender.remove_background import consts
 
-from typing import Dict, Union, List, Optional, Callable
+from typing import Any, Dict, Union, List, Optional, Callable
 import logging
 import os
 import gzip
@@ -77,7 +77,7 @@ def write_matrix_to_cellranger_h5(
         genomes: Optional[np.ndarray] = None,
         local_latents: Dict[str, Optional[np.ndarray]] = {},
         global_latents: Dict[str, Optional[np.ndarray]] = {},
-        metadata: Dict[str, Optional[Union[np.ndarray, int, str, Dict]]] = {}) -> bool:
+        metadata: Dict[str, Optional[Union[np.ndarray, int, float, str, Dict]]] = {}) -> bool:
     """Write count matrix data to output HDF5 file using CellRanger format.
 
     Args:
@@ -211,8 +211,8 @@ def write_matrix_to_cellranger_h5(
 
         # Store metadata.
         metadata_group = f.create_group("/", "metadata", "Metadata")
-        for key, value in metadata.items():
-            for k, v in unravel_dict(key, value).items():
+        for meta_key, meta_value in metadata.items():
+            for k, v in unravel_dict(meta_key, meta_value).items():
                 create_nonscalar_metadata_array(f, metadata_group, k, v)
 
     logger.info(f"Succeeded in writing CellRanger "
@@ -224,7 +224,7 @@ def write_matrix_to_cellranger_h5(
 def write_posterior_coo_to_h5(
         output_file: str,
         posterior_coo: sp.coo_matrix,
-        noise_count_offsets: Dict[int, int],
+        noise_count_offsets: Optional[Dict[int, int]],
         latents: Dict[str, np.ndarray],
         feature_inds: np.ndarray,
         barcode_inds: np.ndarray,
@@ -279,7 +279,7 @@ def write_posterior_coo_to_h5(
         extras = f.create_group("/", "metadata", "Posterior metadata")
         f.create_carray(extras, "barcode_inds", obj=barcode_inds, filters=filters)
         f.create_carray(extras, "feature_inds", obj=feature_inds, filters=filters)
-        if noise_count_offsets != {}:
+        if noise_count_offsets:
             f.create_carray(extras, "noise_count_offsets_keys",
                             obj=list(noise_count_offsets.keys()), filters=filters)
             f.create_carray(extras, "noise_count_offsets_values",
@@ -331,7 +331,7 @@ def write_posterior_coo_to_h5(
     return True
 
 
-def load_posterior_from_h5(filename: str) -> Dict[str, Union[sp.coo_matrix, np.ndarray]]:
+def load_posterior_from_h5(filename: str) -> Dict[str, Any]:
     """Load a posterior noise count COO from an h5 file.
 
     Args:
@@ -417,7 +417,7 @@ def load_posterior_from_h5(filename: str) -> Dict[str, Union[sp.coo_matrix, np.n
             'barcode_inds': barcode_inds}
 
 
-def unravel_dict(pref: str, d: Dict) -> Dict:
+def unravel_dict(pref: str, d: Any) -> Dict:
     """Unravel a nested dict, returning a dict with values that are not dicts"""
 
     if type(d) != dict:
@@ -708,19 +708,20 @@ def get_matrix_from_cellranger_h5(filename: str) \
     with tables.open_file(filename, 'r') as f:
         # Initialize empty lists.
         csc_list = []
-        barcodes = None
-        feature_ids = None
-        feature_types = None
-        genomes = None
+        barcodes: np.ndarray | None = None
+        feature_ids: np.ndarray | None = None
+        feature_types: np.ndarray | None = None
+        genomes: np.ndarray | None = None
+        feature_names: np.ndarray = np.array([])
 
         # CellRanger v2:
         # Each group in the table (other than root) contains a genome,
         # so walk through the groups to get data for each genome.
         if cellranger_version == 2:
 
-            feature_names = []
-            feature_ids = []
-            genomes = []
+            feature_names_list: list = []
+            feature_ids_list: list = []
+            genomes_list: list = []
 
             for group in f.walk_groups():
                 try:
@@ -734,19 +735,19 @@ def get_matrix_from_cellranger_h5(filename: str) \
                     csc_list.append(sp.csc_matrix((data, indices, indptr),
                                                   shape=shape))
                     fnames_this_genome = getattr(group, 'gene_names').read()
-                    feature_names.extend(fnames_this_genome)
-                    feature_ids.extend(getattr(group, 'genes').read())
-                    genomes.extend([group._g_gettitle()] * fnames_this_genome.size)
+                    feature_names_list.extend(fnames_this_genome)
+                    feature_ids_list.extend(getattr(group, 'genes').read())
+                    genomes_list.extend([group._g_gettitle()] * fnames_this_genome.size)
 
                 except tables.NoSuchNodeError:
                     # This exists to bypass the root node, which has no data.
                     pass
 
             # Create numpy arrays.
-            feature_names = np.array(feature_names, dtype=str)
-            genomes = np.array(genomes, dtype=str)
-            if len(feature_ids) > 0:
-                feature_ids = np.array(feature_ids)
+            feature_names = np.array(feature_names_list, dtype=str)
+            genomes = np.array(genomes_list, dtype=str)
+            if len(feature_ids_list) > 0:
+                feature_ids = np.array(feature_ids_list)
             else:
                 feature_ids = None
 
@@ -787,6 +788,8 @@ def get_matrix_from_cellranger_h5(filename: str) \
     # Put the data together (possibly from several genomes for v2 datasets).
     count_matrix = sp.vstack(csc_list, format='csc')
     count_matrix = count_matrix.transpose().tocsr()
+
+    assert barcodes is not None, "barcodes not loaded from HDF5 file"
 
     # Issue warnings if necessary, based on dimensions matching.
     if count_matrix.shape[1] != feature_names.size:
@@ -859,9 +862,9 @@ def get_matrix_from_dropseq_dge(filename: str) \
         gene_names = []
 
         # Arrays used to construct a sparse matrix
-        row = []
-        col = []
-        data = []
+        row: list = []
+        col: list = []
+        data: list = []
 
         # Read in rest of file row by row
         for i, line in enumerate(f):
@@ -941,16 +944,16 @@ def get_matrix_from_bd_rhapsody(filename: str) \
         barcodes = []
 
         # Arrays used to construct a sparse matrix
-        row = []
-        col = []
-        data = []
+        row: list = []
+        col: list = []
+        data: list = []
 
         # Read in rest of file row by row
         for i, line in enumerate(f):
             # Parse row into gene name and count data
             parsed_line = line.split('\n')[0].split(',')
             barcodes.append(parsed_line[0])
-            counts = np.array(parsed_line[1:], dtype=np.int)
+            counts = np.array(parsed_line[1:], dtype=np.int_)
 
             # Create sparse version of data and add to arrays
             nonzero_col_inds = np.nonzero(counts)[0]
@@ -960,7 +963,7 @@ def get_matrix_from_bd_rhapsody(filename: str) \
 
     count_matrix = sp.csc_matrix((data, (row, col)),
                                  shape=(len(barcodes), len(gene_names)),
-                                 dtype=np.float)
+                                 dtype=float)
 
     return {'matrix': count_matrix,
             'gene_names': np.array(gene_names),

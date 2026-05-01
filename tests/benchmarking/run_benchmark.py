@@ -70,7 +70,7 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 def update_input_json(
-    template_file: str, substitutions: Dict[str, str], tmpdir: tempfile.TemporaryDirectory, verbose: bool = True
+    template_file: str, substitutions: Dict[str, str], tmpdir: str, verbose: bool = True
 ) -> Tuple[str, str]:
     """Create a new input json for a Cromwell run based on a template"""
 
@@ -115,10 +115,10 @@ def cromshell_submit(
     inputs: str,
     options: str,
     dependencies: List[str],
-    tmpdir: tempfile.TemporaryDirectory,
+    tmpdir: str,
     alias: Optional[str] = None,
     verbose: bool = True,
-) -> Tuple[str, str]:
+) -> Tuple[str, Optional[str]]:
     """Submit job via cromshell and return the workflow-id and alias
 
     NOTE: the whole dependency zipping thing is way more difficult than it has
@@ -224,7 +224,7 @@ if __name__ == "__main__":
             alias = "_".join(["cellbender", args.sample, args.git_hash])
         else:
             alias = "_".join(["cellbender", args.sample])
-        workflow_id, alias = cromshell_submit(
+        workflow_id, returned_alias = cromshell_submit(
             wdl=os.path.join(this_dir, "benchmark.wdl"),
             inputs=inputs_json,
             options=options_json,

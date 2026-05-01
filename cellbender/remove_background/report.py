@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import subprocess
-from typing import Dict, Optional
+from typing import Any, Dict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,7 +23,7 @@ from cellbender.remove_background.downstream import (
 )
 
 logger = logging.getLogger("cellbender")
-warnings = []
+warnings: list[str] = []
 TIMEOUT = 1200  # twenty minutes should always be way more than enough
 
 # counteract an error when I run locally
@@ -87,7 +87,7 @@ def run_notebook_make_html(file, output) -> str:
 
 
 def generate_summary_plots(
-    input_file: str, output_file: str, truth_file: Optional[Dict] = None, dev_mode: bool = consts.EXTENDED_REPORT
+    input_file: str, output_file: str, truth_file: str | None = None, dev_mode: bool = consts.EXTENDED_REPORT
 ):
     """Read in cellbender's output file and generate summary plots.
 
@@ -108,7 +108,7 @@ def generate_summary_plots(
     if os.path.isdir(output_file):
         adata = _load_anndata_from_input_and_decontx(
             input_file=input_file,
-            output_mtx_directory=output_file,
+            output=output_file,
             input_layer_key=input_layer_key,
             truth_file=truth_file,
         )
@@ -531,7 +531,7 @@ def assess_learning_curve(
     display(Markdown('*<span style="color:gray">What to watch out for:</span>*'))
     display(
         Markdown(
-            '*<span style="color:gray">1. large downward spikes in the ELBO (of value more than a few hundred)</span>*\n'
+            '*<span style="color:gray">1. large downward spikes in the ELBO (value more than a few hundred)</span>*\n'
             '*<span style="color:gray">2. the test ELBO can be smaller than the train ELBO, but generally we '
             "want to see both curves increasing and reaching a stable plateau.  We "
             "do not want the test ELBO to dip way back down at the end.</span>*\n"
@@ -1780,7 +1780,7 @@ def cell_roc_count_roc(
     input_csr: sp.csr_matrix,
     truth_csr: sp.csr_matrix,
     cell_calls: np.ndarray,
-    truth_cell_labels: np.ndarray = None,
+    truth_cell_labels: np.ndarray | None = None,
 ) -> float:  # 0 = empty, nonzero = cell
     """Plot a ROC curve (point) for cell identification, and plot
     a second for noise count identification.
@@ -1992,7 +1992,7 @@ def pca_2d(mat: np.ndarray) -> torch.Tensor:
     return torch.matmul(A, V[:, :2])
 
 
-def plot_summary(loss: Dict[str, Dict[str, np.ndarray]], umi_counts: np.ndarray, p: np.ndarray, z: np.ndarray):
+def plot_summary(loss: Dict[str, Dict[str, Any]], umi_counts: np.ndarray, p: np.ndarray, z: np.ndarray):
     """Output summary plot with three panels: training, cells, latent z."""
 
     fig = plt.figure(figsize=(6, 18))
@@ -2014,7 +2014,7 @@ def plot_summary(loss: Dict[str, Dict[str, np.ndarray]], umi_counts: np.ndarray,
         except ValueError:
             ylim_high = max(loss["train"]["elbo"])
         ylim_high = ylim_high + (ylim_high - ylim_low) / 20
-        plt.gca().set_ylim([ylim_low, ylim_high])
+        plt.gca().set_ylim((ylim_low, ylim_high))
     except Exception:
         pass
 
