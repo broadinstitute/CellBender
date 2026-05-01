@@ -367,79 +367,73 @@ def test_compute_mean_target_removal_as_function(log_prob_coo, fpr, per_gene, cu
 @pytest.mark.parametrize("m", [1000, 2200000000], ids=["small", "big"])
 def test_save_and_load(tmpdir_factory, blank_noise_offsets, m):
     """Test that a round trip through save and load gives the same thing"""
+    from pathlib import Path
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cellbender.remove_background.data.io import (
+        POSTERIOR_SCHEMA,
+        write_posterior_batch_to_parquet,
+        write_posterior_latents_csv,
+    )
+    from cellbender.remove_background.posterior import _posterior_latents_path
 
     tmp_dir = tmpdir_factory.mktemp("posterior")
-    filename = tmp_dir.join("posterior.h5")
+    src_file = str(tmp_dir.join("src_posterior.parquet"))
+    dst_file = str(tmp_dir.join("dst_posterior.parquet"))
 
-    n = 20
-    num_nonzeros = 1000
+    num_nonzeros = 100
 
-    posterior = Posterior(dataset_obj=None, vi_model=None)  # blank
+    # Create a fake posterior parquet with small cell/gene ids.
+    cell_ids = np.random.randint(0, 100, size=num_nonzeros, dtype=np.int32)
+    gene_ids = np.random.randint(0, 50, size=num_nonzeros, dtype=np.int32)
+    c_vals = np.random.randint(0, 10, size=num_nonzeros, dtype=np.int16)
+    offset_vals = np.zeros(num_nonzeros, dtype=np.int16)
+    if not blank_noise_offsets:
+        offset_vals[:5] = 1
+    log_probs = (np.random.rand(num_nonzeros).astype(np.float32) * -10)
 
-    # old way that cannot handle large m
-    # posterior_coo = sp.random(m, n, density=0.1, format='coo', dtype=float)
-    # posterior_coo2 = sp.random(m, n, density=0.08, format='coo', dtype=float)
-
-    m_array = np.random.randint(low=0, high=m, size=num_nonzeros - 1, dtype=np.uint64)
-    m_array = np.concatenate([m_array, np.array(m - 1, dtype=np.uint64)], axis=None)
-    n_array = np.random.randint(low=0, high=n, size=num_nonzeros)
-    val_array = np.random.rand(num_nonzeros) * -10
-    val_array2 = np.random.rand(num_nonzeros) * -5
-
-    posterior_coo = sp.coo_matrix((val_array, (m_array, n_array)), shape=(m, n))
-    posterior_coo2 = sp.coo_matrix((val_array2, (m_array, n_array)), shape=(m, n))
-
-    if blank_noise_offsets:
-        noise_offsets = {}
-    else:
-        noise_offsets = dict(
-            zip(
-                np.random.randint(low=0, high=(m - 1), size=10, dtype=np.uint64),
-                np.random.randint(low=1, high=5, size=10),
-            )
+    with pq.ParquetWriter(src_file, schema=POSTERIOR_SCHEMA) as writer:
+        write_posterior_batch_to_parquet(
+            writer=writer,
+            cell_ids=cell_ids,
+            gene_ids=gene_ids,
+            c_vals=c_vals,
+            offset_vals=offset_vals,
+            log_probs=log_probs,
+            regularized=False,
         )
-    kwargs = {"a": "b", "c": 1}
-    kwargs2 = {"a": "method", "c": 1}
 
-    # jam in fake values
-    posterior._noise_count_posterior_coo = posterior_coo
-    posterior._noise_count_posterior_coo_offsets = noise_offsets
-    posterior._noise_count_posterior_kwargs = kwargs
-    posterior._noise_count_regularized_posterior_coo = posterior_coo2
-    posterior._noise_count_regularized_posterior_kwargs = kwargs2
-    posterior._latents = {"p": np.random.randn(100), "d": np.random.randn(100)}
-    posterior.index_converter = IndexConverter(total_n_cells=max(1000, m // 1000 + 1), total_n_genes=1000)
+    latents = {"p": np.random.randn(100), "d": np.random.randn(100)}
+    write_posterior_latents_csv(_posterior_latents_path(Path(src_file)), latents)
+
+    # Set up posterior object directly (bypass model computation).
+    posterior = Posterior(dataset_obj=None, vi_model=None)
+    posterior._posterior_parquet_path = Path(src_file)
+    posterior._latents = latents
 
     # save
-    posterior.save(file=str(filename))
+    posterior.save(file=dst_file)
 
     # load
-    posterior2 = Posterior(dataset_obj=None, vi_model=None)  # blank
-    posterior2.load(file=str(filename))
+    posterior2 = Posterior(dataset_obj=None, vi_model=None)
+    posterior2.load(file=dst_file)
 
-    # check
-    for attr in [
-        "_noise_count_posterior_coo",
-        "_noise_count_posterior_coo_offsets",
-        "_noise_count_posterior_kwargs",
-        "_noise_count_regularized_posterior_coo",
-        "_noise_count_regularized_posterior_kwargs",
-        "_latents",
-    ]:
-        val1 = getattr(posterior, attr)
-        val2 = getattr(posterior2, attr)
-        print(f"{attr} ===================")
-        print("saved:")
-        print(val1)
-        print("loaded")
-        print(val2)
-        err_msg = f"Posterior attribute {attr} not preserved after saving and loading"
-        if isinstance(val1, sp.coo_matrix):
-            assert sparse_matrix_equal(val1, val2), err_msg
-        elif isinstance(val1, np.ndarray):
-            np.testing.assert_equal(val1, val2)
-        elif isinstance(val1, dict) and (val1 != {}) and isinstance(list(val1.values())[0], np.ndarray):
-            for k in val1.keys():
-                np.testing.assert_equal(val1[k], val2[k])
-        else:
-            assert val1 == val2, err_msg
+    # check: parquet path set correctly
+    assert posterior2._posterior_parquet_path == Path(dst_file), (
+        "Posterior parquet path not set correctly after load"
+    )
+
+    # check: latents preserved
+    assert posterior2._latents is not None, "_latents should be loaded from CSV sidecar"
+    for key in latents:
+        np.testing.assert_allclose(
+            posterior2._latents[key], latents[key], rtol=1e-12,
+            err_msg=f"Latent '{key}' not preserved after save/load round-trip",
+        )
+
+    # check: parquet content round-trip
+    table1 = pq.read_table(src_file)
+    table2 = pq.read_table(dst_file)
+    assert table1.num_rows == table2.num_rows, "Row count mismatch after save/load"

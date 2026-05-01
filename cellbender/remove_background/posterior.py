@@ -7,6 +7,9 @@ import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from pathlib import Path
+
+import pyarrow.parquet as pq
 from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Union, cast
 
 if TYPE_CHECKING:
@@ -24,7 +27,16 @@ from cellbender.monitor import get_hardware_usage
 from cellbender.remove_background.checkpoint import load_checkpoint, load_from_checkpoint, make_tarball, unpack_tarball
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataset import get_dataset_obj
-from cellbender.remove_background.data.io import load_posterior_from_h5, write_posterior_coo_to_h5
+from cellbender.remove_background.data.io import (
+    POSTERIOR_SCHEMA,
+    _parquet_to_coo,
+    load_posterior_global_latents_json,
+    load_posterior_latents_csv,
+    sort_posterior_parquet,
+    write_posterior_batch_to_parquet,
+    write_posterior_global_latents_json,
+    write_posterior_latents_csv,
+)
 from cellbender.remove_background.estimation import (
     MAP,
     EstimationMethod,
@@ -39,6 +51,26 @@ from cellbender.remove_background.sparse_utils import (
 )
 
 logger = logging.getLogger("cellbender")
+
+
+def _posterior_latents_path(parquet_path: Path) -> Path:
+    """Return the path to the per-barcode latents CSV sidecar."""
+    name = parquet_path.name
+    if name.endswith("_posterior.parquet"):
+        new_name = name[: -len("_posterior.parquet")] + "_posterior_latents.csv.gz"
+    else:
+        new_name = parquet_path.stem + "_latents.csv.gz"
+    return parquet_path.parent / new_name
+
+
+def _posterior_global_latents_path(parquet_path: Path) -> Path:
+    """Return the path to the global latents JSON sidecar (e.g. phi_loc_scale)."""
+    name = parquet_path.name
+    if name.endswith("_posterior.parquet"):
+        new_name = name[: -len("_posterior.parquet")] + "_posterior_global_latents.json"
+    else:
+        new_name = parquet_path.stem + "_global_latents.json"
+    return parquet_path.parent / new_name
 
 
 def load_or_compute_posterior_and_save(
@@ -141,18 +173,24 @@ def load_or_compute_posterior_and_save(
     else:
         # Compute posterior.
         logger.info("Posterior not currently included in checkpoint.")
-        posterior.cell_noise_count_posterior_coo()
+        posterior_parquet_file = args.output_file[:-3] + "_posterior.parquet"
+        posterior.ensure_posterior_computed(path=Path(posterior_parquet_file))
         _do_posterior_regularization(posterior)
 
         # Save posterior and add it to checkpoint tarball.
-        posterior_file = args.output_file[:-3] + "_posterior.h5"
-        saved = posterior.save(file=posterior_file)
+        saved = posterior.save(file=posterior_parquet_file)
         success = False
         if saved:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball, directory=tmp_dir)
                 if unpacked:
-                    shutil.copy(posterior_file, os.path.join(tmp_dir, "posterior.h5"))
+                    shutil.copy(posterior_parquet_file, os.path.join(tmp_dir, "posterior.parquet"))
+                    latents_src = _posterior_latents_path(Path(posterior_parquet_file))
+                    if latents_src.exists():
+                        shutil.copy(str(latents_src), os.path.join(tmp_dir, "posterior_latents.csv.gz"))
+                    global_latents_src = _posterior_global_latents_path(Path(posterior_parquet_file))
+                    if global_latents_src.exists():
+                        shutil.copy(str(global_latents_src), os.path.join(tmp_dir, "posterior_global_latents.json"))
                     all_ckpt_files = [
                         os.path.join(tmp_dir, f)
                         for f in os.listdir(tmp_dir)
@@ -224,8 +262,9 @@ class Posterior:
         self.debug = debug
         self.float_threshold = float_threshold
         self.posterior_batch_size = posterior_batch_size
-        self._noise_count_posterior_coo: sp.coo_matrix | None = None
+        self._posterior_parquet_path: Path | None = None
         self._noise_count_posterior_kwargs: dict | None = None
+        # Offsets cached when posterior is loaded via _parquet_to_coo() for regularization.
         self._noise_count_posterior_coo_offsets: Dict[int, int] | None = None
         self._noise_count_regularized_posterior_coo: sp.coo_matrix | None = None
         self._noise_count_regularized_posterior_kwargs: dict | None = None
@@ -237,45 +276,35 @@ class Posterior:
             )
 
     def save(self, file: str) -> bool:
-        """Save the full posterior in HDF5 format."""
-
-        if self._noise_count_posterior_coo is None:
-            self.cell_noise_count_posterior_coo()
-
-        assert self._noise_count_posterior_coo is not None
-        n, g = self.index_converter.get_ng_indices(self._noise_count_posterior_coo.row)
+        """Save the posterior parquet to *file* and copy the latents CSV sidecar."""
+        self.ensure_posterior_computed()
+        assert self._posterior_parquet_path is not None
 
         try:
-            logger.info(f"Writing full posterior to {file}")
-            return write_posterior_coo_to_h5(
-                output_file=file,
-                posterior_coo=self._noise_count_posterior_coo,
-                noise_count_offsets=self._noise_count_posterior_coo_offsets,
-                latents=self.latents_map,
-                feature_inds=g,
-                barcode_inds=n,
-                regularized_posterior_coo=self._noise_count_regularized_posterior_coo,
-                posterior_kwargs=self._noise_count_posterior_kwargs,
-                regularized_posterior_kwargs=self._noise_count_regularized_posterior_kwargs,
-            )
-        except MemoryError:
-            logger.warning(
-                "Attempting to save the posterior as an h5 file "
-                "resulted in an out-of-memory error. Please report "
-                "this as a github issue."
-            )
+            dst = Path(file)
+            if self._posterior_parquet_path.resolve() != dst.resolve():
+                logger.info(f"Copying posterior parquet to {file}")
+                shutil.copy(str(self._posterior_parquet_path), str(dst))
+                src_latents = _posterior_latents_path(self._posterior_parquet_path)
+                if src_latents.exists():
+                    shutil.copy(str(src_latents), str(_posterior_latents_path(dst)))
+                self._posterior_parquet_path = dst
+            else:
+                logger.info(f"Posterior parquet already at {file}")
+            return True
+        except Exception as exc:
+            logger.warning(f"Failed to save posterior: {exc}")
             return False
 
     def load(self, file: str) -> bool:
-        """Load a saved posterior in compressed array .npz format."""
-
-        d = load_posterior_from_h5(filename=file)
-        self._noise_count_posterior_coo = d["coo"]
-        self._noise_count_posterior_coo_offsets = d["noise_count_offsets"]
-        self._noise_count_posterior_kwargs = d["kwargs"]
-        self._noise_count_regularized_posterior_coo = d["regularized_coo"]
-        self._noise_count_regularized_posterior_kwargs = d["kwargs_regularized"]
-        self._latents = d["latents"]
+        """Load a previously computed posterior from a parquet file."""
+        self._posterior_parquet_path = Path(file)
+        latents_path = _posterior_latents_path(self._posterior_parquet_path)
+        global_latents_path = _posterior_global_latents_path(self._posterior_parquet_path)
+        if latents_path.exists():
+            self._latents = load_posterior_latents_csv(latents_path)
+            # Merge global latents (e.g. phi_loc_scale) back in.
+            self._latents.update(load_posterior_global_latents_json(global_latents_path))
         logger.info(f"Loaded pre-computed posterior from {file}")
         return True
 
@@ -294,30 +323,28 @@ class Posterior:
 
         """
 
-        # Only compute using defaults if the cache is empty.
+        # Instantiate Estimator object.
+        estimator = estimator_constructor(index_converter=self.index_converter)
+
         if self._noise_count_regularized_posterior_coo is not None:
             # Priority is taken by a regularized posterior, since presumably
             # the user computed it for a reason.
             logger.debug("Using regularized posterior to compute denoised counts")
             logger.debug(self._noise_count_regularized_posterior_kwargs)
-            posterior_coo = self._noise_count_regularized_posterior_coo
-        else:
-            # Use exact posterior if a regularized version is not computed.
-            posterior_coo = (
-                self._noise_count_posterior_coo
-                if (self._noise_count_posterior_coo is not None)
-                else self.cell_noise_count_posterior_coo()
+            noise_csr = estimator.estimate_noise(
+                noise_log_prob_coo=self._noise_count_regularized_posterior_coo,
+                noise_offsets=self._noise_count_posterior_coo_offsets,
+                **kwargs,
             )
-
-        # Instantiate Estimator object.
-        estimator = estimator_constructor(index_converter=self.index_converter)
-
-        # Compute point estimate of noise in cells.
-        noise_csr = estimator.estimate_noise(
-            noise_log_prob_coo=posterior_coo,
-            noise_offsets=self._noise_count_posterior_coo_offsets,
-            **kwargs,
-        )
+        else:
+            # Use parquet-backed posterior (PosteriorSource = Path).
+            self.ensure_posterior_computed()
+            assert self._posterior_parquet_path is not None
+            noise_csr = estimator.estimate_noise(
+                noise_log_prob_coo=self._posterior_parquet_path,
+                noise_offsets=None,  # offsets embedded in parquet
+                **kwargs,
+            )
 
         # Subtract cell noise from observed cell counts.
         assert self.dataset_obj is not None and self.dataset_obj.data is not None
@@ -365,10 +392,21 @@ class Posterior:
             logger.debug("Regularized posterior is already cached")
             return self._noise_count_regularized_posterior_coo
 
+        # Load the raw posterior COO (bridge for GPU regularization ops).
+        self.ensure_posterior_computed()
+        assert self._posterior_parquet_path is not None
+        posterior_coo, offsets = _parquet_to_coo(
+            path=self._posterior_parquet_path,
+            index_converter=self.index_converter,
+            regularized=False,
+        )
+        # Cache offsets for subsequent compute_denoised_counts() calls.
+        self._noise_count_posterior_coo_offsets = offsets
+
         # Compute the regularized posterior.
         self._noise_count_regularized_posterior_coo = regularization.regularize(
-            noise_count_posterior_coo=self._noise_count_posterior_coo,
-            noise_offsets=self._noise_count_posterior_coo_offsets,
+            noise_count_posterior_coo=posterior_coo,
+            noise_offsets=offsets,
             index_converter=self.index_converter,
             **kwargs,
         )
@@ -385,34 +423,42 @@ class Posterior:
         self._noise_count_regularized_posterior_coo = None
         self._noise_count_regularized_posterior_kwargs = None
 
-    def cell_noise_count_posterior_coo(self, **kwargs) -> sp.coo_matrix:
-        """Compute the full-blown posterior on noise counts for all cells,
-        and store it in COO sparse format on CPU, and cache in
-        self._noise_count_posterior_csr
-
-        NOTE: This is the main entrypoint for this class.
+    def ensure_posterior_computed(self, path: Optional[Path] = None, **kwargs) -> None:
+        """Compute the posterior if not already done; stream directly to parquet.
 
         Args:
-            **kwargs: Passed to _get_cell_noise_count_posterior_coo()
-
-        Returns:
-            self._noise_count_posterior_coo: This sparse COO object contains all
-                the information about the posterior noise count distribution,
-                but it is a bit complicated. The data per entry (m, c) are
-                stored in COO format. The rows "m" represent a combined
-                cell-and-gene index, with a one-to-one mapping from m to
-                (n, g). The columns "c" represent noise count values. Values
-                are the log probabilities of a noise count value. A smaller
-                matrix can be constructed by increasing the threshold
-                smallest_log_probability.
+            path: Destination parquet path.  If *None* a temporary file is used.
+            **kwargs: Passed to _compute_and_stream_posterior().
         """
+        if self._posterior_parquet_path is not None and (
+            kwargs == {} or kwargs == self._noise_count_posterior_kwargs
+        ):
+            return
+        if path is None:
+            import tempfile
+            fd, tmp = tempfile.mkstemp(suffix="_posterior.parquet")
+            import os as _os
+            _os.close(fd)
+            path = Path(tmp)
+        self._compute_and_stream_posterior(path=path, **kwargs)
+        self._noise_count_posterior_kwargs = kwargs
 
-        if (self._noise_count_posterior_coo is None) or (kwargs != self._noise_count_posterior_kwargs):
-            logger.debug("Running _get_cell_noise_count_posterior_coo() to compute posterior")
-            self._get_cell_noise_count_posterior_coo(**kwargs)
-            self._noise_count_posterior_kwargs = kwargs
+    def cell_noise_count_posterior_coo(self, **kwargs) -> None:
+        """Trigger computation of the posterior (streaming parquet format).
 
-        return self._noise_count_posterior_coo
+        NOTE: Kept for backward compatibility.  Use ensure_posterior_computed() instead.
+        """
+        self.ensure_posterior_computed(**kwargs)
+
+    @property
+    def posterior_path(self) -> Optional[Path]:
+        """Path to the posterior parquet file, or None if not yet computed."""
+        return self._posterior_parquet_path
+
+    @property
+    def regularized_posterior_kwargs(self) -> Optional[dict]:
+        """Kwargs for the currently cached regularized posterior, or None."""
+        return self._noise_count_regularized_posterior_kwargs
 
     @property
     def latents_map(self) -> Dict[str, np.ndarray]:
@@ -422,42 +468,30 @@ class Posterior:
         return self._latents
 
     @torch.no_grad()
-    def _get_cell_noise_count_posterior_coo(
-        self, n_samples: int = 20, y_map: bool = True, n_counts_max: int = 20, smallest_log_probability: float = -10.0
-    ) -> sp.coo_matrix:  # TODO: default -7 ?
-        """Compute the full-blown posterior on noise counts for all cells,
-        and store log probability in COO sparse format on CPU.
+    def _compute_and_stream_posterior(
+        self,
+        path: Path,
+        n_samples: int = 20,
+        y_map: bool = True,
+        n_counts_max: int = 20,
+        smallest_log_probability: float = -10.0,
+    ) -> None:
+        """Compute posterior noise count probabilities and stream them to parquet.
 
         Args:
-            n_samples: Number of samples to use to compute the posterior log
-                probability distribution. Samples have high variance, so it is
-                important to use at least 20. However, they are expensive.
-            y_map: Use the MAP value for y (cell / no cell) when sampling, to
-                avoid samples with a cell and samples without a cell.
-            n_counts_max: Maximum number of noise counts.
-            smallest_log_probability: Do not store log prob values smaller than
-                this -- they get set to zero (saves space)
-
-        Returns:
-            noise_count_posterior_coo: This sparse CSR object contains all
-                the information about the posterior noise count distribution,
-                but it is a bit complicated. The data per entry (m, c) are
-                stored in COO format. The rows "m" represent a combined
-                cell-and-gene index, and there is a one-to-one mapping from m to
-                (n, g). The columns "c" represent noise count values. Values
-                are the log probabilities of a noise count value. A smaller
-                matrix can be constructed by increasing the threshold
-                smallest_log_probability.
+            path: Destination path for the posterior parquet file.
+            n_samples: Number of samples for Monte-Carlo averaging.
+            y_map: Use MAP estimate of y (cell/empty) instead of sampling.
+            n_counts_max: Maximum noise count axis size.
+            smallest_log_probability: Entries below this threshold are discarded.
 
         """
 
-        logger.debug("Computing full posterior noise counts")
+        logger.debug("Computing full posterior noise counts (streaming to parquet)")
 
         assert self.dataset_obj is not None
-        # Compute posterior in mini-batches.
         torch.cuda.empty_cache()
 
-        # Dataloader for cells only.
         analyzed_bcs_only = True
         count_matrix = self.dataset_obj.get_count_matrix()  # analyzed barcodes
         cell_logic = self.latents_map["p"] > consts.CELL_PROB_CUTOFF
@@ -488,11 +522,6 @@ class Posterior:
             use_cuda=self.use_cuda,
         )
 
-        bcs = []  # barcode index
-        genes = []  # gene index
-        c = []  # noise count value
-        c_offset = []  # noise count offsets from zero
-        log_probs = []
         ind = 0
         n_minibatches = len(cell_data_loader)
         assert self.analyzed_gene_inds is not None
@@ -506,92 +535,84 @@ class Posterior:
 
         logger.info("Computing posterior noise count probabilities in mini-batches.")
 
-        for i, data in enumerate(cell_data_loader):
-            if i == 0:
-                t = time.time()
-            elif i == 1:
-                logger.info(f"    [{(time.time() - t) / 60:.2f} mins per chunk]")
-            logger.info(f"Working on chunk ({i + 1}/{n_minibatches})")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with pq.ParquetWriter(str(path), schema=POSTERIOR_SCHEMA) as writer:
+            for i, data in enumerate(cell_data_loader):
+                if i == 0:
+                    t = time.time()
+                elif i == 1:
+                    logger.info(f"    [{(time.time() - t) / 60:.2f} mins per chunk]")
+                logger.info(f"Working on chunk ({i + 1}/{n_minibatches})")
 
-            if self.debug:
-                logger.debug(f"Posterior minibatch starting with droplet {ind}")
-                logger.debug("\n" + get_hardware_usage(use_cuda=self.use_cuda))
+                if self.debug:
+                    logger.debug(f"Posterior minibatch starting with droplet {ind}")
+                    logger.debug("\n" + get_hardware_usage(use_cuda=self.use_cuda))
 
-            # Compute noise count probabilities.
-            noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
-                data=data,
-                n_samples=n_samples,
-                y_map=y_map,
-                n_counts_max=n_counts_max,
-            )
+                # Compute noise count probabilities.
+                noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
+                    data=data,
+                    n_samples=n_samples,
+                    y_map=y_map,
+                    n_counts_max=n_counts_max,
+                )
 
-            # Compute a tensor to indicate sparsity.
-            # First we want data = 0 to be all zeros
-            # We also want anything below the threshold to be a zero
-            tensor_for_nonzeros = noise_log_pdf_NGC.clone().exp()  # probability
-            tensor_for_nonzeros.data[data == 0, :] = 0.0  # remove data = 0
-            tensor_for_nonzeros.data[noise_log_pdf_NGC < smallest_log_probability] = 0.0
+                # Compute a tensor to indicate sparsity.
+                tensor_for_nonzeros = noise_log_pdf_NGC.clone().exp()  # probability
+                tensor_for_nonzeros.data[data == 0, :] = 0.0  # remove data = 0
+                tensor_for_nonzeros.data[noise_log_pdf_NGC < smallest_log_probability] = 0.0
 
-            # Convert to sparse format using "m" indices.
-            bcs_i_chunk, genes_i_analyzed, c_i, log_prob_i = dense_to_sparse_op_torch(
-                noise_log_pdf_NGC,
-                tensor_for_nonzeros=tensor_for_nonzeros,
-            )
+                # Convert to sparse format.
+                bcs_i_chunk, genes_i_analyzed, c_i, log_prob_i = dense_to_sparse_op_torch(
+                    noise_log_pdf_NGC,
+                    tensor_for_nonzeros=tensor_for_nonzeros,
+                )
 
-            # Get the original gene index from gene index in the trimmed dataset.
-            genes_i = analyzed_gene_inds[genes_i_analyzed.cpu()]
+                genes_i = analyzed_gene_inds[genes_i_analyzed.cpu()]
+                bcs_i = (bcs_i_chunk + ind).cpu()
+                bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i]
+                bcs_i = barcode_inds[bcs_i]
 
-            # Barcode index in the dataloader.
-            bcs_i = (bcs_i_chunk + ind).cpu()
+                # Per-entry noise offsets.
+                offset_i = noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu()
 
-            # Obtain the real barcode index since we only use cells.
-            bcs_i = dataloader_index_to_analyzed_bc_index[bcs_i]
+                # Stream this batch to parquet.
+                write_posterior_batch_to_parquet(
+                    writer=writer,
+                    cell_ids=bcs_i.numpy().astype(np.int32),
+                    gene_ids=genes_i.numpy().astype(np.int32),
+                    c_vals=c_i.numpy().astype(np.int16),
+                    offset_vals=offset_i.numpy().astype(np.int16),
+                    log_probs=log_prob_i.detach().cpu().numpy().astype(np.float32),
+                    regularized=False,
+                )
 
-            # Translate chunk barcode inds to overall inds.
-            bcs_i = barcode_inds[bcs_i]
-
-            # Add sparse matrix values to lists.
-            bcs.append(bcs_i.detach())
-            genes.append(genes_i.detach())
-            c.append(c_i.detach().cpu())
-            log_probs.append(log_prob_i.detach().cpu())
-
-            # Update offset dict with any nonzeros.
-            nonzero_offset_inds, nonzero_noise_count_offsets = dense_to_sparse_op_torch(
-                noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().flatten(),
-            )
-            m_i = self.index_converter.get_m_indices(cell_inds=bcs_i, gene_inds=genes_i)
-
-            nonzero_noise_offset_dict.update(
-                dict(
-                    zip(
-                        m_i[nonzero_offset_inds.detach().cpu()].tolist(),
-                        nonzero_noise_count_offsets.detach().cpu().tolist(),
+                # Update offset dict for regularization bridge.
+                nonzero_offset_inds, nonzero_noise_count_offsets = dense_to_sparse_op_torch(
+                    noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().flatten(),
+                )
+                m_i = self.index_converter.get_m_indices(cell_inds=bcs_i, gene_inds=genes_i)
+                nonzero_noise_offset_dict.update(
+                    dict(
+                        zip(
+                            m_i[nonzero_offset_inds.detach().cpu()].tolist(),
+                            nonzero_noise_count_offsets.detach().cpu().tolist(),
+                        )
                     )
                 )
-            )
-            c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu())
 
-            # Increment barcode index counter.
-            ind += data.shape[0]  # Same as data_loader.batch_size
+                ind += data.shape[0]
 
-        # Concatenate lists.
-        log_probs_cat: torch.Tensor = torch.cat(log_probs)
-        c_cat: torch.Tensor = torch.cat(c)
-        barcodes = torch.cat(bcs)
-        genes_cat: torch.Tensor = torch.cat(genes)
+        # Sort parquet for efficient DuckDB scans.
+        sort_posterior_parquet(path)
 
-        # Translate (barcode, gene) inds to 'm' format index.
-        m = self.index_converter.get_m_indices(cell_inds=barcodes, gene_inds=genes_cat)
+        # Write per-barcode latents CSV sidecar.
+        write_posterior_latents_csv(_posterior_latents_path(path), self.latents_map)
+        # Write global latents JSON sidecar (e.g. phi_loc_scale).
+        write_posterior_global_latents_json(_posterior_global_latents_path(path), self.latents_map)
 
-        # Put the counts into a sparse csr_matrix.
-        assert self.count_matrix_shape is not None
-        self._noise_count_posterior_coo = sp.coo_matrix(
-            (log_probs_cat, (m, c_cat)),
-            shape=[np.prod(self.count_matrix_shape, dtype=np.uint64), n_counts_max],
-        )
+        # Cache offsets for regularization bridge.
         self._noise_count_posterior_coo_offsets = nonzero_noise_offset_dict
-        return self._noise_count_posterior_coo
+        self._posterior_parquet_path = path
 
     @torch.no_grad()
     def sample(self, data, lambda_multiplier=1.0, y_map: bool = False) -> torch.Tensor:

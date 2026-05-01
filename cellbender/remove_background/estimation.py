@@ -6,13 +6,16 @@ import multiprocessing as mp
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from cellbender.remove_background.posterior import IndexConverter
 
+import duckdb
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import scipy.sparse as sp
 import torch
 from torch.distributions.categorical import Categorical
@@ -24,6 +27,8 @@ logger = logging.getLogger("cellbender")
 N_CELLS_DATATYPE = np.int32
 N_GENES_DATATYPE = np.int32
 COUNT_DATATYPE = np.int32
+
+PosteriorSource = Union[sp.coo_matrix, Path]
 
 
 class EstimationMethod(ABC):
@@ -235,470 +240,238 @@ def _estimation_array_to_csr(
     return coo.tocsr()
 
 
-def _mckp_chunk_estimate_noise(
-    noise_log_prob_coo: sp.coo_matrix,
-    index_and_logic: Tuple[int, np.ndarray],
+def _register_posterior(
+    conn: "duckdb.DuckDBPyConnection",
+    source: "PosteriorSource",
     noise_offsets: Dict[int, int],
-    noise_targets_per_gene: np.ndarray,
     index_converter: "IndexConverter",
-    n_chunks: int,
-    verbose: bool = False,
-) -> sp.csr_matrix:
-    """Given the full probabilistic posterior, compute noise counts. This is
-    to be run for a given chunk of genes at a time.
+) -> None:
+    """Register the posterior data as a DuckDB relation named 'posterior'.
 
-    Args:
-        noise_log_prob_coo: The noise log prob data structure: log prob
-            values in a (m, c) COO matrix.  One chunk.
-        index_and_logic: (chunk_index, logical_coo_indexer) from the chunked
-            iterator, as you would get from enumerate()
-        noise_targets_per_gene: Integer noise count target for each gene
-        noise_offsets: Noise count offset values keyed by 'm'.
-        index_converter: IndexConverter to go from 'm' to (n, g)
-        n_chunks: Total chunks, for logging purposes only
-        verbose: True to print lots of intermediate information (for tests)
-
-    Returns:
-        noise_count_csr: Estimated noise count matrix.
+    When *source* is a :class:`pathlib.Path` the parquet file is registered as
+    a zero-copy view (offsets already embedded as the ``offset`` column).
+    When *source* is a :class:`scipy.sparse.coo_matrix` the matrix is
+    converted to a PyArrow Table and registered in-process.
     """
+    if isinstance(source, Path):
+        conn.execute(
+            f"CREATE OR REPLACE VIEW posterior AS SELECT * FROM read_parquet('{source}')"
+        )
+    else:
+        # COO matrix path: build Arrow table with embedded offsets
+        coo = source
+        rows = coo.row.astype("int32")
+        cols = coo.col.astype("int16")
+        data = coo.data.astype("float32")
+        cell_ids, gene_ids = index_converter.get_ng_indices(m_inds=rows)
+        offsets = np.array(
+            [noise_offsets.get(int(m), 0) for m in rows], dtype="int16"
+        )
+        table = pa.table(
+            {
+                "cell_id":    pa.array(cell_ids.astype("int32"), type=pa.int32()),
+                "gene_id":    pa.array(gene_ids.astype("int32"), type=pa.int32()),
+                "c":          pa.array(cols, type=pa.int16()),
+                "noise_offset": pa.array(offsets, type=pa.int16()),
+                "log_prob":   pa.array(data, type=pa.float32()),
+                "regularized": pa.array(
+                    np.zeros(len(rows), dtype=bool), type=pa.bool_()
+                ),
+            }
+        )
+        conn.register("posterior", table)
 
-    i = index_and_logic[0]
 
-    if i == 0:
-        tt = time.time()
-
-    coo = _subset_coo(noise_log_prob_coo, index_and_logic[1])
-
-    assert noise_targets_per_gene.size == index_converter.total_n_genes, (
-        f"The number of noise count targets ({noise_targets_per_gene.size}) "
-        f"must match the number of genes ({index_converter.total_n_genes})"
+def _ng_arrays_to_csr(
+    cell_ids: np.ndarray,
+    gene_ids: np.ndarray,
+    data: np.ndarray,
+    shape: Tuple[int, int],
+    dtype=COUNT_DATATYPE,
+) -> sp.csr_matrix:
+    """Build a CSR sparse matrix from flat (cell_id, gene_id, data) arrays."""
+    coo = sp.coo_matrix(
+        (data.astype(dtype), (cell_ids.astype(np.int32), gene_ids.astype(np.int32))),
+        shape=shape,
+        dtype=dtype,
     )
-
-    # First we need to compute the MAP to find out which direction to go.
-    t = time.time()
-    map_dict = apply_function_dense_chunks(
-        noise_log_prob_coo=coo,
-        fun=MAP.torch_argmax,
-        device="cpu",
-    )
-    map_csr = _estimation_array_to_csr(
-        data=map_dict["result"],
-        m=map_dict["m"],
-        noise_offsets=noise_offsets,
-        index_converter=index_converter,
-    )
-    logger.debug(f"{timestamp()} Computed initial MAP estimate")
-    logger.debug(f"{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec")
-    map_noise_counts_per_gene = np.array(map_csr.sum(axis=0)).squeeze()
-    additional_noise_counts_per_gene = (noise_targets_per_gene - map_noise_counts_per_gene).astype(int)
-    set_positive_genes = set(np.where(additional_noise_counts_per_gene > 0)[0])
-    set_negative_genes = set(np.where(additional_noise_counts_per_gene < 0)[0])  # leave out exact matches
-    abs_additional_noise_counts_per_gene = np.abs(additional_noise_counts_per_gene)
-
-    # Determine which genes need to add and which need to subtract noise counts.
-    n, g = index_converter.get_ng_indices(m_inds=coo.row)
-    df = pd.DataFrame(data={"m": coo.row, "n": n, "g": g, "c": coo.col, "log_prob": coo.data})
-    logger.debug(f"{timestamp()} Computing step directions")
-    df["positive_step_gene"] = df["g"].apply(lambda gene: gene in set_positive_genes)
-    df["negative_step_gene"] = df["g"].apply(lambda gene: gene in set_negative_genes)
-    df["step_direction"] = df["positive_step_gene"].astype(int) - df["negative_step_gene"].astype(int)  # -1 or 1
-    logger.debug(f"{timestamp()} Step directions done")
-
-    if verbose:
-        pd.set_option("display.width", 120)
-        pd.set_option("display.max_columns", 20)
-        print(df, end="\n\n")
-
-    # Remove all 'm' entries corresponding to genes where target is met by MAP.
-    df = df[df["step_direction"] != 0]
-
-    # Now we mask out log probs (-np.inf) that represent steps in the wrong direction.
-    logger.debug(f"{timestamp()} Masking")
-    lookup_map_from_m = dict(zip(map_dict["m"], map_dict["result"]))
-    df["map"] = df["m"].apply(lambda x: lookup_map_from_m[x])
-    df["mask"] = (df["negative_step_gene"] & (df["c"] > df["map"])) | (
-        df["positive_step_gene"] & (df["c"] < df["map"])
-    )  # keep MAP
-    df.loc[df["mask"], "log_prob"] = -np.inf
-    logger.debug(f"{timestamp()} Masking done")
-
-    # And we remove those entries.
-    df = df[~df["mask"]]
-    df = df[[c for c in df.columns if (c != "mask")]]
-
-    # Sort
-    logger.debug(f"{timestamp()} Sorting")
-    df = df.sort_values(by=["m", "c"])
-    logger.debug(f"{timestamp()} Sorting done")
-
-    if verbose:
-        print(df, end="\n\n")
-
-    # Do diff for positive and negative separately, without grouping (faster)
-    df_positive_steps = df[df["step_direction"] == 1].copy()
-    df_negative_steps = df[df["step_direction"] == -1].copy()
-
-    logger.debug(f"{timestamp()} Computing deltas")
-    if len(df_positive_steps > 0):
-        df_positive_steps.loc[:, "delta"] = df_positive_steps["log_prob"].diff(periods=1).apply(np.abs)
-        df_positive_steps.loc[df_positive_steps["c"] == df_positive_steps["map"], "delta"] = np.nan
-    if len(df_negative_steps > 0):
-        df_negative_steps.loc[:, "delta"] = df_negative_steps["log_prob"].diff(periods=-1).apply(np.abs)
-        df_negative_steps.loc[df_negative_steps["c"] == df_negative_steps["map"], "delta"] = np.nan
-    df = pd.concat([df_positive_steps, df_negative_steps], axis=0)
-    logger.debug(f"{timestamp()} Computing deltas done")
-
-    if verbose:
-        print(df, end="\n\n")
-
-    # if this is an empty dataframe, we are not doing anything here beyond MAP
-    if len(df) == 0:
-        return map_csr
-
-    # Remove irrelevant entries: those with infinite delta.
-    df = df[df["delta"].apply(np.isfinite)]
-
-    # if this is an empty dataframe, we are not doing anything here beyond MAP
-    if len(df) == 0:
-        return map_csr
-
-    # How many additional noise counts ("steps") we will need for each gene.
-    logger.debug(f"{timestamp()} Computing nsmallest")
-    df["topk"] = df["g"].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
-
-    if verbose:
-        print(df, end="\n\n")
-
-    # Now we want the smallest additional_noise_counts_per_gene deltas for each gene.
-    # https://stackoverflow.com/questions/55179493/
-    df_out = (
-        df[["m", "g", "delta", "topk"]]
-        .groupby("g", group_keys=False)
-        .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"))
-    )
-    logger.debug(f"{timestamp()} Computing nsmallest done")
-
-    if verbose:
-        print(df_out, end="\n\n")
-
-    # if this is an empty dataframe, we are not doing anything here beyond MAP
-    if len(df_out) == 0:
-        return map_csr
-
-    # And the number by which to increment noise counts per entry 'm' is
-    # now the number of times that each m value appears in this dataframe.
-    logger.debug(f"{timestamp()} Summarizing steps")
-    vc = df_out["m"].value_counts()
-    vc_df = pd.DataFrame(data={"m": vc.index, "steps": vc.values})
-    step_direction_lookup_from_m = dict(zip(df["m"], df["step_direction"]))
-    vc_df["step_direction"] = vc_df["m"].apply(lambda x: step_direction_lookup_from_m[x])
-    vc_df["counts"] = vc_df["steps"] * vc_df["step_direction"]
-    steps_csr = _estimation_array_to_csr(
-        data=vc_df["counts"],
-        m=vc_df["m"],
-        noise_offsets=None,
-        index_converter=index_converter,
-    )
-    logger.debug(f"{timestamp()} Summarizing steps done")
-
-    if verbose:
-        print(vc_df, end="\n\n")
-        print("MAP:")
-        print(map_csr.todense())
-
-    logger.info(f"Completed chunk ({i + 1} / {n_chunks})")
-    print(f"Completed chunk ({i + 1} / {n_chunks})")  # because logging from a process does not work right
-    if i == 0:
-        logger.info(f"    [single chunk took {(time.time() - tt):.2f} mins]")
-        print(f"    [single chunk took {(time.time() - tt):.2f} mins]")
-
-    # The final output is those tabulated steps added to the MAP.
-    # The MAP already has the noise offsets, so they are not added to steps_csr.
-    return map_csr + steps_csr
+    coo.sum_duplicates()
+    return coo.tocsr()
 
 
 class MultipleChoiceKnapsack(EstimationMethod):
-    """Noise estimation via solving a constrained multiple choice knapsack problem"""
+    """Noise estimation via the multiple-choice knapsack problem, solved with DuckDB SQL.
+
+    DuckDB executes out-of-core by default so this scales to datasets with
+    millions of non-zero posterior entries without incurring OOM errors.
+    """
 
     def estimate_noise(
         self,
-        noise_log_prob_coo: sp.coo_matrix,
+        noise_log_prob_coo: "PosteriorSource",
         noise_offsets: Optional[Dict[int, int]],
-        noise_targets_per_gene: np.ndarray | None = None,
+        noise_targets_per_gene: Optional[np.ndarray] = None,
         verbose: bool = False,
         n_chunks: Optional[int] = None,
         use_multiple_processes: bool = False,
+        duckdb_memory_limit: str = "32GB",
         **kwargs,
     ) -> sp.csr_matrix:
-        """Given the full probabilistic posterior, compute noise counts
+        """Given the full probabilistic posterior, compute noise counts via MCKP.
 
         Args:
-            noise_log_prob_coo: The noise log prob data structure: log prob
-                values in a (m, c) COO matrix
-            noise_targets_per_gene: Integer noise count target for each gene
-            noise_offsets: Noise count offset values keyed by 'm'.
-            verbose: True to print lots of intermediate information (for tests)
-            n_chunks: Target number of chunks over which to split estimation.
-                If None, targets about 5000 genes per chunk.
-            use_multiple_processes: True to use multiprocessing. Seems faster
-                without using it, not entirely clear why
+            noise_log_prob_coo: Either a (m, c) COO matrix with log probabilities,
+                or a Path to a posterior parquet file written by CellBender.
+            noise_offsets: Noise count offset values keyed by 'm' (only used when
+                source is a COO matrix; ignored for parquet since offsets are embedded).
+            noise_targets_per_gene: Integer noise count target per gene (required).
+            verbose: Print intermediate DuckDB results for debugging.
+            n_chunks: Ignored; DuckDB handles memory management internally.
+            use_multiple_processes: Ignored; DuckDB is multi-threaded internally.
+            duckdb_memory_limit: DuckDB memory cap (e.g. '8GB'). DuckDB spills to
+                disk when this limit is reached.
 
         Returns:
-            noise_count_csr: Estimated noise count matrix.
+            noise_count_csr: Estimated noise count CSR matrix.
         """
-        if n_chunks is None:
-            n_chunks = max(1, self.index_converter.total_n_genes // 5000)
-            logger.debug(f"Running MCKP estimator in {n_chunks} chunks")
-
-        assert noise_offsets is not None, "noise_offsets is required for MultipleChoiceKnapsack.estimate_noise"
         assert noise_targets_per_gene is not None, (
             "noise_targets_per_gene is required for MultipleChoiceKnapsack.estimate_noise"
         )
 
+        # When source is a parquet Path, offsets are embedded — no external dict needed.
+        if isinstance(noise_log_prob_coo, Path):
+            noise_offsets = {}
+
+        if noise_offsets is None:
+            noise_offsets = {}
+
         t0 = time.time()
 
-        if use_multiple_processes:
-            logger.info("Dividing dataset into chunks of genes")
-            chunk_logic_list = self._gene_chunk_iterator(
-                noise_log_prob_coo=noise_log_prob_coo,
-                n_chunks=n_chunks,
+        conn = duckdb.connect()
+        conn.execute(f"SET memory_limit='{duckdb_memory_limit}'")
+        _register_posterior(conn, noise_log_prob_coo, noise_offsets, self.index_converter)
+
+        # Step 1: MAP estimate — argmax of log_prob per (cell_id, gene_id)
+        map_df = conn.execute("""
+            SELECT
+                cell_id,
+                gene_id,
+                CAST(argmax(c, log_prob) AS INTEGER) AS map_c,
+                CAST(any_value(noise_offset) AS INTEGER) AS noise_offset
+            FROM posterior
+            WHERE NOT regularized
+            GROUP BY cell_id, gene_id
+        """).df()
+
+        if verbose:
+            logger.debug("MAP head:\n%s", map_df.head(10).to_string())
+
+        # MAP noise counts per gene (offset-adjusted)
+        map_csr = _ng_arrays_to_csr(
+            cell_ids=map_df["cell_id"].values,
+            gene_ids=map_df["gene_id"].values,
+            data=(map_df["map_c"].values + map_df["noise_offset"].values).astype(COUNT_DATATYPE),
+            shape=self.index_converter.matrix_shape,
+        )
+        map_noise_per_gene = np.asarray(map_csr.sum(axis=0)).squeeze()
+        additional = (noise_targets_per_gene - map_noise_per_gene).astype(int)
+        step_dir = np.sign(additional).astype(np.int32)
+        topk = np.abs(additional).astype(np.int64)
+
+        # Step 2: Build gene-level targets table
+        all_gene_ids = np.arange(self.index_converter.total_n_genes, dtype=np.int32)
+        gene_targets_df = pd.DataFrame({
+            "gene_id":        all_gene_ids,
+            "step_direction": step_dir,
+            "topk":           topk,
+        })
+        gene_targets_df = gene_targets_df[gene_targets_df["step_direction"] != 0].reset_index(drop=True)
+
+        if len(gene_targets_df) == 0:
+            logger.info("MCKP: MAP already matches targets for all genes.")
+            logger.info("Total MCKP time = %.2f sec", time.time() - t0)
+            return map_csr
+
+        conn.register("gene_targets",  gene_targets_df)
+        conn.register("map_estimates", map_df[["cell_id", "gene_id", "map_c"]])
+
+        if verbose:
+            logger.debug(
+                "Positive-step genes: %d  Negative-step genes: %d",
+                (step_dir > 0).sum(), (step_dir < 0).sum(),
             )
 
-            logger.info("Computing the output in asynchronous chunks in parallel...")
-
-            # with mp.get_context('spawn').Pool(processes=mp.cpu_count()) as pool:
-            #     csr_matrices = pool.starmap(
-            #         _mckp_chunk_estimate_noise,
-            #         zip(
-            #             repeat(noise_log_prob_coo),
-            #             enumerate(chunk_logic_list),
-            #             repeat(noise_offsets),
-            #             repeat(noise_targets_per_gene),
-            #             repeat(self.index_converter),
-            #             repeat(n_chunks),
-            #             repeat(False),  # verbose
-            #         ),
-            #     )
-
-            futures = []
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=mp.cpu_count(), mp_context=mp.get_context("spawn")
-            ) as executor:
-                for i, logic in enumerate(chunk_logic_list):
-                    kwargs = {
-                        "noise_log_prob_coo": noise_log_prob_coo,
-                        "index_and_logic": (i, logic),
-                        "noise_offsets": noise_offsets,
-                        "noise_targets_per_gene": noise_targets_per_gene,
-                        "index_converter": self.index_converter,
-                        "n_chunks": n_chunks,
-                        "verbose": False,
-                    }
-                    future = executor.submit(_mckp_chunk_estimate_noise, **kwargs)
-                    futures.append(future)
-
-                done, not_done = concurrent.futures.wait(
-                    futures,
-                    return_when=concurrent.futures.ALL_COMPLETED,
-                )
-                csr_matrices = [f.result() for f in futures]
-
-        else:
-            t = time.time()
-
-            csr_matrices = []
-            for i, logic in enumerate(
-                self._gene_chunk_iterator(
-                    noise_log_prob_coo=noise_log_prob_coo,
-                    n_chunks=n_chunks,
-                )
-            ):
-                logger.info(f"Working on chunk ({i + 1}/{n_chunks})")
-                chunk_csr = self._chunk_estimate_noise(
-                    noise_log_prob_coo=_subset_coo(noise_log_prob_coo, logic),
-                    noise_offsets=noise_offsets,
-                    noise_targets_per_gene=noise_targets_per_gene,
-                    verbose=verbose,
-                )
-                csr_matrices.append(chunk_csr)
-                if i == 0:
-                    logger.info(f"    [{(time.time() - t) / 60:.2f} mins per chunk]")
-                logger.debug(f"{timestamp()} Estimator chunk {i}: shape is {chunk_csr.shape}")
-
-        logger.info(f"{timestamp()} Total MCKP estimation time = {(time.time() - t0):.2f} sec")
-        return sum(csr_matrices)
-
-    def _gene_chunk_iterator(self, noise_log_prob_coo: sp.coo_matrix, n_chunks: int) -> List[np.ndarray]:
-        """Return a list of logical (size m) arrays used to select gene chunks
-        on which to compute the MCKP estimate. These chunks are independent.
-
-        Args:
-            noise_log_prob_coo: Full noise log prob posterior COO
-            n_chunks: For testing, force this many chunks
-
-        Yields:
-            Logical array which indexes elements of coo posterior for the chunk
-        """
-
-        # get gene annotations
-        _, genes = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
-        genes_series = pd.Series(genes)
-
-        gene_chunk_arrays = np.array_split(np.arange(self.index_converter.total_n_genes), n_chunks)
-
-        gene_logic_arrays = [genes_series.isin(x).values for x in gene_chunk_arrays]
-        return gene_logic_arrays
-
-    def _chunk_estimate_noise(
-        self,
-        noise_log_prob_coo: sp.coo_matrix,
-        noise_offsets: Optional[Dict[int, int]],
-        noise_targets_per_gene: np.ndarray,
-        verbose: bool = False,
-    ) -> sp.csr_matrix:
-        """Given the full probabilistic posterior, compute noise counts. This is
-        to be run for a given chunk of genes at a time.
-
-        Args:
-            noise_log_prob_coo: The noise log prob data structure: log prob
-                values in a (m, c) COO matrix.  One chunk.
-            noise_targets_per_gene: Integer noise count target for each gene
-            noise_offsets: Noise count offset values keyed by 'm'.
-            verbose: True to print lots of intermediate information (for tests)
-
-        Returns:
-            noise_count_csr: Estimated noise count matrix.
-        """
-
-        assert noise_targets_per_gene.size == self.index_converter.total_n_genes, (
-            f"The number of noise count targets ({noise_targets_per_gene.size}) "
-            f"must match the number of genes ({self.index_converter.total_n_genes})"
-        )
-
-        coo = noise_log_prob_coo.copy()  # we will be modifying values
-
-        # First we need to compute the MAP to find out which direction to go.
-        t = time.time()
-        map_dict = apply_function_dense_chunks(
-            noise_log_prob_coo=noise_log_prob_coo, fun=MAP.torch_argmax, device="cpu"
-        )
-        map_csr = self._estimation_array_to_csr(data=map_dict["result"], m=map_dict["m"], noise_offsets=noise_offsets)
-        logger.debug(f"{timestamp()} Computed initial MAP estimate")
-        logger.debug(f"{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec")
-        map_noise_counts_per_gene = np.array(map_csr.sum(axis=0)).squeeze()
-        additional_noise_counts_per_gene = (noise_targets_per_gene - map_noise_counts_per_gene).astype(int)
-        set_positive_genes = set(np.where(additional_noise_counts_per_gene > 0)[0])
-        set_negative_genes = set(np.where(additional_noise_counts_per_gene < 0)[0])  # leave out exact matches
-        abs_additional_noise_counts_per_gene = np.abs(additional_noise_counts_per_gene)
-
-        # Determine which genes need to add and which need to subtract noise counts.
-        n, g = self.index_converter.get_ng_indices(m_inds=coo.row)
-        df = pd.DataFrame(data={"m": coo.row, "n": n, "g": g, "c": coo.col, "log_prob": coo.data})
-        logger.debug(f"{timestamp()} Computing step directions")
-        df["positive_step_gene"] = df["g"].apply(lambda gene: gene in set_positive_genes)
-        df["negative_step_gene"] = df["g"].apply(lambda gene: gene in set_negative_genes)
-        df["step_direction"] = df["positive_step_gene"].astype(int) - df["negative_step_gene"].astype(int)  # -1 or 1
-        logger.debug(f"{timestamp()} Step directions done")
+        # Step 3: Compute deltas and select cheapest topk steps per gene
+        steps_df = conn.execute("""
+            WITH directed AS (
+                SELECT
+                    p.cell_id,
+                    p.gene_id,
+                    p.c,
+                    p.log_prob,
+                    t.step_direction,
+                    t.topk,
+                    m.map_c,
+                    LAG(p.log_prob)  OVER w AS lag_lp,
+                    LEAD(p.log_prob) OVER w AS lead_lp
+                FROM posterior p
+                JOIN gene_targets  t ON p.gene_id = t.gene_id
+                JOIN map_estimates m ON p.cell_id  = m.cell_id
+                                    AND p.gene_id  = m.gene_id
+                WHERE NOT p.regularized
+                  AND (
+                        (t.step_direction =  1 AND p.c >= m.map_c)
+                     OR (t.step_direction = -1 AND p.c <= m.map_c)
+                  )
+                WINDOW w AS (PARTITION BY p.cell_id, p.gene_id ORDER BY p.c)
+            ),
+            deltas AS (
+                SELECT
+                    cell_id,
+                    gene_id,
+                    step_direction,
+                    topk,
+                    ABS(
+                        CASE WHEN step_direction =  1 THEN log_prob - lag_lp
+                             ELSE                          log_prob - lead_lp
+                        END
+                    ) AS delta
+                FROM directed
+                WHERE (step_direction =  1 AND lag_lp  IS NOT NULL)
+                   OR (step_direction = -1 AND lead_lp IS NOT NULL)
+            ),
+            ranked AS (
+                SELECT
+                    cell_id,
+                    gene_id,
+                    step_direction,
+                    topk,
+                    ROW_NUMBER() OVER (PARTITION BY gene_id ORDER BY delta) AS rn
+                FROM deltas
+            )
+            SELECT
+                cell_id,
+                gene_id,
+                CAST(COUNT(*) AS INTEGER) * any_value(step_direction) AS step_counts
+            FROM ranked
+            WHERE rn <= topk
+            GROUP BY cell_id, gene_id
+        """).df()
 
         if verbose:
-            pd.set_option("display.width", 120)
-            pd.set_option("display.max_columns", 20)
-            print(df, end="\n\n")
+            logger.debug("Steps head:\n%s", steps_df.head(10).to_string())
 
-        # Remove all 'm' entries corresponding to genes where target is met by MAP.
-        df = df[df["step_direction"] != 0]
+        logger.info("Total MCKP estimation time = %.2f sec", time.time() - t0)
 
-        # Now we mask out log probs (-np.inf) that represent steps in the wrong direction.
-        logger.debug(f"{timestamp()} Masking")
-        lookup_map_from_m = dict(zip(map_dict["m"], map_dict["result"]))
-        df["map"] = df["m"].apply(lambda x: lookup_map_from_m[x])
-        df["mask"] = (df["negative_step_gene"] & (df["c"] > df["map"])) | (
-            df["positive_step_gene"] & (df["c"] < df["map"])
-        )  # keep MAP
-        df.loc[df["mask"], "log_prob"] = -np.inf
-        logger.debug(f"{timestamp()} Masking done")
-
-        # And we remove those entries.
-        df = df[~df["mask"]]
-        df = df[[c for c in df.columns if (c != "mask")]]
-
-        # Sort
-        logger.debug(f"{timestamp()} Sorting")
-        df = df.sort_values(by=["m", "c"])
-        logger.debug(f"{timestamp()} Sorting done")
-
-        if verbose:
-            print(df, end="\n\n")
-
-        # Do diff for positive and negative separately, without grouping (faster)
-        df_positive_steps = df[df["step_direction"] == 1].copy()
-        df_negative_steps = df[df["step_direction"] == -1].copy()
-
-        logger.debug(f"{timestamp()} Computing deltas")
-        if len(df_positive_steps > 0):
-            df_positive_steps.loc[:, "delta"] = df_positive_steps["log_prob"].diff(periods=1).apply(np.abs)
-            df_positive_steps.loc[df_positive_steps["c"] == df_positive_steps["map"], "delta"] = np.nan
-        if len(df_negative_steps > 0):
-            df_negative_steps.loc[:, "delta"] = df_negative_steps["log_prob"].diff(periods=-1).apply(np.abs)
-            df_negative_steps.loc[df_negative_steps["c"] == df_negative_steps["map"], "delta"] = np.nan
-        df = pd.concat([df_positive_steps, df_negative_steps], axis=0)
-        logger.debug(f"{timestamp()} Computing deltas done")
-
-        if verbose:
-            print(df, end="\n\n")
-
-        # if this is an empty dataframe, we are not doing anything here beyond MAP
-        if len(df) == 0:
+        if len(steps_df) == 0:
             return map_csr
 
-        # Remove irrelevant entries: those with infinite delta.
-        df = df[df["delta"].apply(np.isfinite)]
-
-        # if this is an empty dataframe, we are not doing anything here beyond MAP
-        if len(df) == 0:
-            return map_csr
-
-        # How many additional noise counts ("steps") we will need for each gene.
-        logger.debug(f"{timestamp()} Computing nsmallest")
-        df["topk"] = df["g"].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
-
-        if verbose:
-            print(df, end="\n\n")
-
-        # Now we want the smallest additional_noise_counts_per_gene deltas for each gene.
-        # https://stackoverflow.com/questions/55179493/
-        df_out = (
-            df[["m", "g", "delta", "topk"]]
-            .groupby("g", group_keys=False)
-            .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"))
+        steps_csr = _ng_arrays_to_csr(
+            cell_ids=steps_df["cell_id"].values,
+            gene_ids=steps_df["gene_id"].values,
+            data=steps_df["step_counts"].values,
+            shape=self.index_converter.matrix_shape,
         )
-        logger.debug(f"{timestamp()} Computing nsmallest done")
-
-        if verbose:
-            print(df_out, end="\n\n")
-
-        # if this is an empty dataframe, we are not doing anything here beyond MAP
-        if len(df_out) == 0:
-            return map_csr
-
-        # And the number by which to increment noise counts per entry 'm' is
-        # now the number of times that each m value appears in this dataframe.
-        logger.debug(f"{timestamp()} Summarizing steps")
-        vc = df_out["m"].value_counts()
-        vc_df = pd.DataFrame(data={"m": vc.index, "steps": vc.values})
-        step_direction_lookup_from_m = dict(zip(df["m"], df["step_direction"]))
-        vc_df["step_direction"] = vc_df["m"].apply(lambda x: step_direction_lookup_from_m[x])
-        vc_df["counts"] = vc_df["steps"] * vc_df["step_direction"]
-        steps_csr = self._estimation_array_to_csr(data=vc_df["counts"], m=vc_df["m"], noise_offsets=None)
-        logger.debug(f"{timestamp()} Summarizing steps done")
-
-        if verbose:
-            print(vc_df, end="\n\n")
-            print("MAP:")
-            print(map_csr.todense())
-
-        # The final output is those tabulated steps added to the MAP.
-        # The MAP already has the noise offsets, so they are not added to steps_csr.
         return map_csr + steps_csr
 
 

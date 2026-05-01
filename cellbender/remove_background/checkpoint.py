@@ -275,11 +275,15 @@ def load_from_checkpoint(
 
         # Copy the posterior file outside the temp dir so it can be loaded later.
         if "posterior" in to_load:
-            posterior_file = os.path.join(os.path.dirname(filebase), "posterior.h5")
+            posterior_file = os.path.join(os.path.dirname(filebase), "posterior.parquet")
             if os.path.exists(posterior_file):
-                shutil.copyfile(posterior_file, "posterior.h5")
-                out.update({"posterior_file": "posterior.h5"})
-                logger.debug(f"Copied posterior file from {posterior_file} to posterior.h5")
+                shutil.copyfile(posterior_file, "posterior.parquet")
+                out.update({"posterior_file": "posterior.parquet"})
+                logger.debug(f"Copied posterior file from {posterior_file} to posterior.parquet")
+                # Also copy latents CSV sidecar if present.
+                latents_src = os.path.join(os.path.dirname(filebase), "posterior_latents.csv.gz")
+                if os.path.exists(latents_src):
+                    shutil.copyfile(latents_src, "posterior_latents.csv.gz")
             else:
                 logger.debug(
                     "Trying to load posterior in load_from_checkpoint(), but posterior "

@@ -25,7 +25,7 @@ from cellbender.remove_background.checkpoint import attempt_load_checkpoint, cre
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
-from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
+from cellbender.remove_background.data.io import _parquet_to_coo, write_matrix_to_cellranger_h5
 from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
@@ -235,8 +235,7 @@ def compute_output_denoised_counts_reports_metrics(
     """
 
     # Ensure that the posterior distribution has been computed.
-    # TODO: when we make the properties non-private, then this should become obsolete
-    posterior.cell_noise_count_posterior_coo()
+    posterior.ensure_posterior_computed()
 
     assert posterior.dataset_obj is not None and posterior.dataset_obj.data is not None
     assert posterior.vi_model is not None
@@ -264,9 +263,15 @@ def compute_output_denoised_counts_reports_metrics(
         empty_inds = set(range(count_matrix.shape[0])) - set(cell_inds)
         cell_counts = csr_set_rows_to_zero(csr=count_matrix, row_inds=empty_inds)
 
+        assert posterior.posterior_path is not None, "Posterior must be computed before MCKP target estimation."
+        _mckp_coo, _mckp_offsets = _parquet_to_coo(
+            path=posterior.posterior_path,
+            index_converter=posterior.index_converter,
+            regularized=False,
+        )
         noise_target_fun_per_cell = compute_mean_target_removal_as_function(
-            noise_count_posterior_coo=posterior._noise_count_posterior_coo,
-            noise_offsets=posterior._noise_count_posterior_coo_offsets,
+            noise_count_posterior_coo=_mckp_coo,
+            noise_offsets=_mckp_offsets,
             index_converter=posterior.index_converter,
             raw_count_csr_for_cells=cell_counts,
             n_cells=len(cell_inds),
@@ -343,7 +348,7 @@ def compute_output_denoised_counts_reports_metrics(
                 file=file,
                 denoised_count_matrix=denoised_counts,
                 posterior_regularization=args.posterior_regularization,
-                posterior_regularization_kwargs=posterior._noise_count_regularized_posterior_kwargs,
+                posterior_regularization_kwargs=posterior.regularized_posterior_kwargs,
                 estimator=args.estimator,
                 estimator_kwargs=None if (args.cdf_threshold_q is None) else {"q": args.cdf_threshold_q},
                 latents=posterior.latents_map,

@@ -1,18 +1,25 @@
 """Handle input parsing and output writing."""
 
-import tables
-import anndata
-import numpy as np
-import scipy.sparse as sp
-import scipy.io as io
-
-from cellbender.remove_background import consts
-
-from typing import Any, Dict, Union, List, Optional, Callable
+import json
 import logging
 import os
 import gzip
 import traceback
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+
+import anndata
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+import scipy.sparse as sp
+import scipy.io as io
+import tables
+
+from cellbender.remove_background import consts
+
+if TYPE_CHECKING:
+    from cellbender.remove_background.posterior import IndexConverter
 
 
 logger = logging.getLogger('cellbender')
@@ -415,6 +422,201 @@ def load_posterior_from_h5(filename: str) -> Dict[str, Any]:
             'noise_count_offsets': noise_count_offsets,
             'feature_inds': feature_inds,
             'barcode_inds': barcode_inds}
+
+
+# ---------------------------------------------------------------------------
+# Parquet-based posterior IO
+# ---------------------------------------------------------------------------
+
+POSTERIOR_SCHEMA = pa.schema([
+    pa.field('cell_id',     pa.int32()),
+    pa.field('gene_id',     pa.int32()),
+    pa.field('c',           pa.int16()),
+    pa.field('noise_offset', pa.int16()),
+    pa.field('log_prob',    pa.float32()),
+    pa.field('regularized', pa.bool_()),
+])
+
+
+def write_posterior_batch_to_parquet(
+        writer: pq.ParquetWriter,
+        cell_ids: np.ndarray,
+        gene_ids: np.ndarray,
+        c_vals: np.ndarray,
+        offset_vals: np.ndarray,
+        log_probs: np.ndarray,
+        regularized: bool = False) -> None:
+    """Stream one batch of posterior rows into an open ParquetWriter."""
+    n = len(cell_ids)
+    batch = pa.table({
+        'cell_id':     pa.array(cell_ids.astype(np.int32),   type=pa.int32()),
+        'gene_id':     pa.array(gene_ids.astype(np.int32),   type=pa.int32()),
+        'c':           pa.array(c_vals.astype(np.int16),     type=pa.int16()),
+        'noise_offset': pa.array(offset_vals.astype(np.int16), type=pa.int16()),
+        'log_prob':    pa.array(log_probs.astype(np.float32), type=pa.float32()),
+        'regularized': pa.array(np.full(n, regularized, dtype=bool), type=pa.bool_()),
+    })
+    writer.write_table(batch)
+
+
+def sort_posterior_parquet(path: Path) -> None:
+    """Re-write the posterior parquet sorted by (gene_id, cell_id) for efficient DuckDB scans."""
+    import duckdb
+    tmp = Path(str(path) + '.tmp')
+    path_str = str(path).replace("'", "''")
+    tmp_str  = str(tmp).replace("'", "''")
+    duckdb.sql(
+        f"COPY (SELECT * FROM read_parquet('{path_str}') ORDER BY gene_id, cell_id) "
+        f"TO '{tmp_str}' (FORMAT PARQUET, COMPRESSION 'snappy')"
+    )
+    tmp.rename(path)
+
+
+def _parquet_to_coo(
+        path: Path,
+        index_converter: "IndexConverter",
+        regularized: bool = False) -> Tuple[sp.coo_matrix, Dict[int, int]]:
+    """Load posterior parquet rows into an m-indexed (m, c) COO matrix.
+
+    Args:
+        path: Path to the posterior parquet file.
+        index_converter: Used to compute m = cell_id * n_genes + gene_id.
+        regularized: If True, load the regularized rows; otherwise the main posterior.
+
+    Returns:
+        (coo, noise_count_offsets)
+    """
+    import pandas as pd
+    table = pq.read_table(str(path), filters=[('regularized', '==', regularized)])
+    df = table.to_pandas()
+
+    if len(df) == 0:
+        n_rows = index_converter.total_n_cells * index_converter.total_n_genes
+        coo = sp.coo_matrix((n_rows, 1), dtype=np.float64)
+        return coo, {}
+
+    cell_ids = df['cell_id'].values.astype(np.int64)
+    gene_ids = df['gene_id'].values.astype(np.int64)
+    c_vals   = df['c'].values.astype(np.int32)
+    offsets  = df['noise_offset'].values.astype(np.int32)
+    log_probs = df['log_prob'].values.astype(np.float64)
+
+    m = index_converter.get_m_indices(cell_inds=cell_ids, gene_inds=gene_ids)
+
+    noise_count_offsets: Dict[int, int] = {}
+    nonzero_mask = offsets != 0
+    if nonzero_mask.any():
+        noise_count_offsets = dict(zip(
+            m[nonzero_mask].tolist(),
+            offsets[nonzero_mask].tolist(),
+        ))
+
+    n_rows = int(index_converter.total_n_cells) * int(index_converter.total_n_genes)
+    n_cols = int(c_vals.max()) + 1 if len(c_vals) > 0 else 1
+
+    coo = sp.coo_matrix(
+        (log_probs, (m, c_vals)),
+        shape=(n_rows, n_cols),
+    )
+    return coo, noise_count_offsets
+
+
+def _split_latents(
+    latents: Dict[str, np.ndarray]
+) -> tuple[Dict[str, np.ndarray], Dict[str, list]]:
+    """Split latents into per-barcode arrays and global (scalar/small) entries.
+
+    Returns:
+        (per_barcode, global_latents) where *per_barcode* contains 1D/2D arrays
+        with the barcode count on axis-0, and *global_latents* contains everything
+        else (e.g. phi_loc_scale which is a 2-element list).
+    """
+    # Determine per-barcode length from the first long-enough array.
+    n_barcodes: int | None = None
+    for val in latents.values():
+        if val is None:
+            continue
+        arr = np.asarray(val)
+        if arr.ndim >= 1 and arr.shape[0] > 2:
+            n_barcodes = arr.shape[0]
+            break
+
+    per_barcode: Dict[str, np.ndarray] = {}
+    global_lats: Dict[str, list] = {}
+    for key, val in latents.items():
+        if val is None:
+            continue
+        arr = np.asarray(val)
+        if n_barcodes is not None and (arr.ndim == 0 or arr.shape[0] != n_barcodes):
+            global_lats[key] = np.asarray(val).tolist()
+        else:
+            per_barcode[key] = arr
+    return per_barcode, global_lats
+
+
+def write_posterior_latents_csv(path: Path, latents: Dict[str, np.ndarray]) -> None:
+    """Save per-barcode posterior MAP latents to a gzip-compressed CSV.
+
+    Global (scalar/small) entries such as *phi_loc_scale* are skipped here and
+    must be written separately via :func:`write_posterior_global_latents_json`.
+    """
+    import pandas as pd
+    per_barcode, _global = _split_latents(latents)
+
+    data: Dict[str, np.ndarray] = {}
+    for key, arr in per_barcode.items():
+        if arr.ndim == 1:
+            data[key] = arr
+        elif arr.ndim == 2:
+            for i in range(arr.shape[1]):
+                data[f'{key}_{i}'] = arr[:, i]
+        else:
+            logger.warning(f"Skipping latent '{key}' with shape {arr.shape}: only 1D/2D supported")
+    pd.DataFrame(data).to_csv(str(path), index=False, compression='gzip', float_format='%.17g')
+
+
+def write_posterior_global_latents_json(path: Path, latents: Dict[str, np.ndarray]) -> None:
+    """Save global (non-per-barcode) posterior latents to a JSON sidecar.
+
+    This captures entries such as *phi_loc_scale* = [phi_loc, phi_scale] that
+    are model-wide rather than per-barcode.
+    """
+    import json
+    _per_barcode, global_lats = _split_latents(latents)
+    if not global_lats:
+        return
+    with open(str(path), 'w') as f:
+        json.dump(global_lats, f)
+
+
+def load_posterior_global_latents_json(path: Path) -> Dict[str, np.ndarray]:
+    """Load global posterior latents from a JSON sidecar.
+
+    Returns an empty dict if the file does not exist.
+    """
+    import json
+    if not path.exists():
+        return {}
+    with open(str(path)) as f:
+        raw = json.load(f)
+    return {k: np.asarray(v) for k, v in raw.items()}
+
+
+def load_posterior_latents_csv(path: Path) -> Dict[str, np.ndarray]:
+    """Load posterior MAP latents from a gzip-compressed CSV file."""
+    import pandas as pd
+    df = pd.read_csv(str(path), compression='gzip')
+    latents: Dict[str, np.ndarray] = {}
+    z_cols = sorted(
+        [c for c in df.columns if c.startswith('z_') and c.split('_', 1)[1].isdigit()],
+        key=lambda x: int(x.split('_', 1)[1]),
+    )
+    other_cols = [c for c in df.columns if c not in z_cols]
+    for col in other_cols:
+        latents[col] = df[col].values
+    if z_cols:
+        latents['z'] = df[z_cols].values
+    return latents
 
 
 def unravel_dict(pref: str, d: Any) -> Dict:
