@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 if TYPE_CHECKING:
     from cellbender.remove_background.model import RemoveBackgroundPyroModel
 
-import dill
 import numpy as np
 import torch
 
@@ -243,7 +242,7 @@ def _serialize_checkpoint_to_buffers(
     # nn.Parameter tensors are saved via model.state_dict.torch and must NOT
     # also be saved here to avoid the two-tensor-object divergence on restore.
     buf = io.BytesIO()
-    torch.save(_get_scalar_param_store_state(model_obj), buf, pickle_module=dill)
+    torch.save(_get_scalar_param_store_state(model_obj), buf)
     buffers[basename + "_params.pyro"] = buf.getvalue()
 
     # Phase 1: DataLoaders as compact npz buffers.
@@ -325,7 +324,7 @@ def save_checkpoint(
             scheduler.save(filebase + "_optim.pyro")
             scalar_ps_state = _get_scalar_param_store_state(model_obj)
             with open(filebase + "_params.pyro", "wb") as _f:
-                torch.save(scalar_ps_state, _f, pickle_module=dill)
+                torch.save(scalar_ps_state, _f)
             file_list += [
                 filebase + "_optim.pyro",
                 filebase + "_params.pyro",
@@ -702,18 +701,8 @@ def create_workflow_hashcode(
     return hasher.hexdigest()
 
 
-def save_param_store(filename: str) -> None:
-    """Save parameters to file."""
-
-    # Modified from pyro to allow alternate pickle_module
-    with open(filename, "wb") as output_file:
-        torch.save(pyro.get_param_store().get_state(), output_file, pickle_module=dill)
-
-
 def load_param_store(filename: str, force_device: Optional[str] = None) -> None:
-    """Load parameters to file."""
-
-    # Modified from pyro to allow alternate pickle_module
+    """Load parameters from file."""
     with open(filename, "rb") as input_file:
-        state = torch.load(input_file, force_device, pickle_module=dill)
+        state = torch.load(input_file, force_device, weights_only=False)
     pyro.get_param_store().set_state(state)
