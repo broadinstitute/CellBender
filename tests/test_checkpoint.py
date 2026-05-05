@@ -1,15 +1,15 @@
-"""Tests for checkpointing functions."""
-
 import argparse
 import os
 import random
 import shutil
+import tempfile
 from typing import List
 
 import numpy as np
 import pyro
 import pyro.optim as optim
 import pytest
+import scipy.sparse as sp
 import torch
 from conftest import USE_CUDA
 from torch.distributions import constraints
@@ -19,12 +19,14 @@ from cellbender.remove_background.checkpoint import (
     create_workflow_hashcode,
     flush_pending_checkpoint,
     load_checkpoint,
+    load_optim_from_bytes,
     load_param_store,
     load_random_state,
     save_checkpoint,
     save_checkpoint_async,
     save_random_state,
 )
+from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
 from cellbender.remove_background.data.extras.simulate import (
     generate_sample_dirichlet_dataset,
@@ -176,15 +178,27 @@ def test_save_and_load_random_state(tmpdir_factory, perturbed_random_state_dict,
     assert str(incorrect) != str(actual)
 
 
-def new_train_loader(data: torch.Tensor, batch_size: int, shuffle: bool = True):
-    return torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=shuffle)  # type: ignore[arg-type]
+def new_train_loader(data: sp.csr_matrix, batch_size: int, shuffle: bool = True):
+    """Wrap a sparse matrix in our DataLoader for checkpointing tests."""
+    n = data.shape[0]
+    return DataLoader(
+        dataset=data,
+        empty_drop_dataset=None,
+        batch_size=batch_size,
+        fraction_empties=0.0,
+        shuffle=shuffle,
+        use_cuda=False,
+        original_cell_indices=np.arange(n),
+        original_empty_indices=np.array([], dtype=np.int64),
+    )
 
 
 class PyroModel(torch.nn.Module):
-    def __init__(self, dim=8, hidden_layer=4, z_dim=2):
+    def __init__(self, dim=8, hidden_layer=4, z_dim=2, clear_state=True):
         super(PyroModel, self).__init__()
-        create_random_state_blank_slate(0)
-        pyro.clear_param_store()
+        if clear_state:
+            create_random_state_blank_slate(0)
+            pyro.clear_param_store()
         self.encoder = EncodeZ(input_dim=dim, hidden_dims=[hidden_layer], output_dim=z_dim)
         self.decoder = Decoder(input_dim=z_dim, hidden_dims=[hidden_layer], output_dim=dim)
         self.z_dim = z_dim
@@ -235,8 +249,18 @@ def _get_params(module: torch.nn.Module) -> List[torch.Tensor]:
 
 @pytest.mark.parametrize("batch_size_n", [32, 128], ids=lambda n: f"batch{n}")
 def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
-    """Check and see if restarting from a checkpoint picks up in the same place
-    we left off.  Use a dataloader.
+    """Check that restarting from a checkpoint picks up in the same place.
+
+    The correct comparison is not "checkpoint restart == one-shot training",
+    because the new compact checkpoint format only saves the end-of-epoch
+    DataLoader state, so the first-epoch shuffle ordering from the original
+    training is not reproducible from scratch.  Instead we compare:
+
+        PATH_DIRECT  — continue training on the original objects (no checkpoint)
+        PATH_CKPT    — save → load checkpoint → continue training on new objects
+
+    Both paths start from identical state (model weights, optimizer moments, RNG,
+    DataLoader position), so they must produce identical weight trajectories.
     """
 
     filedir = tmpdir_factory.mktemp("ckpt")
@@ -246,110 +270,117 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
     epochs2 = 3
     lr = 1e-2
 
-    # data and dataloader
-    dataset = torch.randn((128, dim))
-    train_loader = new_train_loader(data=dataset, batch_size=batch_size_n)
+    # data and dataloader (sparse format required by our DataLoader)
+    dataset_dense = torch.randn((128, dim))
+    dataset_sparse = sp.csr_matrix(dataset_dense.numpy())
+    train_loader = new_train_loader(data=dataset_sparse, batch_size=batch_size_n)
 
     # create an ML model
     initial_model = PyroModel(dim=dim)
-
-    # set up the inference process
-    scheduler = optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
-    svi = pyro.infer.SVI(initial_model.model, initial_model.guide, scheduler, loss=pyro.infer.Trace_ELBO())
     w1 = _get_params(initial_model.encoder)
 
-    print("initial weight matrix =========================")
-    print("\n".join([str(t) for t in w1]))
+    # set up inference
+    scheduler = optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
+    svi = pyro.infer.SVI(initial_model.model, initial_model.guide, scheduler, loss=pyro.infer.Trace_ELBO())
 
-    # train in two parts: part 1
+    # train round 1
     initial_model.loss.extend(train_pyro(n_epochs=epochs, data_loader=train_loader, svi=svi))
 
-    print("no_ckpt trained round 1 (saved) ===============")
-    # print(initial_model.encoder.linears[0].weight.data)
-    print("\n".join([str(t) for t in _get_params(initial_model.encoder)]))
-
-    # save
+    # Save checkpoint
     save_successful = save_checkpoint(
         filebase=str(filebase),
         args=argparse.Namespace(),
-        model_obj=initial_model,  # TODO
+        model_obj=initial_model,
         scheduler=scheduler,
         train_loader=train_loader,
         tarball_name=str(filebase) + ".tar.gz",
     )
     assert save_successful, "Failed to save checkpoint during test_save_and_load_checkpoint"
 
-    # load from checkpoint
+    # Capture round-1 weights before PATH_DIRECT training modifies initial_model.
+    w_round1 = _get_params(initial_model.encoder)
+
+    # ---- PATH_DIRECT: continue without checkpoint ----
+    # Capture RNG state right here so both paths start from the same point.
+    rng_direct = RandomState()
+    direct_loss = train_pyro(n_epochs=epochs2, data_loader=train_loader, svi=svi)
+    direct_weights = _get_params(initial_model.encoder)
+
+    # ---- PATH_CKPT: load from checkpoint and continue ----
     create_random_state_blank_slate(0)
     pyro.clear_param_store()
     ckpt = load_checkpoint(filebase=str(filebase), tarball_name=str(filebase) + ".tar.gz", force_device="cpu")
-    model_ckpt = ckpt["model"]
-    scheduler_ckpt = ckpt["optim"]
-    train_loader = ckpt["train_loader"]
+
+    # RNG must be restored to the same state as rng_direct (both captured from the
+    # same post-epoch-3 state, rng_direct before any reconstruction side-effects).
+    rng_ckpt = RandomState()
+
+    # Reconstruct model.  clear_state=False preserves the param store that
+    # load_checkpoint just restored so PyroOptim can load Adam moments lazily.
+    # Save/restore torch RNG around model construction to avoid weight-init draws
+    # advancing torch past the restored state.
+    _torch_state = torch.get_rng_state()
+    model_ckpt = PyroModel(dim=dim, clear_state=False)
+    torch.set_rng_state(_torch_state)
+    model_ckpt.load_state_dict(ckpt["model_state_dict"])
+
+    # Reconstruct optimizer.
+    scheduler_ckpt = optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
+    load_optim_from_bytes(scheduler_ckpt, ckpt["optim_state_bytes"])
+
+    # Reconstruct dataloader.  Use shuffle=False during construction to avoid an
+    # extra numpy draw from _reset(); restore shuffle=True before set_state.
+    loader_state = ckpt["train_loader_state"]
+    cell_inds = loader_state["original_cell_indices"]
+    train_loader_ckpt = DataLoader(
+        dataset=dataset_sparse[cell_inds, :],
+        empty_drop_dataset=None,
+        batch_size=int(loader_state["batch_size"]),
+        fraction_empties=float(loader_state["fraction_empties"]),
+        shuffle=False,  # avoid numpy draw in __init__; restored below
+        use_cuda=bool(loader_state["use_cuda"]),
+        original_cell_indices=cell_inds,
+        original_empty_indices=loader_state["original_empty_indices"],
+    )
+    train_loader_ckpt.shuffle = bool(loader_state["shuffle"])
+    train_loader_ckpt.set_state(ind_list=loader_state["ind_list"], ptr=int(loader_state["ptr"]))
+
     s = ckpt["loaded"]
-    print("model_ckpt loaded =============================")
-    print("\n".join([str(t) for t in _get_params(model_ckpt.encoder)]))
 
-    matches = _check_all_close(_get_params(model_ckpt.encoder), _get_params(initial_model.encoder))
-    print(f"model_ckpt loaded matches data from (saved) trained round 1: {matches}")
+    # Verify model weights match at load time (compare against round-1 snapshot,
+    # not against initial_model which PATH_DIRECT has already updated).
+    assert _check_all_close(_get_params(model_ckpt.encoder), w_round1), (
+        "Loaded checkpoint weights do not match the saved weights"
+    )
 
-    # clean up before most assertions... hokey now due to lack of fixture usage here
+    # Clean up checkpoint files.
     shutil.rmtree(str(filedir))
 
-    # and continue training
     assert s is True, "Checkpoint loading failed during test_save_and_load_checkpoint"
+
+    # RNG must have been correctly restored by load_checkpoint.
+    assert str(rng_direct) == str(rng_ckpt), (
+        "RNG state after load_checkpoint does not match the state just before PATH_DIRECT training. "
+        "This means load_checkpoint did not restore the random state correctly."
+    )
+
+    # Continue training from checkpoint.
     svi_ckpt = pyro.infer.SVI(model_ckpt.model, model_ckpt.guide, scheduler_ckpt, loss=pyro.infer.Trace_ELBO())
-    rng_ckpt = RandomState()
-    guide_trace_ckpt = pyro.poutine.trace(svi_ckpt.guide).get_trace(x=dataset)
-    model_ckpt.loss.extend(train_pyro(n_epochs=epochs2, data_loader=train_loader, svi=svi_ckpt))
+    ckpt_loss = train_pyro(n_epochs=epochs2, data_loader=train_loader_ckpt, svi=svi_ckpt)
+    ckpt_weights = _get_params(model_ckpt.encoder)
 
-    print("model_ckpt after round 2 ======================")
-    print("\n".join([str(t) for t in _get_params(model_ckpt.encoder)]))
-
-    # one-shot training straight through
-    model_one_shot = PyroModel(dim=dim)  # resets random state
-    scheduler = optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
-    train_loader = new_train_loader(data=dataset, batch_size=batch_size_n)
-    svi_one_shot = pyro.infer.SVI(model_one_shot.model, model_one_shot.guide, scheduler, loss=pyro.infer.Trace_ELBO())
-    model_one_shot.loss.extend(train_pyro(n_epochs=epochs, data_loader=train_loader, svi=svi_one_shot))
-    rng_one_shot = RandomState()
-    guide_trace_one_shot = pyro.poutine.trace(svi_one_shot.guide).get_trace(x=dataset)
-    model_one_shot.loss.extend(train_pyro(n_epochs=epochs2, data_loader=train_loader, svi=svi_one_shot))
-
-    assert str(rng_one_shot) == str(rng_ckpt), (
-        "Random states of the checkpointed and non-checkpointed versions at the start of training round 2 do not match."
+    # Training should change the weights in both paths.
+    assert (w1[0] != direct_weights[0]).sum().item() > 0, (
+        "Training is not changing the weight matrix (PATH_DIRECT)"
+    )
+    assert (w1[0] != ckpt_weights[0]).sum().item() > 0, (
+        "Training is not changing the checkpointed weight matrix (PATH_CKPT)"
     )
 
-    print("model_one_shot ================================")
-    print("\n".join([str(t) for t in _get_params(model_one_shot.encoder)]))
-
-    print(model_one_shot.loss)
-    print(model_ckpt.loss)
-    print([l1 == l2 for l1, l2 in zip(model_one_shot.loss, model_ckpt.loss)])
-
-    # training should be doing something to the initial weight matrix
-    assert (w1[0] != _get_params(model_one_shot.encoder)[0]).sum().item() > 0, (
-        "Training is not changing the weight matrix in test_save_and_load_checkpoint"
+    # PATH_CKPT must reproduce PATH_DIRECT's weights exactly.
+    assert _check_all_close(direct_weights, ckpt_weights), (
+        "Checkpointed restart (PATH_CKPT) does not agree with direct continuation (PATH_DIRECT)"
     )
-    assert (w1[0] != _get_params(model_ckpt.encoder)[0]).sum().item() > 0, (
-        "Training is not changing the checkpointed weight matrix in test_save_and_load_checkpoint"
-    )
-
-    # see if we end up where we should
-    assert _check_all_close(_get_params(model_one_shot.encoder), _get_params(model_ckpt.encoder)), (
-        "Checkpointed restart does not agree with one-shot training"
-    )
-
-    # check guide traces
-    print("checking guide trace nodes for agreement:")
-    for name in guide_trace_one_shot.nodes:
-        if (name != "_RETURN") and ("value" in guide_trace_one_shot.nodes[name].keys()):
-            print(name)
-            disagreement = (
-                guide_trace_one_shot.nodes[name]["value"].data != guide_trace_ckpt.nodes[name]["value"].data
-            ).sum()
-            print(f"number of values that disagree: {disagreement}")
-            assert disagreement == 0, "Guide traces disagree with and without checkpoint restart"
 
 
 @pytest.mark.parametrize(
@@ -359,8 +390,17 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
 )
 @pytest.mark.parametrize("scheduler", [False, True], ids=lambda b: "OneCycleLR" if b else "Adam")
 def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
-    """Check and see if restarting from a checkpoint picks up in the same place
-    we left off.  Use our model and dataloader.
+    """Check that restarting from a checkpoint produces weights identical to
+    uninterrupted one-shot training.
+
+    ONE-SHOT PATH  — train all (epochs + epochs2) epochs in a single run.
+    CHECKPOINT PATH — train epochs epochs, save a checkpoint, then resume and
+                      train epochs2 more epochs from the checkpoint.
+
+    Both paths start from the same RANDOM_SEED (run_inference resets it every
+    call), so the only difference is whether training is continuous or
+    interrupted.  If checkpoint save/restore is correct the final model weights
+    must be bit-for-bit identical.
     """
 
     filedir = tmpdir_factory.mktemp("ckpt")
@@ -399,127 +439,86 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     args.learning_rate = 1e-3
     args.training_fraction = 0.9
     args.fraction_empties = 0.1
-    args.checkpoint_filename = "test01234_"
     args.checkpoint_min = 5
     args.epoch_elbo_fail_fraction = None
     args.final_elbo_fail_fraction = None
     args.constant_learning_rate = not scheduler
     args.debug = False
-    args.input_checkpoint_tarball = "none"
     args.force_use_checkpoint = False
 
-    create_random_state_blank_slate(0)
-    pyro.clear_param_store()
-    args.epochs = -1  # I am hacking my way around an error induced by saving a checkpoint for 0 epoch runs
-    initial_model, scheduler, _, _ = run_inference(dataset_obj=dataset_obj, args=args)
-    w1 = _get_params(initial_model.encoder["z"])
-    print("encoder structure ============")
-    print(initial_model.encoder["z"])
+    # Compute the hashcode-based checkpoint filename once (excludes 'epochs').
+    hashcode = create_workflow_hashcode(module_path=os.path.dirname(cellbender.__file__), args=args)[:10]
+    checkpoint_filename = os.path.basename(args.output_file).split(".")[0] + "_" + hashcode
+    filebase = filedir.join(checkpoint_filename)
+    args.checkpoint_filename = checkpoint_filename
 
-    print("initial weight matrix =========================")
-    print("\n".join([str(t) for t in w1]))
+    # --- ONE-SHOT PATH ---
+    # run_inference resets the RNG to RANDOM_SEED on every call, so this path
+    # and the checkpoint round-1 path below start from identical initial state.
+    args.input_checkpoint_tarball = "none"
+    args.epochs = epochs + epochs2
+    model_oneshot, _, _, _ = run_inference(
+        dataset_obj=dataset_obj,
+        args=args,
+        output_checkpoint_tarball="none",
+        total_epochs_for_testing_only=epochs + epochs2,
+    )
+    weights_oneshot = _get_params(model_oneshot.encoder["z"])
 
-    # train in two parts: part 1
-    pyro.clear_param_store()
-    create_random_state_blank_slate(0)
+    # --- CHECKPOINT PATH, ROUND 1 ---
+    # Train the first `epochs` epochs.  Identical to one-shot up to epoch
+    # `epochs` because both calls start from the same RANDOM_SEED.
+    args.input_checkpoint_tarball = "none"
     args.epochs = epochs
-    initial_model, scheduler, train_loader, test_loader = run_inference(
+    model_r1, scheduler_r1, train_loader, test_loader = run_inference(
         dataset_obj=dataset_obj,
         args=args,
         output_checkpoint_tarball="none",
         total_epochs_for_testing_only=epochs + epochs2,
     )
 
-    print("no_ckpt trained round 1 (saved) ===============")
-    print("\n".join([str(t) for t in _get_params(initial_model.encoder["z"])]))
-    # print(scheduler.get_state().keys())
-    # print(list(scheduler.get_state().values())[0].keys())
-    # print(list(list(scheduler.optim_objs.values())[0].optimizer.state_dict().values())[0].values())
-    # assert 0
-
-    # save
-    hashcode = create_workflow_hashcode(module_path=os.path.dirname(cellbender.__file__), args=args)[:10]
-    checkpoint_filename = os.path.basename(args.output_file).split(".")[0] + "_" + hashcode
-    args.checkpoint_filename = checkpoint_filename
-    filebase = filedir.join(checkpoint_filename)
+    # Save checkpoint after round 1.
     save_successful = save_checkpoint(
         filebase=str(filebase),
         args=args,
-        model_obj=initial_model,  # TODO
-        scheduler=scheduler,
+        model_obj=model_r1,
+        scheduler=scheduler_r1,
         tarball_name=str(filebase) + ".tar.gz",
         train_loader=train_loader,
         test_loader=test_loader,
     )
-    assert save_successful, "Failed to save checkpoint during test_save_and_load_checkpoint"
-    assert os.path.exists(str(filebase) + ".tar.gz"), "Checkpoint should exist but does not"
+    assert save_successful, "Failed to save checkpoint during test_save_and_load_cellbender_checkpoint"
+    assert os.path.exists(str(filebase) + ".tar.gz"), "Checkpoint tarball should exist but does not"
 
-    # load from checkpoint (automatically) and run
-    pyro.clear_param_store()
-    create_random_state_blank_slate(0)
-    args.epochs = -1
+    # --- CHECKPOINT PATH, ROUND 2 ---
+    # Resume from checkpoint and train epochs2 more epochs.
+    # run_inference resets RNG to RANDOM_SEED first, then load_checkpoint
+    # overwrites RNG with the saved post-round-1 state, so training resumes
+    # from exactly where round 1 left off.
     args.input_checkpoint_tarball = str(filebase) + ".tar.gz"
-    model_ckpt, scheduler, _, _ = run_inference(dataset_obj=dataset_obj, args=args, output_checkpoint_tarball="none")
-
-    print("model_ckpt loaded =============================")
-    print("\n".join([str(t) for t in _get_params(model_ckpt.encoder["z"])]))
-
-    matches = _check_all_close(_get_params(model_ckpt.encoder["z"]), _get_params(initial_model.encoder["z"]))
-    print(f"model_ckpt loaded matches data from (saved) trained round 1: {matches}")
-
-    # and continue training
-    create_random_state_blank_slate(0)
-    pyro.clear_param_store()
     args.epochs = epochs + epochs2
-    model_ckpt, scheduler, _, _ = run_inference(dataset_obj=dataset_obj, args=args, output_checkpoint_tarball="none")
+    model_resumed, _, _, _ = run_inference(
+        dataset_obj=dataset_obj,
+        args=args,
+        output_checkpoint_tarball="none",
+        total_epochs_for_testing_only=epochs + epochs2,
+    )
+    weights_resumed = _get_params(model_resumed.encoder["z"])
 
-    print("model_ckpt after round 2 ======================")
-    print("\n".join([str(t) for t in _get_params(model_ckpt.encoder["z"])]))
-
-    # clean up the temp directory to remove checkpoint before running the one-shot
+    # Clean up all checkpoint files now that both runs are done.
     shutil.rmtree(str(filedir))
 
-    # one-shot training straight through
-    pyro.clear_param_store()
-    create_random_state_blank_slate(0)
-    args.epochs = epochs + epochs2
-    args.input_checkpoint_tarball = "none"
-    model_one_shot, scheduler, _, _ = run_inference(
-        dataset_obj=dataset_obj, args=args, output_checkpoint_tarball="none"
+    # Training must change the weights relative to initial (one-shot as proxy).
+    w1 = _get_params(model_r1.encoder["z"])  # weights after round-1 training
+    assert (weights_oneshot[0] != w1[0]).sum().item() > 0, (
+        "Training is not changing the weight matrix in test_save_and_load_cellbender_checkpoint"
     )
 
-    print("model_one_shot ================================")
-    print("\n".join([str(t) for t in _get_params(model_one_shot.encoder["z"])]))
-
-    print("loss for model_one_shot:")
-    print(model_one_shot.loss)
-    print("loss for model_ckpt:")
-    print(model_ckpt.loss)
-    print([l1 == l2 for l1, l2 in zip(model_one_shot.loss, model_ckpt.loss)])
-
-    # training should be doing something to the initial weight matrix
-    assert (w1[0] != _get_params(model_one_shot.encoder["z"])[0]).sum().item() > 0, (
-        "Training is not changing the weight matrix in test_save_and_load_checkpoint"
+    # One-shot and checkpoint-resume must produce bit-for-bit identical weights.
+    assert _check_all_close(weights_oneshot, weights_resumed), (
+        "One-shot training and checkpoint-resume training produced different weights — "
+        "checkpoint save/restore is not fully deterministic"
     )
-    assert (w1[0] != _get_params(model_ckpt.encoder["z"])[0]).sum().item() > 0, (
-        "Training is not changing the checkpointed weight matrix in test_save_and_load_checkpoint"
-    )
-
-    # see if we end up where we should
-    assert _check_all_close(_get_params(model_one_shot.encoder["z"]), _get_params(model_ckpt.encoder["z"])), (
-        "Checkpointed restart does not agree with one-shot training"
-    )
-
-    # # check guide traces
-    # print('checking guide trace nodes for agreement:')
-    # for name in guide_trace_one_shot.nodes:
-    #     if (name != '_RETURN') and ('value' in guide_trace_one_shot.nodes[name].keys()):
-    #         print(name)
-    #         disagreement = (guide_trace_one_shot.nodes[name]['value'].data
-    #                         != guide_trace_ckpt.nodes[name]['value'].data).sum()
-    #         print(f'number of values that disagree: {disagreement}')
-    #         assert disagreement == 0, \
-    #             'Guide traces disagree with and without checkpoint restart'
 
 
 # ---------------------------------------------------------------------------
@@ -547,8 +546,9 @@ def _make_trained_model(dim: int = 8, n_epochs: int = 2, batch_size: int = 32):
     """Return (model, scheduler, train_loader) after a short training run."""
     import pyro.optim as optim
 
-    dataset = torch.randn((64, dim))
-    loader = new_train_loader(data=dataset, batch_size=batch_size)
+    dataset_dense = torch.randn((64, dim))
+    dataset_sparse = sp.csr_matrix(dataset_dense.numpy())
+    loader = new_train_loader(data=dataset_sparse, batch_size=batch_size)
     create_random_state_blank_slate(0)
     pyro.clear_param_store()
     model = PyroModel(dim=dim)
@@ -561,6 +561,51 @@ def _make_trained_model(dim: int = 8, n_epochs: int = 2, batch_size: int = 32):
 # ---------------------------------------------------------------------------
 # Tests for async checkpoint functions
 # ---------------------------------------------------------------------------
+
+
+def test_compact_dataloader_state_roundtrip(tmpdir_factory):
+    """DataLoader.get_state() contains all fields needed to reconstruct the loader,
+    and restoring via set_state() + slicing puts the loader back in the same position."""
+    import io as _io
+
+    dim = 4
+    n = 64
+    dataset_dense = torch.randn((n, dim))
+    dataset_sparse = sp.csr_matrix(dataset_dense.numpy())
+
+    loader = new_train_loader(data=dataset_sparse, batch_size=16)
+    # Advance the pointer by consuming one batch so state is non-trivial.
+    _ = next(iter(loader))
+
+    state = loader.get_state()
+    assert "original_cell_indices" in state
+    assert "ind_list" in state
+    assert "ptr" in state
+    assert "batch_size" in state
+
+    # Round-trip through npz bytes (same as checkpoint.py does).
+    buf = _io.BytesIO()
+    np.savez_compressed(buf, **state)
+    buf.seek(0)
+    restored_state = dict(np.load(buf, allow_pickle=False))
+
+    cell_inds = restored_state["original_cell_indices"]
+    loader2 = DataLoader(
+        dataset=dataset_sparse[cell_inds, :],
+        empty_drop_dataset=None,
+        batch_size=int(restored_state["batch_size"]),
+        fraction_empties=float(restored_state["fraction_empties"]),
+        shuffle=bool(restored_state["shuffle"]),
+        use_cuda=bool(restored_state["use_cuda"]),
+        original_cell_indices=cell_inds,
+        original_empty_indices=restored_state["original_empty_indices"],
+    )
+    loader2.set_state(ind_list=restored_state["ind_list"], ptr=int(restored_state["ptr"]))
+
+    # Both loaders must yield the same first batch from here.
+    batch1 = next(iter(loader))
+    batch2 = next(iter(loader2))
+    assert torch.allclose(batch1, batch2), "Restored DataLoader must yield the same batch as the original"
 
 
 def test_flush_pending_checkpoint_no_op_when_nothing_pending(reset_async_state):
@@ -595,8 +640,10 @@ def test_save_checkpoint_async_returns_future_and_produces_tarball(tmpdir_factor
     pyro.clear_param_store()
     ckpt = load_checkpoint(filebase=filebase, tarball_name=tarball, force_device="cpu")
     assert ckpt["loaded"] is True
+    fresh_model = PyroModel(dim=8)
+    fresh_model.load_state_dict(ckpt["model_state_dict"])
     assert _check_all_close(
-        _get_params(ckpt["model"].encoder),
+        _get_params(fresh_model.encoder),
         _get_params(model.encoder),
     ), "Loaded model weights must match saved model weights"
 
@@ -685,9 +732,13 @@ def test_async_checkpoint_matches_sync_checkpoint(tmpdir_factory, reset_async_st
     pyro.clear_param_store()
     ckpt_async = load_checkpoint(filebase=filebase, tarball_name=tarball_async, force_device="cpu")
 
+    fresh_sync = PyroModel(dim=8)
+    fresh_sync.load_state_dict(ckpt_sync["model_state_dict"])
+    fresh_async = PyroModel(dim=8)
+    fresh_async.load_state_dict(ckpt_async["model_state_dict"])
     assert _check_all_close(
-        _get_params(ckpt_sync["model"].encoder),
-        _get_params(ckpt_async["model"].encoder),
+        _get_params(fresh_sync.encoder),
+        _get_params(fresh_async.encoder),
     ), "Async checkpoint encoder weights must match sync checkpoint encoder weights"
 
 

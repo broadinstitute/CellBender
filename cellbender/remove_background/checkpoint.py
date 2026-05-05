@@ -5,6 +5,7 @@ import concurrent.futures
 import glob
 import hashlib
 import io
+import json
 import logging
 import os
 import pickle
@@ -38,6 +39,87 @@ _ckpt_executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.Threa
     max_workers=1, thread_name_prefix="checkpoint"
 )
 _pending_ckpt: Optional[concurrent.futures.Future] = None
+
+
+def _get_scalar_param_store_state(model_obj: "RemoveBackgroundPyroModel") -> Dict:
+    """Return a Pyro param store state dict containing only the *scalar* (non-module)
+    parameters — i.e. everything that is NOT an ``nn.Parameter`` tracked by
+    ``model_obj``.
+
+    Encoder / decoder ``nn.Parameter`` tensors are intentionally excluded here
+    because they are also saved verbatim in ``_model.state_dict.torch``.
+    Loading both copies creates two separate tensor objects with the same
+    value but different Python identities, which causes a one-ULP divergence
+    when the Pyro optimiser uses one copy while the model uses the other.
+    By excluding them from the param store backup, the checkpoint-restore path
+    matches the fresh-training path: when ``pyro.module(...,
+    update_module_params=True)`` is first called, the model's own (already
+    correctly initialised) parameters get registered into the param store
+    without any replacement, giving a single shared tensor object.
+    """
+    ps = pyro.get_param_store()
+    # Identify pyro param names that correspond to model nn.Parameters.
+    # In the one-shot / round-1 path the param store tensors ARE the model
+    # parameter objects (same identity), so we can look them up by id.
+    model_param_ids = {id(p) for _, p in model_obj.named_parameters()}
+    module_keys = {name for name, p in ps._params.items() if id(p) in model_param_ids}
+    full_state = ps.get_state()
+    return {
+        "params": {k: v for k, v in full_state["params"].items() if k not in module_keys},
+        "constraints": {k: v for k, v in full_state["constraints"].items() if k not in module_keys},
+    }
+
+
+def _build_model_meta_dict(model_obj: "RemoveBackgroundPyroModel") -> Optional[Dict]:
+    """Build the JSON-serializable metadata dict for a RemoveBackgroundPyroModel.
+    Returns None if the model does not have the expected attributes."""
+    if not hasattr(model_obj, "empty_UMI_threshold"):
+        return None
+    umi_thresh = model_obj.empty_UMI_threshold
+    return {
+        "model_type": model_obj.model_type,
+        "z_dim": int(model_obj.z_dim),
+        "z_hidden_dims": model_obj.z_hidden_dims or [],
+        "n_analyzed_genes": int(model_obj.n_genes),
+        "n_droplets": int(model_obj.n_droplets),
+        "empty_UMI_threshold": umi_thresh.item() if isinstance(umi_thresh, torch.Tensor) else int(umi_thresh),
+        "log_counts_crossover": float(model_obj.log_counts_crossover),
+        "loss": model_obj.loss,
+    }
+
+
+def _save_model_meta(model_obj: "RemoveBackgroundPyroModel", path: str) -> None:
+    """Write a JSON file with the model config and training history needed to
+    reconstruct the model architecture from scratch on checkpoint load.
+    No-op if the model lacks RemoveBackgroundPyroModel-specific attributes."""
+    meta = _build_model_meta_dict(model_obj)
+    if meta is None:
+        return
+    with open(path, "w") as f:
+        json.dump(meta, f)
+
+
+def load_optim_from_bytes(
+    scheduler: pyro.optim.PyroOptim,
+    optim_state_bytes: bytes,
+    map_location: Optional[torch.device] = None,
+) -> None:
+    """Restore optimizer state from a raw bytes buffer previously produced by
+    :func:`scheduler.save`.  Uses a short-lived temp file since
+    :meth:`PyroOptim.load` requires a path string."""
+    ntf_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as ntf:
+            ntf.write(optim_state_bytes)
+            ntf_path = ntf.name
+        kwargs: Dict = {} if map_location is None else {"map_location": map_location}
+        scheduler.load(ntf_path, **kwargs)
+    finally:
+        if ntf_path is not None:
+            try:
+                os.unlink(ntf_path)
+            except OSError:
+                pass
 
 
 def save_random_state(filebase: str) -> List[str]:
@@ -126,8 +208,7 @@ def _serialize_checkpoint_to_buffers(
     buffers: Dict[str, bytes] = {}
     basename = os.path.basename(filebase)
 
-    # Random state — save_random_state requires a file path, so we use a
-    # short-lived temp directory and read the bytes back immediately.
+    # Random state — save_random_state requires a file path.
     with tempfile.TemporaryDirectory() as rng_tmp:
         tmp_base = os.path.join(rng_tmp, basename)
         rng_files = save_random_state(filebase=tmp_base)
@@ -135,17 +216,15 @@ def _serialize_checkpoint_to_buffers(
             with open(path, "rb") as f:
                 buffers[os.path.basename(path)] = f.read()
 
-    # Model
+    # Phase 2: model state_dict + JSON metadata.
     buf = io.BytesIO()
-    torch.save(model_obj, buf, pickle_module=dill)
-    buffers[basename + "_model.torch"] = buf.getvalue()
+    torch.save(model_obj.state_dict(), buf)
+    buffers[basename + "_model.state_dict.torch"] = buf.getvalue()
+    meta = _build_model_meta_dict(model_obj)
+    if meta is not None:
+        buffers[basename + "_model.meta.json"] = json.dumps(meta).encode()
 
-    # Optimizer — torch part
-    buf = io.BytesIO()
-    torch.save(scheduler, buf, pickle_module=dill)
-    buffers[basename + "_optim.torch"] = buf.getvalue()
-
-    # Optimizer — pyro part: PyroOptim.save() requires a real file path.
+    # Phase 3: optimizer pyro-format only (requires a real file path).
     ntf_path: Optional[str] = None
     try:
         with tempfile.NamedTemporaryFile(suffix="_optim.pyro", delete=False) as ntf:
@@ -160,22 +239,24 @@ def _serialize_checkpoint_to_buffers(
             except OSError:
                 pass
 
-    # Param store (inline to avoid requiring a file path)
+    # Param store — only scalar (non-module) params.  Encoder / decoder
+    # nn.Parameter tensors are saved via model.state_dict.torch and must NOT
+    # also be saved here to avoid the two-tensor-object divergence on restore.
     buf = io.BytesIO()
-    torch.save(pyro.get_param_store().get_state(), buf, pickle_module=dill)
+    torch.save(_get_scalar_param_store_state(model_obj), buf, pickle_module=dill)
     buffers[basename + "_params.pyro"] = buf.getvalue()
 
-    # Data loaders (match existing save_checkpoint: no pickle_module override)
+    # Phase 1: DataLoaders as compact npz buffers.
     if train_loader is not None:
         buf = io.BytesIO()
-        torch.save(train_loader, buf)
-        buffers[basename + "_train.loaderstate"] = buf.getvalue()
+        np.savez_compressed(buf, **train_loader.get_state())
+        buffers[basename + "_train.loaderstate.npz"] = buf.getvalue()
     if test_loader is not None:
         buf = io.BytesIO()
-        torch.save(test_loader, buf)
-        buffers[basename + "_test.loaderstate"] = buf.getvalue()
+        np.savez_compressed(buf, **test_loader.get_state())
+        buffers[basename + "_test.loaderstate.npz"] = buf.getvalue()
 
-    # Args
+    # Args.
     buf = io.BytesIO()
     np.save(buf, args)
     buffers[basename + "_args.npy"] = buf.getvalue()
@@ -228,29 +309,35 @@ def save_checkpoint(
 
             file_list = save_random_state(filebase=filebase)
 
-            torch.save(model_obj, filebase + "_model.torch", pickle_module=dill)
-            torch.save(scheduler, filebase + "_optim.torch", pickle_module=dill)
-            scheduler.save(filebase + "_optim.pyro")  # use PyroOptim method
-            save_param_store(filebase + "_params.pyro")
-            file_list = file_list + [
-                filebase + "_model.torch",
-                filebase + "_optim.torch",
+            # Phase 2: model state_dict + JSON metadata (no dill pickle).
+            torch.save(model_obj.state_dict(), filebase + "_model.state_dict.torch")
+            _save_model_meta(model_obj, filebase + "_model.meta.json")
+            file_list += [
+                filebase + "_model.state_dict.torch",
+            ]
+            if os.path.exists(filebase + "_model.meta.json"):
+                file_list.append(filebase + "_model.meta.json")
+
+            # Phase 3: optimizer pyro-format only (drop full torch pickle).
+            # Save only scalar (non-module) params to avoid the two-tensor-object
+            # divergence that arises when encoder/decoder params are serialised
+            # separately from model.state_dict.torch.
+            scheduler.save(filebase + "_optim.pyro")
+            scalar_ps_state = _get_scalar_param_store_state(model_obj)
+            with open(filebase + "_params.pyro", "wb") as _f:
+                torch.save(scalar_ps_state, _f, pickle_module=dill)
+            file_list += [
                 filebase + "_optim.pyro",
                 filebase + "_params.pyro",
             ]
 
+            # Phase 1: DataLoaders as compact index-based npz (no sparse matrices).
             if train_loader is not None:
-                # train_loader_file = save_dataloader_state(filebase=filebase,
-                #                                           data_loader_state=train_loader.get_state(),
-                #                                           name='train')
-                torch.save(train_loader, filebase + "_train.loaderstate")
-                file_list.append(filebase + "_train.loaderstate")
+                np.savez_compressed(filebase + "_train.loaderstate.npz", **train_loader.get_state())
+                file_list.append(filebase + "_train.loaderstate.npz")
             if test_loader is not None:
-                # test_loader_file = save_dataloader_state(filebase=filebase,
-                #                                          data_loader_state=test_loader.get_state(),
-                #                                          name='test')
-                torch.save(test_loader, filebase + "_test.loaderstate")
-                file_list.append(filebase + "_test.loaderstate")
+                np.savez_compressed(filebase + "_test.loaderstate.npz", **test_loader.get_state())
+                file_list.append(filebase + "_test.loaderstate.npz")
 
             np.save(filebase + "_args.npy", args)
             file_list.append(filebase + "_args.npy")
@@ -367,9 +454,15 @@ def load_checkpoint(
     tarball_name: str = consts.CHECKPOINT_FILE_NAME,
     force_device: Optional[str] = None,
     force_use_checkpoint: bool = False,
-) -> Dict[str, Union["RemoveBackgroundPyroModel", pyro.optim.PyroOptim, DataLoader, bool]]:
-    """Load checkpoint and prepare a RemoveBackgroundPyroModel and optimizer."""
+) -> Dict:
+    """Load checkpoint and return state for model reconstruction.
 
+    Returns a dict with keys:
+        ``model_state_dict``, ``model_meta``, ``optim_state_bytes``,
+        ``train_loader_state``, ``test_loader_state``, ``args``,
+        ``loaded`` (always True on success).
+    Raises FileNotFoundError or ValueError on failure.
+    """
     out = load_from_checkpoint(
         filebase=filebase,
         tarball_name=tarball_name,
@@ -377,7 +470,7 @@ def load_checkpoint(
         force_device=force_device,
         force_use_checkpoint=force_use_checkpoint,
     )
-    out.update({"loaded": True})
+    out["loaded"] = True
     logger.info(f"Loaded partially-trained checkpoint from {tarball_name}")
     return out
 
@@ -414,7 +507,9 @@ def load_from_checkpoint(
         # This smoothly allows re-runs (including for problematic v0.3.1)
         logger.debug(f"force_use_checkpoint: {force_use_checkpoint}")
         if force_use_checkpoint or (filebase is None):
-            filebase = glob.glob(os.path.join(tmp_dir, "*_model.torch"))[0].replace("_model.torch", "")
+            filebase = glob.glob(os.path.join(tmp_dir, "*_model.state_dict.torch"))[0].replace(
+                "_model.state_dict.torch", ""
+            )
             logger.debug(f"Accepting any file hash, so loading {filebase}*")
 
         else:
@@ -422,46 +517,45 @@ def load_from_checkpoint(
             basename = os.path.basename(filebase)
             filebase = os.path.join(tmp_dir, basename)
             logger.debug(f"Looking for files with base name matching {filebase}*")
-            if not os.path.exists(filebase + "_model.torch"):
+            if not os.path.exists(filebase + "_model.state_dict.torch"):
                 logger.info("Workflow hash does not match that of checkpoint.")
                 raise ValueError("Workflow hash does not match that of checkpoint.")
 
         out = {}
 
-        # Load the saved model.
+        # Load the saved model state_dict + metadata JSON.
         if "model" in to_load:
-            model_obj = torch.load(filebase + "_model.torch", map_location=map_location, pickle_module=dill)
-            logger.debug("Model loaded from " + filebase + "_model.torch")
-            out.update({"model": model_obj})
+            state_dict = torch.load(
+                filebase + "_model.state_dict.torch", map_location=map_location, weights_only=True
+            )
+            out["model_state_dict"] = state_dict
+            meta_path = filebase + "_model.meta.json"
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    out["model_meta"] = json.load(f)
+            logger.debug("Model state_dict loaded from " + filebase + "_model.state_dict.torch")
 
-        # Load the saved optimizer.
+        # Load the saved optimizer state bytes (pyro format only).
         if "optim" in to_load:
-            scheduler = torch.load(filebase + "_optim.torch", map_location=map_location, pickle_module=dill)
-            scheduler.load(filebase + "_optim.pyro", **load_kwargs)  # use PyroOptim method
-            logger.debug("Optimizer loaded from " + filebase + "_optim.*")
-            out.update({"optim": scheduler})
+            with open(filebase + "_optim.pyro", "rb") as f:
+                out["optim_state_bytes"] = f.read()
+            logger.debug("Optimizer state loaded from " + filebase + "_optim.pyro")
 
         # Load the pyro param store.
         if "param_store" in to_load:
             load_param_store(filebase + "_params.pyro", force_device)
             logger.debug("Pyro param store loaded from " + filebase + "_params.pyro")
 
-        # Load dataloader states.
+        # Load dataloader states (compact npz format).
         if "dataloader" in to_load:
-            # load_dataloader_state(data_loader=train_loader, file=filebase + '_train.loaderstate')
-            # load_dataloader_state(data_loader=test_loader, file=filebase + '_test.loaderstate')
-            train_loader = None
-            test_loader = None
-            if os.path.exists(filebase + "_train.loaderstate"):
-                train_loader = torch.load(
-                    filebase + "_train.loaderstate", map_location=map_location, pickle_module=dill
-                )
-                logger.debug("Train loader loaded from " + filebase + "_train.loaderstate")
-                out.update({"train_loader": train_loader})
-            if os.path.exists(filebase + "_test.loaderstate"):
-                test_loader = torch.load(filebase + "_test.loaderstate", map_location=map_location, pickle_module=dill)
-                logger.debug("Test loader loaded from " + filebase + "_test.loaderstate")
-                out.update({"test_loader": test_loader})
+            train_npz = filebase + "_train.loaderstate.npz"
+            test_npz = filebase + "_test.loaderstate.npz"
+            if os.path.exists(train_npz):
+                out["train_loader_state"] = dict(np.load(train_npz, allow_pickle=False))
+                logger.debug("Train loader state loaded from " + train_npz)
+            if os.path.exists(test_npz):
+                out["test_loader_state"] = dict(np.load(test_npz, allow_pickle=False))
+                logger.debug("Test loader state loaded from " + test_npz)
 
         # Load args, which can be modified in the case of auto-learning-rate updates.
         if "args" in to_load:

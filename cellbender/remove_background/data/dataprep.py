@@ -14,7 +14,7 @@ import torch
 import torch.utils.data
 
 import logging
-from typing import Tuple, List, Optional, Callable
+from typing import Dict, Tuple, List, Optional, Callable
 
 
 logger = logging.getLogger('cellbender')
@@ -59,7 +59,9 @@ class DataLoader:
                  fraction_empties: float = consts.FRACTION_EMPTIES,
                  shuffle: bool = True,
                  sort_by: Optional[Callable[[sp.csr_matrix], np.ndarray]] = None,
-                 use_cuda: bool = True):
+                 use_cuda: bool = True,
+                 original_cell_indices: Optional[np.ndarray] = None,
+                 original_empty_indices: Optional[np.ndarray] = None):
         """
         Args:
             dataset: Droplet count matrix [cell, gene]
@@ -98,6 +100,8 @@ class DataLoader:
         self.fraction_empties = fraction_empties
         self.cell_batch_size = int(batch_size * (1. - fraction_empties))
         self.shuffle = shuffle
+        self.original_cell_indices = original_cell_indices
+        self.original_empty_indices = original_empty_indices
         self.device = 'cpu'
         self.use_cuda = use_cuda
         if self.use_cuda:
@@ -117,9 +121,24 @@ class DataLoader:
             np.random.shuffle(self.ind_list)  # Shuffle cell inds in place
         self.ptr = 0
 
-    def get_state(self):
+    def get_state(self) -> Dict:
         """Internal state of the data loader, used for checkpointing"""
-        return {'ind_list': self.ind_list, 'ptr': self.ptr}
+        state: Dict = {
+            'ind_list': self.ind_list,
+            'ptr': self.ptr,
+            'batch_size': self.batch_size,
+            'fraction_empties': self.fraction_empties,
+            'shuffle': self.shuffle,
+            'use_cuda': self.use_cuda,
+        }
+        if self.original_cell_indices is not None:
+            state['original_cell_indices'] = self.original_cell_indices
+        if self.original_empty_indices is not None:
+            state['original_empty_indices'] = self.original_empty_indices
+        # Cache the length so _reconstruct_loader can restore it without iterating.
+        if self._length is not None:
+            state['_length'] = np.array(self._length, dtype=np.int64)
+        return state
 
     def set_state(self, ind_list: np.ndarray, ptr: int):
         self.ind_list = ind_list
@@ -257,7 +276,9 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
                               batch_size=batch_size,
                               fraction_empties=fraction_empties,
                               shuffle=shuffle,
-                              use_cuda=use_cuda)
+                              use_cuda=use_cuda,
+                              original_cell_indices=np.array(training_indices),
+                              original_empty_indices=np.array(training_indices_empty))
 
     # Set up test dataloader.
     test_dataset = dataset[test_indices, ...]
@@ -267,7 +288,9 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
                              batch_size=batch_size,
                              fraction_empties=fraction_empties,
                              shuffle=shuffle,
-                             use_cuda=use_cuda)
+                             use_cuda=use_cuda,
+                             original_cell_indices=np.array(test_indices),
+                             original_empty_indices=np.array(test_indices_empty))
 
     return train_loader, test_loader
 

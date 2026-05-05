@@ -21,7 +21,12 @@ from pyro.optim import ClippedAdam
 
 import cellbender
 import cellbender.remove_background.consts as consts
-from cellbender.remove_background.checkpoint import attempt_load_checkpoint, create_workflow_hashcode, save_checkpoint
+from cellbender.remove_background.checkpoint import (
+    attempt_load_checkpoint,
+    create_workflow_hashcode,
+    load_optim_from_bytes,
+    save_checkpoint,
+)
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
@@ -630,6 +635,89 @@ def get_optimizer(
     return scheduler
 
 
+def _build_model(
+    count_matrix: sp.csr_matrix,
+    args: argparse.Namespace,
+    dataset_obj: SingleCellRNACountsDataset,
+) -> RemoveBackgroundPyroModel:
+    """Construct a fresh RemoveBackgroundPyroModel from dataset priors and args.
+    Used by both fresh-start and checkpoint-restart branches of run_inference."""
+    encoder_z = EncodeZ(
+        input_dim=count_matrix.shape[1],
+        hidden_dims=args.z_hidden_dims,
+        output_dim=args.z_dim,
+        use_batch_norm=False,
+        use_layer_norm=False,
+        input_transform="normalize",
+    )
+    encoder_other = EncodeNonZLatents(
+        n_genes=count_matrix.shape[1],
+        z_dim=args.z_dim,
+        log_count_crossover=dataset_obj.priors["log_counts_crossover"],
+        prior_log_cell_counts=np.log1p(dataset_obj.priors["cell_counts"]),
+        empty_log_count_threshold=np.log1p(dataset_obj.empty_UMI_threshold),
+        prior_logit_cell_prob=dataset_obj.priors["cell_logit"],
+        input_transform="log_normalize",
+    )
+    encoder = CompositeEncoder({"z": encoder_z, "other": encoder_other})
+    decoder = Decoder(
+        input_dim=args.z_dim,
+        hidden_dims=args.z_hidden_dims[::-1],
+        use_batch_norm=True,
+        use_layer_norm=False,
+        output_dim=count_matrix.shape[1],
+    )
+    return RemoveBackgroundPyroModel(
+        model_type=args.model,
+        encoder=encoder,
+        decoder=decoder,
+        dataset_obj_priors=dataset_obj.priors,
+        n_analyzed_genes=dataset_obj.analyzed_gene_inds.size,
+        n_droplets=dataset_obj.analyzed_barcode_inds.size,
+        analyzed_gene_names=dataset_obj.data["gene_names"][dataset_obj.analyzed_gene_inds],
+        empty_UMI_threshold=dataset_obj.empty_UMI_threshold,
+        log_counts_crossover=dataset_obj.priors["log_counts_crossover"],
+        use_cuda=args.use_cuda,
+        z_hidden_dims=args.z_hidden_dims,
+    )
+
+
+def _reconstruct_loader(
+    state: Dict,
+    count_matrix: sp.csr_matrix,
+    empty_matrix: sp.csr_matrix,
+    use_cuda: bool,
+) -> DataLoader:
+    """Reconstruct a DataLoader from a compact npz state dict previously saved
+    by :meth:`DataLoader.get_state`.
+
+    The DataLoader is constructed with ``shuffle=False`` so that :meth:`__init__`
+    does not consume a numpy random draw before :meth:`set_state` restores the
+    saved index list and pointer.  The ``shuffle`` attribute is then set to the
+    saved value so subsequent epochs shuffle correctly.
+    """
+    cell_inds = state["original_cell_indices"]
+    empty_inds = state["original_empty_indices"]
+    loader = DataLoader(
+        dataset=count_matrix[cell_inds, :],
+        empty_drop_dataset=empty_matrix[empty_inds, :] if empty_inds.size > 0 else None,
+        batch_size=int(state["batch_size"]),
+        fraction_empties=float(state["fraction_empties"]),
+        shuffle=False,  # avoid numpy draw in __init__; restored after set_state
+        use_cuda=use_cuda,
+        original_cell_indices=cell_inds,
+        original_empty_indices=empty_inds,
+    )
+    loader.shuffle = bool(state["shuffle"])
+    loader.set_state(ind_list=state["ind_list"], ptr=int(state["ptr"]))
+    # Restore the cached length so that the first call to len(loader) inside
+    # get_optimizer() does not re-iterate the loader (which would consume the
+    # saved ind_list and make an extra numpy draw).
+    if "_length" in state:
+        loader._length = int(state["_length"])
+    return loader
+
+
 def run_inference(
     dataset_obj: SingleCellRNACountsDataset,
     args: argparse.Namespace,
@@ -675,73 +763,85 @@ def run_inference(
     )
     ckpt_loaded = ckpt["loaded"]  # True if a checkpoint was loaded successfully
 
+    # Always load the count matrix — needed for both fresh start and ckpt reconstruction.
+    count_matrix = dataset_obj.get_count_matrix()
+    empty_matrix = dataset_obj.get_count_matrix_empties()
+
     if ckpt_loaded:
-        model = cast(RemoveBackgroundPyroModel, ckpt["model"])
-        scheduler = cast(pyro.optim.PyroOptim, ckpt["optim"])
-        train_loader = cast(DataLoader, ckpt["train_loader"])
-        test_loader = cast(DataLoader, ckpt["test_loader"])
-        if hasattr(ckpt["args"], "num_failed_attempts"):
-            # update this from the checkpoint file, if present
+        logger.info("Reconstructing model and dataloaders from checkpoint state...")
+
+        map_loc = torch.device("cuda:0") if args.use_cuda else torch.device("cpu")
+
+        # Phase 2: rebuild model architecture from scratch, then load saved weights.
+        # Save/restore torch RNG around _build_model so that weight-init draws do
+        # not advance torch past the checkpoint-restored state.  Training resumes
+        # from the exact same torch state as when the checkpoint was saved.
+        _torch_state_before_build = torch.get_rng_state()
+        model = _build_model(count_matrix, args, dataset_obj)
+        torch.set_rng_state(_torch_state_before_build)
+        model.load_state_dict(ckpt["model_state_dict"])
+
+        # The Pyro param store was already populated from "_params.pyro" by
+        # attempt_load_checkpoint above.  "_params.pyro" now contains ONLY
+        # scalar (non-module) params (phi_loc, phi_scale, etc.) when the
+        # checkpoint was written by a current version of CellBender.  For
+        # backwards compatibility, also purge any encoder/decoder entries that
+        # may be present in checkpoints written by older versions — their
+        # values are superseded by model.load_state_dict above.
+        _ps = pyro.get_param_store()
+        _model_pyro_prefixes = ("encoder_z$$$", "encoder_other$$$", "decoder$$$")
+        for _k in list(_ps._params.keys()):
+            if _k.startswith(_model_pyro_prefixes):
+                _p = _ps._params.pop(_k)
+                _ps._param_to_name.pop(_p, None)
+                _ps._constraints.pop(_k, None)
+
+        # Pre-register encoder/decoder parameters in the param store NOW,
+        # before any svi.step() call.  In the one-shot training path, these
+        # params are registered on the very first svi.step() (epoch 1, step 1)
+        # and remain registered for all subsequent steps.  Without this block,
+        # the checkpoint-resume path registers them for the first time INSIDE
+        # the first svi.step() of resumed training.  Although the parameter
+        # values are identical in both cases, the timing difference causes a
+        # subtle divergence in the TraceEnum_ELBO computation (the
+        # poutine.trace handler sees param effects behave differently when a
+        # param is being registered for the first time vs. looked up), leading
+        # to non-bit-for-bit reproducibility across checkpoints.
+        # By pre-registering here, the param store state at the start of
+        # resumed training exactly matches the one-shot state, making
+        # checkpoint-resume produce bit-for-bit identical results.
+        for _enc_name, _enc_module in model.encoder.items():
+            pyro.module("encoder_" + _enc_name, _enc_module, update_module_params=False)
+        pyro.module("decoder", model.decoder, update_module_params=False)
+        del _ps
+
+        if "model_meta" in ckpt:
+            model.loss = ckpt["model_meta"]["loss"]
+
+        # Phase 1: reconstruct dataloaders from compact index state.
+        train_loader = _reconstruct_loader(ckpt["train_loader_state"], count_matrix, empty_matrix, args.use_cuda)
+        test_loader = _reconstruct_loader(ckpt["test_loader_state"], count_matrix, empty_matrix, args.use_cuda)
+
+        # Phase 3: rebuild optimizer from args + restore saved state.
+        scheduler = get_optimizer(
+            n_batches=len(train_loader),
+            batch_size=train_loader.batch_size,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            constant_learning_rate=args.constant_learning_rate,
+            total_epochs_for_testing_only=total_epochs_for_testing_only,
+        )
+        load_optim_from_bytes(scheduler, ckpt["optim_state_bytes"], map_location=map_loc)
+
+        if hasattr(ckpt.get("args", argparse.Namespace()), "num_failed_attempts"):
             args.num_failed_attempts = ckpt["args"].num_failed_attempts
-        for obj in [model, scheduler, train_loader, test_loader, args]:
-            assert obj is not None, (
-                f"Expected checkpoint to contain model, scheduler, train_loader, "
-                f"test_loader, and args; but some are None:\n{ckpt}"
-            )
         logger.info("Checkpoint loaded successfully.")
 
     else:
         logger.info("No checkpoint loaded.")
 
-        # Get the trimmed count matrix (transformed if called for).
-        count_matrix = dataset_obj.get_count_matrix()
-
-        # Set up the variational autoencoder:
-
-        # Encoder.
-        encoder_z = EncodeZ(
-            input_dim=count_matrix.shape[1],
-            hidden_dims=args.z_hidden_dims,
-            output_dim=args.z_dim,
-            use_batch_norm=False,
-            use_layer_norm=False,
-            input_transform="normalize",
-        )
-
-        encoder_other = EncodeNonZLatents(
-            n_genes=count_matrix.shape[1],
-            z_dim=args.z_dim,
-            log_count_crossover=dataset_obj.priors["log_counts_crossover"],
-            prior_log_cell_counts=np.log1p(dataset_obj.priors["cell_counts"]),
-            empty_log_count_threshold=np.log1p(dataset_obj.empty_UMI_threshold),
-            prior_logit_cell_prob=dataset_obj.priors["cell_logit"],
-            input_transform="log_normalize",
-        )
-
-        encoder = CompositeEncoder({"z": encoder_z, "other": encoder_other})
-
-        # Decoder.
-        decoder = Decoder(
-            input_dim=args.z_dim,
-            hidden_dims=args.z_hidden_dims[::-1],
-            use_batch_norm=True,
-            use_layer_norm=False,
-            output_dim=count_matrix.shape[1],
-        )
-
-        # Set up the pyro model for variational inference.
-        model = RemoveBackgroundPyroModel(
-            model_type=args.model,
-            encoder=encoder,
-            decoder=decoder,
-            dataset_obj_priors=dataset_obj.priors,
-            n_analyzed_genes=dataset_obj.analyzed_gene_inds.size,
-            n_droplets=dataset_obj.analyzed_barcode_inds.size,
-            analyzed_gene_names=dataset_obj.data["gene_names"][dataset_obj.analyzed_gene_inds],
-            empty_UMI_threshold=dataset_obj.empty_UMI_threshold,
-            log_counts_crossover=dataset_obj.priors["log_counts_crossover"],
-            use_cuda=args.use_cuda,
-        )
+        # Set up the variational autoencoder using the shared helper.
+        model = _build_model(count_matrix, args, dataset_obj)
 
         # Load the dataset into DataLoaders.
         frac = args.training_fraction  # Fraction of barcodes to use for training
@@ -750,7 +850,7 @@ def run_inference(
         # Set up dataloaders.
         train_loader, test_loader = prep_data_for_training(
             dataset=count_matrix,
-            empty_drop_dataset=dataset_obj.get_count_matrix_empties(),
+            empty_drop_dataset=empty_matrix,
             batch_size=batch_size,
             training_fraction=frac,
             fraction_empties=args.fraction_empties,

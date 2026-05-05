@@ -1,7 +1,7 @@
 """Definition of the model and the inference setup, with helper functions."""
 
 from numbers import Number
-from typing import Any, Dict, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
 import numpy as np
 import pyro
@@ -123,6 +123,7 @@ class RemoveBackgroundPyroModel(nn.Module):
         empty_UMI_threshold: int,
         log_counts_crossover: float,
         use_cuda: bool,
+        z_hidden_dims: Optional[List[int]] = None,
         phi_loc_prior: float = consts.PHI_LOC_PRIOR,
         phi_scale_prior: float = consts.PHI_SCALE_PRIOR,
         rho_alpha_prior: float = consts.RHO_ALPHA_PRIOR,
@@ -144,6 +145,7 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.n_droplets = n_droplets
         self.analyzed_gene_names = analyzed_gene_names
         self.z_dim: int = cast(int, decoder.input_dim)
+        self.z_hidden_dims: Optional[List[int]] = z_hidden_dims
         self.encoder = encoder
         self.decoder = decoder
         self.use_exact_log_prob = use_exact_log_prob
@@ -160,12 +162,8 @@ class RemoveBackgroundPyroModel(nn.Module):
         if use_cuda:
             # Calling cuda() here will put all the parameters of
             # the encoder and decoder networks into GPU memory.
+            # CompositeEncoder is an nn.ModuleDict so self.cuda() recurses into it.
             self.cuda()
-            try:
-                for key, value in self.encoder.items():
-                    value.cuda()
-            except KeyError:
-                pass
             self.device = "cuda"
         else:
             self.device = "cpu"

@@ -8,7 +8,7 @@ from cellbender.remove_background import consts
 from cellbender.remove_background.vae.base import FullyConnectedNetwork
 
 
-class CompositeEncoder(dict):
+class CompositeEncoder(nn.ModuleDict):
     """A composite of several encoders to be run together on the same input.
 
     This represents an encoder that is a composite of several
@@ -18,27 +18,24 @@ class CompositeEncoder(dict):
     are the output tensors created by calling .forward(x) on those encoder
     instances.
 
-    Attributes:
-        module_dict: A dictionary of encoder modules.
+    Using nn.ModuleDict ensures all sub-module parameters (including batch-norm
+    running statistics) are properly tracked by PyTorch and included in
+    state_dict() / load_state_dict().
 
     """
 
     def __init__(self, module_dict):
         super(CompositeEncoder, self).__init__(module_dict)
-        self.module_dict = module_dict
-
-    def __call__(self, **kwargs):
-        return self.forward(**kwargs)
 
     def forward(self, **kwargs) -> Dict[str, torch.Tensor]:
 
         out = dict()
         # Encode z first.
-        out["z"] = self.module_dict["z"].forward(**kwargs)
+        out["z"] = self["z"].forward(**kwargs)
 
         # For each other module in the dict of the composite encoder,
         # call forward(), and pass in the encoded z.
-        for key, value in self.module_dict.items():
+        for key, value in self.items():
             if key == "z":
                 continue  # already done
 
@@ -237,6 +234,15 @@ class EncodeNonZLatents(nn.Module):
         # Set up the initial scaling for values of x.
         self.x_scaling = None
         self.batchnorm0 = nn.BatchNorm1d(num_features=self.n_genes)
+
+    def get_extra_state(self):
+        """Return extra state (non-parameter, non-buffer attributes) for state_dict."""
+        return {"offset": self.offset, "x_scaling": self.x_scaling}
+
+    def set_extra_state(self, state):
+        """Restore extra state when loading from state_dict."""
+        self.offset = state.get("offset")
+        self.x_scaling = state.get("x_scaling")
 
     def forward(
         self, x: torch.Tensor, chi_ambient: Optional[torch.Tensor], z: torch.Tensor, **kwargs
