@@ -52,6 +52,8 @@ def train_epoch(svi: SVI, train_loader: DataLoader) -> float:
 
     # Train an epoch by going through each mini-batch.
     for x_cell_batch in train_loader:
+        # Move from prefetch (CPU pinned) to training device.
+        x_cell_batch = x_cell_batch.to(train_loader.device, non_blocking=True)
         # Perform gradient descent step and accumulate loss.
         epoch_loss += svi.step(x_cell_batch)
         normalizer_train += x_cell_batch.size(0)
@@ -91,6 +93,8 @@ def evaluate_epoch(svi: pyro.infer.SVI, test_loader: DataLoader) -> float:
 
     # Compute the loss over the entire tests set.
     for x_cell_batch in test_loader:
+        # Move from prefetch (CPU pinned) to training device.
+        x_cell_batch = x_cell_batch.to(test_loader.device, non_blocking=True)
         # Accumulate loss.
         test_loss += svi.evaluate_loss(x_cell_batch)
         normalizer_test += x_cell_batch.size(0)

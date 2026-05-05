@@ -2,8 +2,14 @@
 a class to implement loading data from a sparse matrix in mini-batches.
 
 Intentionally uses global random state, and does not keep its own random number
-generator, in order to facilitate checkpointing.
+generator, in order to facilitate checkpointing.  The global random state is
+only accessed from a single background prefetch thread during training (the main
+thread does not call numpy.random while svi.step() is running), so there is no
+concurrent access.
 """
+
+import queue
+import threading
 
 import numpy as np
 import scipy.sparse as sp
@@ -19,29 +25,8 @@ from typing import Dict, Tuple, List, Optional, Callable
 
 logger = logging.getLogger('cellbender')
 
-
-class SparseDataset(torch.utils.data.Dataset):
-    """torch.utils.data.Dataset wrapping a scipy.sparse.csr.csr_matrix
-
-    Each sample will be retrieved by indexing matrices along the leftmost
-    dimension.
-
-    Args:
-        *csrs (scipy.sparse.csr.csr_matrix): sparse matrices that have the same
-        size in the leftmost dimension.
-
-    """
-    # see https://pytorch.org/docs/stable/_modules/torch/utils/data/dataset.html
-
-    def __init__(self, *csrs):
-        assert all(csrs[0].shape[0] == csr.shape[0] for csr in csrs)
-        self.csrs = csrs
-
-    def __getitem__(self, index) -> Tuple:
-        return tuple(csr[index, ...] for csr in self.csrs)
-
-    def __len__(self) -> int:
-        return self.csrs[0].shape[0]
+# Sentinel object that signals end-of-epoch through the prefetch queue.
+_STOP = object()
 
 
 class DataLoader:
@@ -102,12 +87,114 @@ class DataLoader:
         self.shuffle = shuffle
         self.original_cell_indices = original_cell_indices
         self.original_empty_indices = original_empty_indices
-        self.device = 'cpu'
+        self._device = 'cpu'
         self.use_cuda = use_cuda
         if self.use_cuda:
-            self.device = 'cuda'
+            self._device = 'cuda'
         self._length = None
-        self._reset()
+
+        # Prefetch state — worker is started lazily on first __next__ call.
+        self._result_queue: queue.Queue = queue.Queue(maxsize=2)
+        self._stop_event = threading.Event()
+        self._worker_thread: Optional[threading.Thread] = None
+
+        # Initial shuffle and pointer reset (no worker started yet).
+        if self.shuffle:
+            np.random.shuffle(self.ind_list)
+        self.ptr = 0
+
+    # ------------------------------------------------------------------
+    # Public device property
+    # ------------------------------------------------------------------
+
+    @property
+    def device(self) -> str:
+        """Target device string ('cpu' or 'cuda').  Callers should move
+        batches to this device with ``batch.to(loader.device, non_blocking=True)``."""
+        return self._device
+
+    # ------------------------------------------------------------------
+    # Background prefetch worker
+    # ------------------------------------------------------------------
+
+    def _start_worker(self) -> None:
+        """Start the background prefetch thread from the current ptr."""
+        self._stop_event.clear()
+        self._result_queue = queue.Queue(maxsize=2)
+        self._worker_thread = threading.Thread(
+            target=self._worker_fn,
+            args=(self.ind_list.copy(), self.ptr),
+            daemon=True,
+            name='cellbender-prefetch',
+        )
+        self._worker_thread.start()
+
+    def _teardown_worker(self) -> None:
+        """Signal the worker to stop and wait for it to finish."""
+        if self._worker_thread is None:
+            return
+        self._stop_event.set()
+        # The worker checks stop_event between put() retries (timeout=0.05 s),
+        # so it will exit within one timeout interval after the event is set.
+        self._worker_thread.join(timeout=2.0)
+        self._worker_thread = None
+
+    def _worker_put(self, item: object) -> None:
+        """Put *item* into the result queue, respecting the stop event."""
+        while not self._stop_event.is_set():
+            try:
+                self._result_queue.put(item, timeout=0.05)
+                return
+            except queue.Full:
+                continue
+
+    def _worker_fn(self, ind_list: np.ndarray, ptr: int) -> None:
+        """Background worker: densify batches and push them into result_queue.
+
+        Uses the global numpy random state for empty-droplet sampling (same as
+        the original synchronous code).  This is safe because the main thread
+        does not call numpy.random while svi.step() is executing.
+        """
+        try:
+            while not self._stop_event.is_set():
+                remaining = ind_list.size - ptr
+                if remaining < consts.SMALLEST_ALLOWED_BATCH:
+                    if remaining > 0:
+                        logger.debug(f'Dropped last minibatch of {remaining} cells')
+                    self._worker_put(_STOP)
+                    return
+
+                next_ptr = min(ind_list.size, ptr + self.cell_batch_size)
+                cell_inds = ind_list[ptr:next_ptr]
+
+                n_empties = int(cell_inds.size *
+                                (self.fraction_empties /
+                                 (1 - self.fraction_empties)))
+                if self.empty_ind_list.size > 0:
+                    empty_inds = np.random.choice(self.empty_ind_list,
+                                                  size=n_empties,
+                                                  replace=True)
+                    if empty_inds.size > 0:
+                        csr_list = [self.dataset[cell_inds, :],
+                                    self.empty_drop_dataset[empty_inds, :]]
+                    else:
+                        csr_list = [self.dataset[cell_inds, :]]
+                else:
+                    csr_list = [self.dataset[cell_inds, :]]
+
+                dense = sparse_collate(csr_list)
+                if self.use_cuda:
+                    dense = dense.pin_memory()
+
+                ptr = next_ptr
+                self._worker_put((dense, ptr))
+
+        except Exception as exc:
+            self._worker_put(exc)
+
+    # ------------------------------------------------------------------
+    # Unsort helper
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def unsort_inds(self, bcs):
@@ -116,9 +203,20 @@ class DataLoader:
         else:
             return torch.tensor([self._unsort_dict[bc.item()] for bc in bcs], device='cpu')
 
-    def _reset(self):
+    # ------------------------------------------------------------------
+    # Reset / state management
+    # ------------------------------------------------------------------
+
+    def _reset(self) -> None:
+        """Called at end-of-epoch: teardown worker, shuffle, reset ptr.
+
+        The worker for the next epoch is NOT started here — it starts lazily on
+        the first ``__next__()`` call.  This keeps the global numpy RNG state
+        quiescent at epoch boundaries so checkpoint saves capture a clean state.
+        """
+        self._teardown_worker()
         if self.shuffle:
-            np.random.shuffle(self.ind_list)  # Shuffle cell inds in place
+            np.random.shuffle(self.ind_list)
         self.ptr = 0
 
     def get_state(self) -> Dict:
@@ -140,15 +238,23 @@ class DataLoader:
             state['_length'] = np.array(self._length, dtype=np.int64)
         return state
 
-    def set_state(self, ind_list: np.ndarray, ptr: int):
+    def set_state(self, ind_list: np.ndarray, ptr: int) -> None:
+        """Restore DataLoader position from a checkpoint; worker starts lazily."""
+        self._teardown_worker()
         self.ind_list = ind_list
         self.ptr = ptr
         assert self.ptr <= len(self.ind_list), \
             f'Problem setting dataloader state: pointer ({ptr}) is outside the ' \
             f'length of the ind_list ({len(ind_list)})'
 
-    def reset_ptr(self):
+    def reset_ptr(self) -> None:
+        """Reset the iteration pointer to zero; worker restarts lazily."""
+        self._teardown_worker()
         self.ptr = 0
+
+    # ------------------------------------------------------------------
+    # Length
+    # ------------------------------------------------------------------
 
     @property
     def length(self):
@@ -166,50 +272,48 @@ class DataLoader:
     def __len__(self):
         return self.length
 
+    # ------------------------------------------------------------------
+    # Iteration
+    # ------------------------------------------------------------------
+
     def __iter__(self):
         return self
 
     def __next__(self):
-        # Skip last batch if the size is < smallest allowed batch
-        remaining_cells = self.ind_list.size - self.ptr
-        if remaining_cells < consts.SMALLEST_ALLOWED_BATCH:
-            if remaining_cells > 0:
-                logger.debug(f'Dropped last minibatch of {remaining_cells} cells')
+        # Lazily start the worker on the first call after construction,
+        # set_state(), or reset_ptr() (avoids unnecessary RNG use at init time).
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._start_worker()
+
+        item = self._result_queue.get()
+
+        if item is _STOP:
+            # End of epoch: prepare for the next one and signal the for-loop.
             self._reset()
             raise StopIteration()
 
-        else:
+        if isinstance(item, BaseException):
+            raise item
 
-            # Move the pointer by the number of cells in this minibatch.
-            next_ptr = min(self.ind_list.size, self.ptr + self.cell_batch_size)
+        dense, ptr = item
+        self.ptr = ptr
+        # Return a CPU tensor (pinned when use_cuda=True).
+        # Callers should move to device with: batch.to(loader.device, non_blocking=True)
+        return dense
 
-            # Decide on cell (+ transition region) indices.
-            cell_inds = self.ind_list[self.ptr:next_ptr]
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
-            # Decide on empty droplet indices. (Number changes at end of epoch.)
-            n_empties = int(cell_inds.size *
-                            (self.fraction_empties /
-                             (1 - self.fraction_empties)))
-            if self.empty_ind_list.size > 0:
-                # This does not happen for 'simple' model.
-                empty_inds = np.random.choice(self.empty_ind_list,
-                                              size=n_empties,
-                                              replace=True)
+    def close(self) -> None:
+        """Stop the prefetch worker.  Call when the loader will no longer be used."""
+        self._teardown_worker()
 
-                if empty_inds.size > 0:
-                    csr_list = [self.dataset[cell_inds, :],
-                                self.empty_drop_dataset[empty_inds, :]]
-                else:
-                    csr_list = [self.dataset[cell_inds, :]]
-            else:
-                csr_list = [self.dataset[cell_inds, :]]
-
-            # Get a dense tensor from the sparse matrix.
-            dense_tensor = sparse_collate(csr_list)
-
-            # Increment the pointer and return the minibatch.
-            self.ptr = next_ptr
-            return dense_tensor.to(device=self.device)
+    def __del__(self) -> None:
+        try:
+            self._teardown_worker()
+        except Exception:
+            pass
 
 
 def prep_sparse_data_for_training(dataset: sp.csr_matrix,
@@ -221,13 +325,12 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
                                   use_cuda: bool = True) -> Tuple[
                                       "DataLoader",
                                       "DataLoader"]:
-    """Create torch.utils.data.DataLoaders for train and tests set.
+    """Create DataLoaders for train and test sets.
 
-    The dataset is not loaded into memory as a dense matrix upfront.  Instead
-    of using a torch.utils.data.TensorDataset, a SparseDataset is used, which
-    only transforms a sparse matrix to a dense one when a minibatch is loaded.
-    This is slower, but necessary for datasets which are too large to be
-    loaded into memory as a dense matrix all at once.
+    The dataset is kept in memory as a sparse matrix and densified batch-by-batch
+    in a background prefetch thread.  Each DataLoader returns CPU tensors (pinned
+    when use_cuda=True); callers should move batches to the target device with
+    ``batch.to(loader.device, non_blocking=True)``.
 
     Args:
         dataset: Matrix of gene counts, where rows are cell barcodes and

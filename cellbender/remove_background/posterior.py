@@ -538,6 +538,7 @@ class Posterior:
         path.parent.mkdir(parents=True, exist_ok=True)
         with pq.ParquetWriter(str(path), schema=POSTERIOR_SCHEMA) as writer:
             for i, data in enumerate(cell_data_loader):
+                data = data.to(cell_data_loader.device, non_blocking=True)
                 if i == 0:
                     t = time.time()
                 elif i == 1:
@@ -909,6 +910,7 @@ class Posterior:
 
         start = 0
         for i, data in enumerate(data_loader):
+            data = data.to(data_loader.device, non_blocking=True)
             end = start + data.shape[0]
 
             enc = self.vi_model.encoder(x=data, chi_ambient=chi_ambient, cell_prior_log=self.vi_model.d_cell_loc_prior)

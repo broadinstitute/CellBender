@@ -889,7 +889,8 @@ def run_inference(
     # Run training.
     if args.epochs == 0:
         logger.info("Zero epochs specified... will only initialize the model.")
-        model.guide(train_loader.__next__())
+        _init_batch = train_loader.__next__().to(train_loader.device, non_blocking=True)
+        model.guide(_init_batch)
         train_loader.reset_ptr()
 
         # Even though it's not much of a checkpoint, we still need one for subsequent steps.
