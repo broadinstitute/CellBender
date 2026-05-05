@@ -1,4 +1,4 @@
 pytest
 scikit-learn
-ruff
-mypy
+ruff==0.15.12
+mypy==1.20.2

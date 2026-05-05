@@ -5,7 +5,7 @@ on:
     branches: [ main ]
 
 env:
-  MINIWDL_VERSION: 1.8.0
+  MINIWDL_VERSION: 1.14.2
   
 jobs:
   miniwdl-check:
@@ -14,9 +14,9 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.12'
       - name: 'Install miniwdl and Run Validation Test'
         run: |
           pip install miniwdl==$MINIWDL_VERSION;
-          ./cellbender/remove_background/tests/miniwdl_check_wdl.sh;
+          ./cellbender/tests/miniwdl_check_wdl.sh;
         shell: bash
