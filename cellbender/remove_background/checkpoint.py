@@ -14,7 +14,7 @@ import shutil
 import tarfile
 import tempfile
 import traceback
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from cellbender.remove_background.model import RemoveBackgroundPyroModel
@@ -525,9 +525,7 @@ def load_from_checkpoint(
 
         # Load the saved model state_dict + metadata JSON.
         if "model" in to_load:
-            state_dict = torch.load(
-                filebase + "_model.state_dict.torch", map_location=map_location, weights_only=True
-            )
+            state_dict = torch.load(filebase + "_model.state_dict.torch", map_location=map_location, weights_only=True)
             out["model_state_dict"] = state_dict
             meta_path = filebase + "_model.meta.json"
             if os.path.exists(meta_path):
@@ -592,7 +590,7 @@ def attempt_load_checkpoint(
     tarball_name: str = consts.CHECKPOINT_FILE_NAME,
     force_device: Optional[str] = None,
     force_use_checkpoint: bool = False,
-) -> Dict[str, Union["RemoveBackgroundPyroModel", pyro.optim.PyroOptim, DataLoader, bool]]:
+) -> Dict[str, Any]:
     """Load checkpoint and prepare a RemoveBackgroundPyroModel and optimizer,
     or return the inputs if loading fails."""
 

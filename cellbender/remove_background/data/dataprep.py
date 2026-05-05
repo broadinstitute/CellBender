@@ -91,7 +91,7 @@ class DataLoader:
         self.use_cuda = use_cuda
         if self.use_cuda:
             self._device = 'cuda'
-        self._length = None
+        self._length: Optional[int] = None
 
         # Prefetch state — worker is started lazily on first __next__ call.
         self._result_queue: queue.Queue = queue.Queue(maxsize=2)
@@ -170,7 +170,7 @@ class DataLoader:
                 n_empties = int(cell_inds.size *
                                 (self.fraction_empties /
                                  (1 - self.fraction_empties)))
-                if self.empty_ind_list.size > 0:
+                if self.empty_ind_list.size > 0 and self.empty_drop_dataset is not None:
                     empty_inds = np.random.choice(self.empty_ind_list,
                                                   size=n_empties,
                                                   replace=True)

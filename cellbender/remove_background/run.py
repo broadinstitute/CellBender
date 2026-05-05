@@ -642,6 +642,7 @@ def _build_model(
 ) -> RemoveBackgroundPyroModel:
     """Construct a fresh RemoveBackgroundPyroModel from dataset priors and args.
     Used by both fresh-start and checkpoint-restart branches of run_inference."""
+    assert dataset_obj.data is not None
     encoder_z = EncodeZ(
         input_dim=count_matrix.shape[1],
         hidden_dims=args.z_hidden_dims,

@@ -2,7 +2,6 @@ import argparse
 import os
 import random
 import shutil
-import tempfile
 from typing import List
 
 import numpy as np
@@ -303,7 +302,7 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
     # ---- PATH_DIRECT: continue without checkpoint ----
     # Capture RNG state right here so both paths start from the same point.
     rng_direct = RandomState()
-    direct_loss = train_pyro(n_epochs=epochs2, data_loader=train_loader, svi=svi)
+    train_pyro(n_epochs=epochs2, data_loader=train_loader, svi=svi)
     direct_weights = _get_params(initial_model.encoder)
 
     # ---- PATH_CKPT: load from checkpoint and continue ----
@@ -366,13 +365,11 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
 
     # Continue training from checkpoint.
     svi_ckpt = pyro.infer.SVI(model_ckpt.model, model_ckpt.guide, scheduler_ckpt, loss=pyro.infer.Trace_ELBO())
-    ckpt_loss = train_pyro(n_epochs=epochs2, data_loader=train_loader_ckpt, svi=svi_ckpt)
+    train_pyro(n_epochs=epochs2, data_loader=train_loader_ckpt, svi=svi_ckpt)
     ckpt_weights = _get_params(model_ckpt.encoder)
 
     # Training should change the weights in both paths.
-    assert (w1[0] != direct_weights[0]).sum().item() > 0, (
-        "Training is not changing the weight matrix (PATH_DIRECT)"
-    )
+    assert (w1[0] != direct_weights[0]).sum().item() > 0, "Training is not changing the weight matrix (PATH_DIRECT)"
     assert (w1[0] != ckpt_weights[0]).sum().item() > 0, (
         "Training is not changing the checkpointed weight matrix (PATH_CKPT)"
     )
