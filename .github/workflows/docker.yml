@@ -41,18 +41,20 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure Docker for GCR
+      - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker us.gcr.io
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            --build-arg GIT_SHA=${{ github.sha }} \
-            -t us.gcr.io/broad-dsde-methods/cellbender:${{ steps.version.outputs.value }} \
-            -t us.gcr.io/broad-dsde-methods/cellbender:latest \
-            .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Push Docker image
-        run: |
-          docker push us.gcr.io/broad-dsde-methods/cellbender:${{ steps.version.outputs.value }}
-          docker push us.gcr.io/broad-dsde-methods/cellbender:latest
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Docker/Dockerfile
+          push: true
+          platforms: linux/amd64
+          build-args: VERSION=${{ steps.version.outputs.value }}
+          tags: |
+            us.gcr.io/broad-dsde-methods/cellbender:${{ steps.version.outputs.value }}
+            us.gcr.io/broad-dsde-methods/cellbender:latest
