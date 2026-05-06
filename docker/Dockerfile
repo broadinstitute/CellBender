@@ -18,3 +18,5 @@ RUN apt-get update && apt-get upgrade -y \
  && rm -rf /var/lib/apt/lists/* \
  && pip install git+https://github.com/broadinstitute/CellBender@${VERSION} \
  && rm -rf ~/.cache/pip
+
+ENTRYPOINT ["/bin/bash"]
