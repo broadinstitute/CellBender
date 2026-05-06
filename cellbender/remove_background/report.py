@@ -1140,15 +1140,15 @@ def show_gene_expression_before_and_after(adata, input_layer_key: str = "raw", n
 
 def plot_gene_expression_pca(adata, key="cellbender_embedding", input_layer_key="raw", extended=True):
 
-    cells = adata.obs["cell_probability"] > 0.5
+    cells = (adata.obs["cell_probability"] > 0.5).values
     adata.obsm["X_pca"] = pca_2d(adata.obsm[key]).detach().numpy()
 
     # plot z PCA colored by latent size
-    sizeorder = np.argsort(adata.obs["cell_size"][cells])
+    sizeorder = np.argsort(adata.obs["cell_size"].iloc[cells])
     s = plt.scatter(
         x=adata.obsm["X_pca"][:, 0][cells][sizeorder],
         y=adata.obsm["X_pca"][:, 1][cells][sizeorder],
-        c=np.log10(adata.obs["cell_size"][cells][sizeorder]),
+        c=np.log10(adata.obs["cell_size"].iloc[cells][sizeorder]),
         s=2,
         cmap="brg",
         alpha=0.5,
