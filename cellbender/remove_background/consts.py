@@ -40,14 +40,14 @@ FRACTION_EMPTIES = 0.2
 
 # Prior on rho, the swapping fraction: the two concentration parameters alpha and beta.
 RHO_ALPHA_PRIOR = 1.5
-RHO_BETA_PRIOR = 50.
+RHO_BETA_PRIOR = 50.0
 
 # Constraints on rho posterior latents.
 RHO_PARAM_MIN = 0.001
-RHO_PARAM_MAX = 1000.
+RHO_PARAM_MAX = 1000.0
 
 # Prior on epsilon, the RT efficiency concentration parameter [Gamma(alpha, alpha)].
-EPSILON_PRIOR = 50.
+EPSILON_PRIOR = 50.0
 
 # Prior used for the global overdispersion parameter.
 PHI_LOC_PRIOR = 0.2
@@ -62,7 +62,7 @@ GMM_EPOCHS = 500
 D_CELL_SCALE_INIT = 0.02
 
 # Scale used to regularize values of logit cell probability (mean zero).
-P_LOGIT_SCALE = 2.
+P_LOGIT_SCALE = 2.0
 
 # False to use an approximate log_prob computation which is much faster.
 USE_EXACT_LOG_PROB = False
@@ -101,7 +101,7 @@ MINIMUM_BARCODES_H5AD = 1e5
 PROB_POSTERIOR_BATCH_SIZE = 128
 
 # Name of checkpoint file.
-CHECKPOINT_FILE_NAME = 'ckpt.tar.gz'
+CHECKPOINT_FILE_NAME = "ckpt.tar.gz"
 
 # Whether to create an extended report (for development purposes).
 EXTENDED_REPORT = False

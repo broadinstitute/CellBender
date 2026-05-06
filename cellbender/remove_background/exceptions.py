@@ -10,7 +10,7 @@ class NanException(ArithmeticError):
 
     def __init__(self, param: str):
         self.param = param
-        self.message = 'A wild NaN appeared!  In param {' + self.param + '}'
+        self.message = "A wild NaN appeared!  In param {" + self.param + "}"
 
 
 class ElboException(ValueError):

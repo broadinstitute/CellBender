@@ -1,42 +1,51 @@
 """Posterior generation and regularization."""
 
+import argparse
+import logging
+import os
+import shutil
+import tempfile
+import time
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Union, cast
+
+if TYPE_CHECKING:
+    from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
+    from cellbender.remove_background.model import RemoveBackgroundPyroModel
+
+import numpy as np
 import pyro
 import pyro.distributions as dist
-import torch
-import numpy as np
 import scipy.sparse as sp
-import pandas as pd
+import torch
 
 import cellbender.remove_background.consts as consts
-from cellbender.remove_background.model import calculate_mu, calculate_lambda
 from cellbender.monitor import get_hardware_usage
+from cellbender.remove_background.checkpoint import load_checkpoint, load_from_checkpoint, make_tarball, unpack_tarball
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataset import get_dataset_obj
-from cellbender.remove_background.estimation import EstimationMethod, \
-    MultipleChoiceKnapsack, Mean, MAP, apply_function_dense_chunks
-from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, \
-    log_prob_sparse_to_dense, csr_set_rows_to_zero
-from cellbender.remove_background.checkpoint import load_from_checkpoint, \
-    unpack_tarball, make_tarball, load_checkpoint
-from cellbender.remove_background.data.io import \
-    write_posterior_coo_to_h5, load_posterior_from_h5
+from cellbender.remove_background.data.io import load_posterior_from_h5, write_posterior_coo_to_h5
+from cellbender.remove_background.estimation import (
+    MAP,
+    EstimationMethod,
+    Mean,
+    apply_function_dense_chunks,
+)
+from cellbender.remove_background.model import calculate_lambda, calculate_mu
+from cellbender.remove_background.sparse_utils import (
+    csr_set_rows_to_zero,
+    dense_to_sparse_op_torch,
+    log_prob_sparse_to_dense,
+)
 
-from typing import Tuple, List, Dict, Optional, Union, Callable
-from abc import ABC, abstractmethod
-import logging
-import argparse
-import tempfile
-import shutil
-import time
-import os
+logger = logging.getLogger("cellbender")
 
 
-logger = logging.getLogger('cellbender')
-
-
-def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset',
-                                       inferred_model: 'RemoveBackgroundPyroModel',
-                                       args: argparse.Namespace) -> 'Posterior':
+def load_or_compute_posterior_and_save(
+    dataset_obj: "SingleCellRNACountsDataset",
+    inferred_model: Optional["RemoveBackgroundPyroModel"],
+    args: argparse.Namespace,
+) -> "Posterior":
     """After inference, compute the full posterior noise count log probability
     distribution. Save it and make it part of the checkpoint file.
 
@@ -56,43 +65,48 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
 
     """
 
-    assert os.path.exists(args.input_checkpoint_tarball), \
-        f'Checkpoint file {args.input_checkpoint_tarball} does not exist, ' \
-        f'presumably because saving of the checkpoint file has been manually ' \
-        f'interrupted. load_or_compute_posterior_and_save() will not work ' \
-        f'properly without an existing checkpoint file. Please re-run and ' \
-        f'allow a checkpoint file to be saved.'
+    assert os.path.exists(args.input_checkpoint_tarball), (
+        f"Checkpoint file {args.input_checkpoint_tarball} does not exist, "
+        f"presumably because saving of the checkpoint file has been manually "
+        f"interrupted. load_or_compute_posterior_and_save() will not work "
+        f"properly without an existing checkpoint file. Please re-run and "
+        f"allow a checkpoint file to be saved."
+    )
 
     def _do_posterior_regularization(posterior: Posterior):
 
         # Optional posterior regularization.
         if args.posterior_regularization is not None:
-            if args.posterior_regularization == 'PRq':
+            if args.posterior_regularization == "PRq":
                 posterior.regularize_posterior(
                     regularization=PRq,
                     alpha=args.prq_alpha,
-                    device='cuda',
+                    device="cuda",
                 )
-            elif args.posterior_regularization == 'PRmu':
+            elif args.posterior_regularization == "PRmu":
+                assert dataset_obj.data is not None
                 posterior.regularize_posterior(
                     regularization=PRmu,
-                    raw_count_matrix=dataset_obj.data['matrix'],
+                    raw_count_matrix=dataset_obj.data["matrix"],
                     fpr=args.fpr[0],
                     per_gene=False,
-                    device='cuda',
+                    device="cuda",
                 )
-            elif args.posterior_regularization == 'PRmu_gene':
+            elif args.posterior_regularization == "PRmu_gene":
+                assert dataset_obj.data is not None
                 posterior.regularize_posterior(
                     regularization=PRmu,
-                    raw_count_matrix=dataset_obj.data['matrix'],
+                    raw_count_matrix=dataset_obj.data["matrix"],
                     fpr=args.fpr[0],
                     per_gene=True,
-                    device='cuda',
+                    device="cuda",
                 )
             else:
-                raise ValueError(f'Got a posterior regularization input of '
-                                 f'"{args.posterior_regularization}", which is not '
-                                 f'allowed. Use ["PRq", "PRmu", "PRmu_gene"]')
+                raise ValueError(
+                    f"Got a posterior regularization input of "
+                    f'"{args.posterior_regularization}", which is not '
+                    f'allowed. Use ["PRq", "PRmu", "PRmu_gene"]'
+                )
 
         else:
             # Delete a pre-existing posterior regularization in case an old one was saved.
@@ -105,46 +119,50 @@ def load_or_compute_posterior_and_save(dataset_obj: 'SingleCellRNACountsDataset'
         debug=args.debug,
     )
     try:
-        ckpt_posterior = load_from_checkpoint(tarball_name=args.input_checkpoint_tarball,
-                                              filebase=args.checkpoint_filename,
-                                              to_load=['posterior'],
-                                              force_use_checkpoint=args.force_use_checkpoint)
+        ckpt_posterior = load_from_checkpoint(
+            tarball_name=args.input_checkpoint_tarball,
+            filebase=args.checkpoint_filename,
+            to_load=["posterior"],
+            force_use_checkpoint=args.force_use_checkpoint,
+        )
     except ValueError:
         # input checkpoint tarball was not a match for this workflow
         # but we still may have saved a new tarball
-        ckpt_posterior = load_from_checkpoint(tarball_name=consts.CHECKPOINT_FILE_NAME,
-                                              filebase=args.checkpoint_filename,
-                                              to_load=['posterior'],
-                                              force_use_checkpoint=args.force_use_checkpoint)
-    if os.path.exists(ckpt_posterior.get('posterior_file', 'does_not_exist')):
+        ckpt_posterior = load_from_checkpoint(
+            tarball_name=consts.CHECKPOINT_FILE_NAME,
+            filebase=args.checkpoint_filename,
+            to_load=["posterior"],
+            force_use_checkpoint=args.force_use_checkpoint,
+        )
+    if os.path.exists(ckpt_posterior.get("posterior_file", "does_not_exist")):
         # Load posterior if it was saved in the checkpoint.
-        posterior.load(file=ckpt_posterior['posterior_file'])
+        posterior.load(file=ckpt_posterior["posterior_file"])
         _do_posterior_regularization(posterior)
     else:
-
         # Compute posterior.
-        logger.info('Posterior not currently included in checkpoint.')
+        logger.info("Posterior not currently included in checkpoint.")
         posterior.cell_noise_count_posterior_coo()
         _do_posterior_regularization(posterior)
 
         # Save posterior and add it to checkpoint tarball.
-        posterior_file = args.output_file[:-3] + '_posterior.h5'
+        posterior_file = args.output_file[:-3] + "_posterior.h5"
         saved = posterior.save(file=posterior_file)
         success = False
         if saved:
             with tempfile.TemporaryDirectory() as tmp_dir:
-                unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball,
-                                          directory=tmp_dir)
+                unpacked = unpack_tarball(tarball_name=args.input_checkpoint_tarball, directory=tmp_dir)
                 if unpacked:
-                    shutil.copy(posterior_file, os.path.join(tmp_dir, 'posterior.h5'))
-                    all_ckpt_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
-                                      if os.path.isfile(os.path.join(tmp_dir, f))]
-                    success = make_tarball(files=all_ckpt_files,
-                                           tarball_name=args.input_checkpoint_tarball)
+                    shutil.copy(posterior_file, os.path.join(tmp_dir, "posterior.h5"))
+                    all_ckpt_files = [
+                        os.path.join(tmp_dir, f)
+                        for f in os.listdir(tmp_dir)
+                        if os.path.isfile(os.path.join(tmp_dir, f))
+                    ]
+                    success = make_tarball(files=all_ckpt_files, tarball_name=args.input_checkpoint_tarball)
         if success:
-            logger.info('Added posterior object to checkpoint file.')
+            logger.info("Added posterior object to checkpoint file.")
         else:
-            logger.warning('Failed to add posterior object to checkpoint file.')
+            logger.warning("Failed to add posterior object to checkpoint file.")
 
     return posterior
 
@@ -175,43 +193,47 @@ class Posterior:
 
     """
 
-    def __init__(self,
-                 dataset_obj: Optional['SingleCellRNACountsDataset'],  # Dataset
-                 vi_model: Optional['RemoveBackgroundPyroModel'],
-                 posterior_batch_size: int = 128,
-                 counts_dtype: np.dtype = np.uint32,
-                 float_threshold: Optional[float] = 0.5,
-                 debug: bool = False):
+    def __init__(
+        self,
+        dataset_obj: Optional["SingleCellRNACountsDataset"],  # Dataset
+        vi_model: Optional["RemoveBackgroundPyroModel"],
+        posterior_batch_size: int = 128,
+        counts_dtype: np.dtype = np.dtype(np.uint32),
+        float_threshold: Optional[float] = 0.5,
+        debug: bool = False,
+    ):
         self.dataset_obj = dataset_obj
         self.vi_model = vi_model
         if vi_model is not None:
-            self.vi_model.eval()
-            self.vi_model.encoder['z'].eval()
-            self.vi_model.encoder['other'].eval()
-            self.vi_model.decoder.eval()
-        self.use_cuda = (torch.cuda.is_available() if vi_model is None
-                         else vi_model.use_cuda)
-        self.device = 'cuda' if self.use_cuda else 'cpu'
-        self.analyzed_gene_inds = (None if (dataset_obj is None)
-                                   else dataset_obj.analyzed_gene_inds)
-        self.count_matrix_shape = (None if (dataset_obj is None)
-                                   else dataset_obj.data['matrix'].shape)
-        self.barcode_inds = (None if (dataset_obj is None)
-                             else np.arange(0, self.count_matrix_shape[0]))
+            vi_model.eval()
+            import cellbender.remove_background.vae.encoder as encoder_module
+
+            encoder = cast(encoder_module.CompositeEncoder, vi_model.encoder)
+            encoder["z"].eval()
+            encoder["other"].eval()
+            vi_model.decoder.eval()
+        self.use_cuda = torch.cuda.is_available() if vi_model is None else vi_model.use_cuda
+        self.device = "cuda" if self.use_cuda else "cpu"
+        self.analyzed_gene_inds = None if (dataset_obj is None) else dataset_obj.analyzed_gene_inds
+        if dataset_obj is not None and dataset_obj.data is not None:
+            self.count_matrix_shape: tuple | None = dataset_obj.data["matrix"].shape
+        else:
+            self.count_matrix_shape = None
+        self.barcode_inds = None if (self.count_matrix_shape is None) else np.arange(0, self.count_matrix_shape[0])
         self.dtype = counts_dtype
         self.debug = debug
         self.float_threshold = float_threshold
         self.posterior_batch_size = posterior_batch_size
-        self._noise_count_posterior_coo = None
-        self._noise_count_posterior_kwargs = None
-        self._noise_count_posterior_coo_offsets = None
-        self._noise_count_regularized_posterior_coo = None
-        self._noise_count_regularized_posterior_kwargs = None
-        self._latents = None
-        if dataset_obj is not None:
+        self._noise_count_posterior_coo: sp.coo_matrix | None = None
+        self._noise_count_posterior_kwargs: dict | None = None
+        self._noise_count_posterior_coo_offsets: Dict[int, int] | None = None
+        self._noise_count_regularized_posterior_coo: sp.coo_matrix | None = None
+        self._noise_count_regularized_posterior_kwargs: dict | None = None
+        self._latents: Dict[str, np.ndarray] | None = None
+        if dataset_obj is not None and dataset_obj.data is not None:
             self.index_converter = IndexConverter(
-                total_n_cells=dataset_obj.data['matrix'].shape[0],
-                total_n_genes=dataset_obj.data['matrix'].shape[1],
+                total_n_cells=dataset_obj.data["matrix"].shape[0],
+                total_n_genes=dataset_obj.data["matrix"].shape[1],
             )
 
     def save(self, file: str) -> bool:
@@ -220,42 +242,44 @@ class Posterior:
         if self._noise_count_posterior_coo is None:
             self.cell_noise_count_posterior_coo()
 
+        assert self._noise_count_posterior_coo is not None
         n, g = self.index_converter.get_ng_indices(self._noise_count_posterior_coo.row)
 
-        d = {'posterior_coo': self._noise_count_posterior_coo,
-             'noise_count_offsets': self._noise_count_posterior_coo_offsets,
-             'posterior_kwargs': self._noise_count_posterior_kwargs,
-             'regularized_posterior_coo': self._noise_count_regularized_posterior_coo,
-             'regularized_posterior_kwargs': self._noise_count_regularized_posterior_kwargs,
-             'latents': self.latents_map,
-             'feature_inds': g,
-             'barcode_inds': n}
-
         try:
-            logger.info(f'Writing full posterior to {file}')
-            return write_posterior_coo_to_h5(output_file=file, **d)
+            logger.info(f"Writing full posterior to {file}")
+            return write_posterior_coo_to_h5(
+                output_file=file,
+                posterior_coo=self._noise_count_posterior_coo,
+                noise_count_offsets=self._noise_count_posterior_coo_offsets,
+                latents=self.latents_map,
+                feature_inds=g,
+                barcode_inds=n,
+                regularized_posterior_coo=self._noise_count_regularized_posterior_coo,
+                posterior_kwargs=self._noise_count_posterior_kwargs,
+                regularized_posterior_kwargs=self._noise_count_regularized_posterior_kwargs,
+            )
         except MemoryError:
-            logger.warning('Attempting to save the posterior as an h5 file '
-                           'resulted in an out-of-memory error. Please report '
-                           'this as a github issue.')
+            logger.warning(
+                "Attempting to save the posterior as an h5 file "
+                "resulted in an out-of-memory error. Please report "
+                "this as a github issue."
+            )
             return False
 
     def load(self, file: str) -> bool:
         """Load a saved posterior in compressed array .npz format."""
 
         d = load_posterior_from_h5(filename=file)
-        self._noise_count_posterior_coo = d['coo']
-        self._noise_count_posterior_coo_offsets = d['noise_count_offsets']
-        self._noise_count_posterior_kwargs = d['kwargs']
-        self._noise_count_regularized_posterior_coo = d['regularized_coo']
-        self._noise_count_regularized_posterior_kwargs = d['kwargs_regularized']
-        self._latents = d['latents']
-        logger.info(f'Loaded pre-computed posterior from {file}')
+        self._noise_count_posterior_coo = d["coo"]
+        self._noise_count_posterior_coo_offsets = d["noise_count_offsets"]
+        self._noise_count_posterior_kwargs = d["kwargs"]
+        self._noise_count_regularized_posterior_coo = d["regularized_coo"]
+        self._noise_count_regularized_posterior_kwargs = d["kwargs_regularized"]
+        self._latents = d["latents"]
+        logger.info(f"Loaded pre-computed posterior from {file}")
         return True
 
-    def compute_denoised_counts(self,
-                                estimator_constructor: EstimationMethod,
-                                **kwargs) -> sp.csc_matrix:
+    def compute_denoised_counts(self, estimator_constructor: "type[EstimationMethod]", **kwargs) -> sp.csc_matrix:
         """Probably the most important method: computation of the clean output count matrix.
 
         Args:
@@ -274,14 +298,16 @@ class Posterior:
         if self._noise_count_regularized_posterior_coo is not None:
             # Priority is taken by a regularized posterior, since presumably
             # the user computed it for a reason.
-            logger.debug('Using regularized posterior to compute denoised counts')
+            logger.debug("Using regularized posterior to compute denoised counts")
             logger.debug(self._noise_count_regularized_posterior_kwargs)
             posterior_coo = self._noise_count_regularized_posterior_coo
         else:
             # Use exact posterior if a regularized version is not computed.
-            posterior_coo = (self._noise_count_posterior_coo
-                             if (self._noise_count_posterior_coo is not None)
-                             else self.cell_noise_count_posterior_coo())
+            posterior_coo = (
+                self._noise_count_posterior_coo
+                if (self._noise_count_posterior_coo is not None)
+                else self.cell_noise_count_posterior_coo()
+            )
 
         # Instantiate Estimator object.
         estimator = estimator_constructor(index_converter=self.index_converter)
@@ -294,18 +320,16 @@ class Posterior:
         )
 
         # Subtract cell noise from observed cell counts.
-        count_matrix = self.dataset_obj.data['matrix']  # all barcodes
-        cell_inds = self.dataset_obj.analyzed_barcode_inds[self.latents_map['p']
-                                                           > consts.CELL_PROB_CUTOFF]
+        assert self.dataset_obj is not None and self.dataset_obj.data is not None
+        count_matrix = self.dataset_obj.data["matrix"]  # all barcodes
+        cell_inds = self.dataset_obj.analyzed_barcode_inds[self.latents_map["p"] > consts.CELL_PROB_CUTOFF]
         empty_inds = set(range(count_matrix.shape[0])) - set(cell_inds)
         cell_counts = csr_set_rows_to_zero(csr=count_matrix, row_inds=empty_inds)
         denoised_counts = cell_counts - noise_csr
 
         return denoised_counts.tocsc()
 
-    def regularize_posterior(self,
-                             regularization: 'PosteriorRegularization',
-                             **kwargs) -> sp.coo_matrix:
+    def regularize_posterior(self, regularization: "type[PosteriorRegularization]", **kwargs) -> sp.coo_matrix:
         """Do posterior regularization. This modifies self._noise_count_regularized_posterior_coo
         in place, and returns it.
 
@@ -324,8 +348,9 @@ class Posterior:
         currently_cached = False if self._noise_count_regularized_posterior_kwargs is None else True
         if currently_cached:
             # Check if it's the right thing.
+            assert self._noise_count_regularized_posterior_kwargs is not None
             for k, v in self._noise_count_regularized_posterior_kwargs.items():
-                if k == 'method':
+                if k == "method":
                     if v != regularization.name():
                         currently_cached = False
                         break
@@ -337,7 +362,7 @@ class Posterior:
                     break
         if currently_cached:
             # What's been requested is what's cached.
-            logger.debug('Regularized posterior is already cached')
+            logger.debug("Regularized posterior is already cached")
             return self._noise_count_regularized_posterior_coo
 
         # Compute the regularized posterior.
@@ -347,10 +372,10 @@ class Posterior:
             index_converter=self.index_converter,
             **kwargs,
         )
-        kwargs.update({'method': regularization.name()})
-        kwargs.pop('raw_count_matrix', None)  # do not store a copy here
+        kwargs.update({"method": regularization.name()})
+        kwargs.pop("raw_count_matrix", None)  # do not store a copy here
         self._noise_count_regularized_posterior_kwargs = kwargs
-        logger.debug('Updated posterior after performing regularization')
+        logger.debug("Updated posterior after performing regularization")
         return self._noise_count_regularized_posterior_coo
 
     def clear_regularized_posterior(self):
@@ -382,9 +407,8 @@ class Posterior:
                 smallest_log_probability.
         """
 
-        if ((self._noise_count_posterior_coo is None)
-                or (kwargs != self._noise_count_posterior_kwargs)):
-            logger.debug('Running _get_cell_noise_count_posterior_coo() to compute posterior')
+        if (self._noise_count_posterior_coo is None) or (kwargs != self._noise_count_posterior_kwargs):
+            logger.debug("Running _get_cell_noise_count_posterior_coo() to compute posterior")
             self._get_cell_noise_count_posterior_coo(**kwargs)
             self._noise_count_posterior_kwargs = kwargs
 
@@ -394,15 +418,13 @@ class Posterior:
     def latents_map(self) -> Dict[str, np.ndarray]:
         if self._latents is None:
             self._get_latents_map()
+        assert self._latents is not None
         return self._latents
 
     @torch.no_grad()
     def _get_cell_noise_count_posterior_coo(
-            self,
-            n_samples: int = 20,
-            y_map: bool = True,
-            n_counts_max: int = 20,
-            smallest_log_probability: float = -10.) -> sp.coo_matrix:  # TODO: default -7 ?
+        self, n_samples: int = 20, y_map: bool = True, n_counts_max: int = 20, smallest_log_probability: float = -10.0
+    ) -> sp.coo_matrix:  # TODO: default -7 ?
         """Compute the full-blown posterior on noise counts for all cells,
         and store log probability in COO sparse format on CPU.
 
@@ -429,36 +451,39 @@ class Posterior:
 
         """
 
-        logger.debug('Computing full posterior noise counts')
+        logger.debug("Computing full posterior noise counts")
 
+        assert self.dataset_obj is not None
         # Compute posterior in mini-batches.
         torch.cuda.empty_cache()
 
         # Dataloader for cells only.
         analyzed_bcs_only = True
         count_matrix = self.dataset_obj.get_count_matrix()  # analyzed barcodes
-        cell_logic = (self.latents_map['p'] > consts.CELL_PROB_CUTOFF)
+        cell_logic = self.latents_map["p"] > consts.CELL_PROB_CUTOFF
 
         # Raise an error if there are no cells found.
         if cell_logic.sum() == 0:
-            logger.error(f'ERROR: Found zero droplets with posterior cell '
-                         f'probability > {consts.CELL_PROB_CUTOFF}. Please '
-                         f'check the log for estimated priors on expected cells, '
-                         f'total droplets included, UMI counts per cell, and '
-                         f'UMI counts in empty droplets, and see whether these '
-                         f'values make sense. Consider using additional input '
-                         f'arguments like --expected-cells, '
-                         f'--total-droplets-included, --force-cell-umi-prior, '
-                         f'and --force-empty-umi-prior, to make these values '
-                         f'accurate for your dataset.')
-            raise RuntimeError('Zero cells found!')
+            logger.error(
+                f"ERROR: Found zero droplets with posterior cell "
+                f"probability > {consts.CELL_PROB_CUTOFF}. Please "
+                f"check the log for estimated priors on expected cells, "
+                f"total droplets included, UMI counts per cell, and "
+                f"UMI counts in empty droplets, and see whether these "
+                f"values make sense. Consider using additional input "
+                f"arguments like --expected-cells, "
+                f"--total-droplets-included, --force-cell-umi-prior, "
+                f"and --force-empty-umi-prior, to make these values "
+                f"accurate for your dataset."
+            )
+            raise RuntimeError("Zero cells found!")
 
         dataloader_index_to_analyzed_bc_index = torch.where(torch.tensor(cell_logic))[0]
         cell_data_loader = DataLoader(
             count_matrix[cell_logic],
             empty_drop_dataset=None,
             batch_size=self.posterior_batch_size,
-            fraction_empties=0.,
+            fraction_empties=0.0,
             shuffle=False,
             use_cuda=self.use_cuda,
         )
@@ -470,26 +495,27 @@ class Posterior:
         log_probs = []
         ind = 0
         n_minibatches = len(cell_data_loader)
+        assert self.analyzed_gene_inds is not None
         analyzed_gene_inds = torch.tensor(self.analyzed_gene_inds.copy())
         if analyzed_bcs_only:
             barcode_inds = torch.tensor(self.dataset_obj.analyzed_barcode_inds.copy())
         else:
+            assert self.barcode_inds is not None
             barcode_inds = torch.tensor(self.barcode_inds.copy())
-        nonzero_noise_offset_dict = {}
+        nonzero_noise_offset_dict: Dict[int, int] = {}
 
-        logger.info('Computing posterior noise count probabilities in mini-batches.')
+        logger.info("Computing posterior noise count probabilities in mini-batches.")
 
         for i, data in enumerate(cell_data_loader):
-
             if i == 0:
                 t = time.time()
             elif i == 1:
-                logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
-            logger.info(f'Working on chunk ({i + 1}/{n_minibatches})')
+                logger.info(f"    [{(time.time() - t) / 60:.2f} mins per chunk]")
+            logger.info(f"Working on chunk ({i + 1}/{n_minibatches})")
 
             if self.debug:
-                logger.debug(f'Posterior minibatch starting with droplet {ind}')
-                logger.debug('\n' + get_hardware_usage(use_cuda=self.use_cuda))
+                logger.debug(f"Posterior minibatch starting with droplet {ind}")
+                logger.debug("\n" + get_hardware_usage(use_cuda=self.use_cuda))
 
             # Compute noise count probabilities.
             noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
@@ -503,8 +529,8 @@ class Posterior:
             # First we want data = 0 to be all zeros
             # We also want anything below the threshold to be a zero
             tensor_for_nonzeros = noise_log_pdf_NGC.clone().exp()  # probability
-            tensor_for_nonzeros.data[data == 0, :] = 0.  # remove data = 0
-            tensor_for_nonzeros.data[noise_log_pdf_NGC < smallest_log_probability] = 0.
+            tensor_for_nonzeros.data[data == 0, :] = 0.0  # remove data = 0
+            tensor_for_nonzeros.data[noise_log_pdf_NGC < smallest_log_probability] = 0.0
 
             # Convert to sparse format using "m" indices.
             bcs_i_chunk, genes_i_analyzed, c_i, log_prob_i = dense_to_sparse_op_torch(
@@ -537,8 +563,12 @@ class Posterior:
             m_i = self.index_converter.get_m_indices(cell_inds=bcs_i, gene_inds=genes_i)
 
             nonzero_noise_offset_dict.update(
-                dict(zip(m_i[nonzero_offset_inds.detach().cpu()].tolist(),
-                         nonzero_noise_count_offsets.detach().cpu().tolist()))
+                dict(
+                    zip(
+                        m_i[nonzero_offset_inds.detach().cpu()].tolist(),
+                        nonzero_noise_count_offsets.detach().cpu().tolist(),
+                    )
+                )
             )
             c_offset.append(noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu())
 
@@ -546,24 +576,25 @@ class Posterior:
             ind += data.shape[0]  # Same as data_loader.batch_size
 
         # Concatenate lists.
-        log_probs = torch.cat(log_probs)
-        c = torch.cat(c)
+        log_probs_cat: torch.Tensor = torch.cat(log_probs)
+        c_cat: torch.Tensor = torch.cat(c)
         barcodes = torch.cat(bcs)
-        genes = torch.cat(genes)
+        genes_cat: torch.Tensor = torch.cat(genes)
 
         # Translate (barcode, gene) inds to 'm' format index.
-        m = self.index_converter.get_m_indices(cell_inds=barcodes, gene_inds=genes)
+        m = self.index_converter.get_m_indices(cell_inds=barcodes, gene_inds=genes_cat)
 
         # Put the counts into a sparse csr_matrix.
+        assert self.count_matrix_shape is not None
         self._noise_count_posterior_coo = sp.coo_matrix(
-            (log_probs, (m, c)),
+            (log_probs_cat, (m, c_cat)),
             shape=[np.prod(self.count_matrix_shape, dtype=np.uint64), n_counts_max],
         )
         self._noise_count_posterior_coo_offsets = nonzero_noise_offset_dict
         return self._noise_count_posterior_coo
 
     @torch.no_grad()
-    def sample(self, data, lambda_multiplier=1., y_map: bool = False) -> torch.Tensor:
+    def sample(self, data, lambda_multiplier=1.0, y_map: bool = False) -> torch.Tensor:
         """Draw a single posterior sample for the count matrix conditioned on data
 
         Args:
@@ -602,11 +633,9 @@ class Posterior:
         return denoised_output_count_matrix
 
     @torch.no_grad()
-    def map_denoised_counts_from_sampled_latents(self,
-                                                 data,
-                                                 n_samples: int,
-                                                 lambda_multiplier: float = 1.,
-                                                 y_map: bool = False) -> torch.Tensor:
+    def map_denoised_counts_from_sampled_latents(
+        self, data, n_samples: int, lambda_multiplier: float = 1.0, y_map: bool = False
+    ) -> torch.Tensor:
         """Draw posterior samples for all stochastic latent variables in the model
          and use those values to compute a MAP estimate of the denoised count
          matrix conditioned on data.
@@ -633,17 +662,14 @@ class Posterior:
         )
 
         noise_counts = torch.argmax(noise_log_pdf, dim=-1) + offset_noise_counts
-        denoised_output_count_matrix = torch.clamp(data - noise_counts, min=0.)
+        denoised_output_count_matrix = torch.clamp(data - noise_counts, min=0.0)
 
         return denoised_output_count_matrix
 
     @torch.no_grad()
-    def noise_log_pdf(self,
-                      data,
-                      n_samples: int = 1,
-                      lambda_multiplier=1.,
-                      y_map: bool = True,
-                      n_counts_max: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
+    def noise_log_pdf(
+        self, data, n_samples: int = 1, lambda_multiplier=1.0, y_map: bool = True, n_counts_max: int = 50
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the posterior noise-count probability density function
         using n_samples samples. This is a big matrix [n, g, c] where the last
         dimension c is of variable size depending on the computation in
@@ -673,7 +699,6 @@ class Posterior:
         noise_count_offset_NG = None
 
         for s in range(1, n_samples + 1):
-
             # Sample all the latent variables in the model and get mu, lambda, alpha.
             mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
 
@@ -688,9 +713,9 @@ class Posterior:
             )
 
             # Normalize the PDFs (not necessarily normalized over the count range).
-            log_prob_noise_counts_NGC = (log_prob_noise_counts_NGC
-                                         - torch.logsumexp(log_prob_noise_counts_NGC,
-                                                           dim=-1, keepdim=True))
+            log_prob_noise_counts_NGC = log_prob_noise_counts_NGC - torch.logsumexp(
+                log_prob_noise_counts_NGC, dim=-1, keepdim=True
+            )
 
             # Add the probability from this sample to our running total.
             # Update rule is
@@ -699,17 +724,20 @@ class Posterior:
                 noise_log_pdf_NGC = log_prob_noise_counts_NGC
             else:
                 # This is a (normalized) running sum over samples in log-probability space.
+                assert noise_log_pdf_NGC is not None
                 noise_log_pdf_NGC = torch.logaddexp(
-                    noise_log_pdf_NGC + torch.log(torch.tensor(1. - 1. / s).to(device=data.device)),
-                    log_prob_noise_counts_NGC + torch.log(torch.tensor(1. / s).to(device=data.device)),
+                    noise_log_pdf_NGC + torch.log(torch.tensor(1.0 - 1.0 / s).to(device=data.device)),
+                    log_prob_noise_counts_NGC + torch.log(torch.tensor(1.0 / s).to(device=data.device)),
                 )
 
+        assert noise_log_pdf_NGC is not None
+        assert noise_count_offset_NG is not None
         return noise_log_pdf_NGC, noise_count_offset_NG
 
     @torch.no_grad()
-    def sample_mu_lambda_alpha(self,
-                               data: torch.Tensor,
-                               y_map: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample_mu_lambda_alpha(
+        self, data: torch.Tensor, y_map: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Calculate a single sample estimate of mu, the mean of the true count
         matrix, and lambda, the rate parameter of the Poisson background counts.
 
@@ -730,17 +758,16 @@ class Posterior:
 
         """
 
-        logger.debug('Replaying model with guide to sample mu, alpha, lambda')
+        logger.debug("Replaying model with guide to sample mu, alpha, lambda")
 
+        assert self.vi_model is not None
         # Use pyro poutine to trace the guide and sample parameter values.
         guide_trace = pyro.poutine.trace(self.vi_model.guide).get_trace(x=data)
 
         # If using MAP for y (so that you never get samples of cell and no cell),
         # then intervene and replace a sampled y with the MAP
         if y_map:
-            guide_trace.nodes['y']['value'] = (
-                    guide_trace.nodes['p_passback']['value'] > 0
-            ).clone().detach()
+            guide_trace.nodes["y"]["value"] = (guide_trace.nodes["p_passback"]["value"] > 0).clone().detach()
 
         replayed_model = pyro.poutine.replay(self.vi_model.model, guide_trace)
 
@@ -748,20 +775,22 @@ class Posterior:
         replayed_model_output = replayed_model(x=data)
 
         # The model returns mu, alpha, and lambda.
-        mu_sample = replayed_model_output['mu']
-        lambda_sample = replayed_model_output['lam']
-        alpha_sample = replayed_model_output['alpha']
+        mu_sample = replayed_model_output["mu"]
+        lambda_sample = replayed_model_output["lam"]
+        alpha_sample = replayed_model_output["alpha"]
 
         return mu_sample, lambda_sample, alpha_sample
 
     @staticmethod
     @torch.no_grad()
-    def _log_prob_noise_count_tensor(data: torch.Tensor,
-                                     mu_est: torch.Tensor,
-                                     lambda_est: torch.Tensor,
-                                     alpha_est: Optional[torch.Tensor],
-                                     n_counts_max: int = 100,
-                                     debug: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _log_prob_noise_count_tensor(
+        data: torch.Tensor,
+        mu_est: torch.Tensor,
+        lambda_est: torch.Tensor,
+        alpha_est: Optional[torch.Tensor],
+        n_counts_max: int = 100,
+        debug: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the log prob of noise counts [n, g, c] given mu, lambda, alpha, and the data.
 
         NOTE: this is un-normalized log probability
@@ -787,14 +816,13 @@ class Posterior:
         n = min(n_counts_max, data.max().item())  # No need to exceed the max value
         poisson_values_low = (lambda_est.detach() - n / 2).int()
 
-        poisson_values_low = torch.clamp(torch.min(poisson_values_low,
-                                                   (data - n + 1).int()), min=0).float()
+        poisson_values_low = torch.clamp(torch.min(poisson_values_low, (data - n + 1).int()), min=0).float()
 
         # Construct a big tensor of possible noise counts per cell per gene,
         # shape (batch_cells, n_genes, max_noise_counts)
-        noise_count_tensor = torch.arange(start=0, end=n) \
-            .expand([data.shape[0], data.shape[1], -1]) \
-            .float().to(device=data.device)
+        noise_count_tensor = (
+            torch.arange(start=0, end=n).expand([data.shape[0], data.shape[1], -1]).float().to(device=data.device)
+        )
         noise_count_tensor = noise_count_tensor + poisson_values_low.unsqueeze(-1)
 
         # Compute probabilities of each number of noise counts.
@@ -802,35 +830,31 @@ class Posterior:
         # This results in NaNs.
         if alpha_est is None:
             # Poisson only model
-            log_prob_tensor = (dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False)
-                               .log_prob(noise_count_tensor)
-                               + dist.Poisson(mu_est.unsqueeze(-1), validate_args=False)
-                               .log_prob(data.unsqueeze(-1) - noise_count_tensor))
-            logger.debug('Using all poisson model (since alpha is not supplied to posterior)')
+            log_prob_tensor = dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False).log_prob(
+                noise_count_tensor
+            ) + dist.Poisson(mu_est.unsqueeze(-1), validate_args=False).log_prob(
+                data.unsqueeze(-1) - noise_count_tensor
+            )
+            logger.debug("Using all poisson model (since alpha is not supplied to posterior)")
         else:
             logits = (mu_est.log() - alpha_est.log()).unsqueeze(-1)
-            log_prob_tensor = (dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False)
-                               .log_prob(noise_count_tensor)
-                               + dist.NegativeBinomial(total_count=alpha_est.unsqueeze(-1),
-                                                       logits=logits,
-                                                       validate_args=False)
-                               .log_prob(data.unsqueeze(-1) - noise_count_tensor))
+            log_prob_tensor = dist.Poisson(lambda_est.unsqueeze(-1), validate_args=False).log_prob(
+                noise_count_tensor
+            ) + dist.NegativeBinomial(total_count=alpha_est.unsqueeze(-1), logits=logits, validate_args=False).log_prob(
+                data.unsqueeze(-1) - noise_count_tensor
+            )
 
         # Set log_prob to -inf if noise > data.
         neg_inf_tensor = torch.ones_like(log_prob_tensor) * -np.inf
-        log_prob_tensor = torch.where((noise_count_tensor <= data.unsqueeze(-1)),
-                                      log_prob_tensor,
-                                      neg_inf_tensor)
+        log_prob_tensor = torch.where((noise_count_tensor <= data.unsqueeze(-1)), log_prob_tensor, neg_inf_tensor)
 
-        logger.debug(f'Prob computation with tensor of shape {log_prob_tensor.shape}')
+        logger.debug(f"Prob computation with tensor of shape {log_prob_tensor.shape}")
 
         if debug:
-            assert not torch.isnan(log_prob_tensor).any(), \
-                'log_prob_tensor contains a NaN'
+            assert not torch.isnan(log_prob_tensor).any(), "log_prob_tensor contains a NaN"
             if torch.isinf(log_prob_tensor).all(dim=-1).any():
                 print(torch.where(torch.isinf(log_prob_tensor).all(dim=-1)))
-                raise AssertionError('There is at least one log_prob_tensor[n, g, :] '
-                                     'that has all-zero probability')
+                raise AssertionError("There is at least one log_prob_tensor[n, g, :] that has all-zero probability")
 
         return log_prob_tensor, poisson_values_low
 
@@ -838,63 +862,62 @@ class Posterior:
     def _get_latents_map(self):
         """Calculate the encoded latent variables."""
 
-        logger.debug('Computing latent variables')
+        logger.debug("Computing latent variables")
 
         if self.vi_model is None:
-            self._latents = {'z': None, 'd': None, 'p': None, 'phi_loc_scale': None, 'epsilon': None}
+            self._latents = {"z": None, "d": None, "p": None, "phi_loc_scale": None, "epsilon": None}
             return None
 
-        data_loader = self.dataset_obj.get_dataloader(use_cuda=self.use_cuda,
-                                                      analyzed_bcs_only=True,
-                                                      batch_size=500,
-                                                      shuffle=False)
+        data_loader = self.dataset_obj.get_dataloader(
+            use_cuda=self.use_cuda, analyzed_bcs_only=True, batch_size=500, shuffle=False
+        )
 
         n_analyzed = data_loader.dataset.shape[0]
 
-        z = np.zeros((n_analyzed, self.vi_model.encoder['z'].output_dim))
+        z = np.zeros((n_analyzed, self.vi_model.encoder["z"].output_dim))
         d = np.zeros(n_analyzed)
         p = np.zeros(n_analyzed)
         epsilon = np.zeros(n_analyzed)
 
-        phi_loc = pyro.param('phi_loc')
-        phi_scale = pyro.param('phi_scale')
-        if 'chi_ambient' in pyro.get_param_store().keys():
-            chi_ambient = pyro.param('chi_ambient').detach()
+        phi_loc = pyro.param("phi_loc")
+        phi_scale = pyro.param("phi_scale")
+        if "chi_ambient" in pyro.get_param_store().keys():
+            chi_ambient = pyro.param("chi_ambient").detach()
         else:
             chi_ambient = None
 
         start = 0
         for i, data in enumerate(data_loader):
-
             end = start + data.shape[0]
 
-            enc = self.vi_model.encoder(x=data,
-                                        chi_ambient=chi_ambient,
-                                        cell_prior_log=self.vi_model.d_cell_loc_prior)
-            z[start:end, :] = enc['z']['loc'].detach().cpu().numpy()
+            enc = self.vi_model.encoder(x=data, chi_ambient=chi_ambient, cell_prior_log=self.vi_model.d_cell_loc_prior)
+            z[start:end, :] = enc["z"]["loc"].detach().cpu().numpy()
 
-            d[start:end] = \
-                dist.LogNormal(loc=enc['d_loc'],
-                               scale=pyro.param('d_cell_scale')).mean.detach().cpu().numpy()
+            d[start:end] = (
+                dist.LogNormal(loc=enc["d_loc"], scale=pyro.param("d_cell_scale")).mean.detach().cpu().numpy()
+            )
 
-            p[start:end] = enc['p_y'].sigmoid().detach().cpu().numpy()
+            p[start:end] = enc["p_y"].sigmoid().detach().cpu().numpy()
 
-            epsilon[start:end] = \
-                dist.Gamma(enc['epsilon'] * self.vi_model.epsilon_prior,
-                           self.vi_model.epsilon_prior).mean.detach().cpu().numpy()
+            epsilon[start:end] = (
+                dist.Gamma(enc["epsilon"] * self.vi_model.epsilon_prior, self.vi_model.epsilon_prior)
+                .mean.detach()
+                .cpu()
+                .numpy()
+            )
 
             start = end
 
-        self._latents = {'z': z,
-                         'd': d,
-                         'p': p,
-                         'phi_loc_scale': [phi_loc.item(), phi_scale.item()],
-                         'epsilon': epsilon}
+        self._latents = {
+            "z": z,
+            "d": d,
+            "p": p,
+            "phi_loc_scale": [phi_loc.item(), phi_scale.item()],
+            "epsilon": epsilon,
+        }
 
     @torch.no_grad()
-    def _get_mu_alpha_lambda_map(self,
-                                 data: torch.Tensor,
-                                 chi_ambient: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _get_mu_alpha_lambda_map(self, data: torch.Tensor, chi_ambient: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Calculate MAP estimates of mu, the mean of the true count matrix, and
         lambda, the rate parameter of the Poisson background counts.
 
@@ -910,37 +933,33 @@ class Posterior:
 
         """
 
-        logger.debug('Computing MAP esitmate of mu, lambda, alpha')
+        logger.debug("Computing MAP esitmate of mu, lambda, alpha")
 
+        assert self.vi_model is not None
         # Encode latents.
-        enc = self.vi_model.encoder(x=data,
-                                    chi_ambient=chi_ambient,
-                                    cell_prior_log=self.vi_model.d_cell_loc_prior)
-        z_map = enc['z']['loc']
+        enc = self.vi_model.encoder(x=data, chi_ambient=chi_ambient, cell_prior_log=self.vi_model.d_cell_loc_prior)
+        z_map = enc["z"]["loc"]
 
         chi_map = self.vi_model.decoder(z_map)
-        phi_loc = pyro.param('phi_loc')
-        phi_scale = pyro.param('phi_scale')
+        phi_loc = pyro.param("phi_loc")
+        phi_scale = pyro.param("phi_scale")
         phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
         phi_rate = phi_loc / phi_scale.pow(2)
-        alpha_map = 1. / dist.Gamma(phi_conc, phi_rate).mean
+        alpha_map = 1.0 / dist.Gamma(phi_conc, phi_rate).mean
 
-        y = (enc['p_y'] > 0).float()
-        d_empty = dist.LogNormal(loc=pyro.param('d_empty_loc'),
-                                 scale=pyro.param('d_empty_scale')).mean
-        d_cell = dist.LogNormal(loc=enc['d_loc'],
-                                scale=pyro.param('d_cell_scale')).mean
-        epsilon = dist.Gamma(enc['epsilon'] * self.vi_model.epsilon_prior,
-                             self.vi_model.epsilon_prior).mean
+        y = (enc["p_y"] > 0).float()
+        d_empty = dist.LogNormal(loc=pyro.param("d_empty_loc"), scale=pyro.param("d_empty_scale")).mean
+        d_cell = dist.LogNormal(loc=enc["d_loc"], scale=pyro.param("d_cell_scale")).mean
+        epsilon = dist.Gamma(enc["epsilon"] * self.vi_model.epsilon_prior, self.vi_model.epsilon_prior).mean
 
         if self.vi_model.include_rho:
-            rho = pyro.param("rho_alpha") / (pyro.param("rho_alpha")
-                                             + pyro.param("rho_beta"))
+            rho = pyro.param("rho_alpha") / (pyro.param("rho_alpha") + pyro.param("rho_beta"))
         else:
             rho = None
 
         # Calculate MAP estimates of mu and lambda.
         mu_map = calculate_mu(
+            model_type=self.vi_model.model_type,
             epsilon=epsilon,
             d_cell=d_cell,
             chi=chi_map,
@@ -948,6 +967,7 @@ class Posterior:
             rho=rho,
         )
         lambda_map = calculate_lambda(
+            model_type=self.vi_model.model_type,
             epsilon=epsilon,
             chi_ambient=chi_ambient,
             d_empty=d_empty,
@@ -957,11 +977,10 @@ class Posterior:
             chi_bar=self.vi_model.avg_gene_expression,
         )
 
-        return {'mu': mu_map, 'lam': lambda_map, 'alpha': alpha_map}
+        return {"mu": mu_map, "lam": lambda_map, "alpha": alpha_map}
 
 
 class PosteriorRegularization(ABC):
-
     def __init__(self):
         super(PosteriorRegularization, self).__init__()
 
@@ -973,9 +992,9 @@ class PosteriorRegularization(ABC):
 
     @staticmethod
     @abstractmethod
-    def regularize(noise_count_posterior_coo: sp.coo_matrix,
-                   noise_offsets: Dict[int, int],
-                   **kwargs) -> sp.coo_matrix:
+    def regularize(
+        noise_count_posterior_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], **kwargs
+    ) -> sp.coo_matrix:
         """Perform posterior regularization"""
         pass
 
@@ -989,7 +1008,7 @@ class PRq(PosteriorRegularization):
 
     @staticmethod
     def name():
-        return 'PRq'
+        return "PRq"
 
     @staticmethod
     def _log_mean_plus_alpha_std(log_prob: torch.Tensor, alpha: float):
@@ -1000,8 +1019,7 @@ class PRq(PosteriorRegularization):
         return (mean + alpha * std).log()
 
     @staticmethod
-    def _compute_log_target_dict(noise_count_posterior_coo: sp.coo_matrix,
-                                 alpha: float) -> Dict[int, float]:
+    def _compute_log_target_dict(noise_count_posterior_coo: sp.coo_matrix, alpha: float) -> Dict[int, float]:
         """Given the noise count posterior, return log(mean + alpha * std)
         for each 'm' index
 
@@ -1018,17 +1036,18 @@ class PRq(PosteriorRegularization):
                 log(mean + alpha * std)
 
         """
-        result = apply_function_dense_chunks(noise_log_prob_coo=noise_count_posterior_coo,
-                                             fun=PRq._log_mean_plus_alpha_std,
-                                             alpha=alpha)
-        return dict(zip(result['m'], result['result']))
+        result = apply_function_dense_chunks(
+            noise_log_prob_coo=noise_count_posterior_coo, fun=PRq._log_mean_plus_alpha_std, alpha=alpha
+        )
+        return dict(zip(result["m"], result["result"]))
 
     @staticmethod
     def _get_alpha_log_constraint_violation_given_beta(
-            beta_B: torch.Tensor,
-            log_pdf_noise_counts_BC: torch.Tensor,
-            noise_count_BC: torch.Tensor,
-            log_mu_plus_alpha_sigma_B: torch.Tensor) -> torch.Tensor:
+        beta_B: torch.Tensor,
+        log_pdf_noise_counts_BC: torch.Tensor,
+        noise_count_BC: torch.Tensor,
+        log_mu_plus_alpha_sigma_B: torch.Tensor,
+    ) -> torch.Tensor:
         r"""Returns log constraint violation for the regularized posterior of p(x), which
         here is p(\omega) = p(x) e^{\beta x}, and we want
         E[\omega] = E[x] + \alpha * Std[x] = log_mu_plus_alpha_sigma_B.exp()
@@ -1060,30 +1079,35 @@ class PRq(PosteriorRegularization):
 
     @staticmethod
     def _chunked_compute_regularized_posterior(
-            noise_count_posterior_coo: sp.coo_matrix,
-            noise_offsets: Dict[int, int],
-            log_constraint_violation_fcn: Callable[[torch.Tensor, torch.Tensor,
-                                                    torch.Tensor, torch.Tensor], torch.Tensor],
-            log_target_M: torch.Tensor,
-            target_tolerance: float = 0.001,
-            device: str = 'cpu',
-            n_chunks: Optional[int] = None,
+        noise_count_posterior_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        log_constraint_violation_fcn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+        log_target_M: torch.Tensor,
+        target_tolerance: float = 0.001,
+        device: str = "cpu",
+        n_chunks: Optional[int] = None,
     ) -> sp.coo_matrix:
         """Go through posterior in chunks and compute regularized posterior,
         using the defined targets"""
 
         # Compute using dense chunks, chunked on m-index.
         if n_chunks is None:
-            dense_size_gb = (len(np.unique(noise_count_posterior_coo.row))
-                             * (noise_count_posterior_coo.shape[1]
-                                + np.array(list(noise_offsets.values())).max())) * 4 / 1e9  # GB
+            dense_size_gb = (
+                (
+                    len(np.unique(noise_count_posterior_coo.row))
+                    * (noise_count_posterior_coo.shape[1] + np.array(list((noise_offsets or {}).values())).max())
+                )
+                * 4
+                / 1e9
+            )  # GB
             n_chunks = max(1, int(dense_size_gb // 1))  # approx 1 GB each
 
         # Make the sparse matrix compact in the sense that it should use contiguous row values.
         unique_rows, densifiable_coo_rows = np.unique(noise_count_posterior_coo.row, return_inverse=True)
-        densifiable_csr = sp.csr_matrix((noise_count_posterior_coo.data,
-                                         (densifiable_coo_rows, noise_count_posterior_coo.col)),
-                                        shape=[len(unique_rows), noise_count_posterior_coo.shape[1]])
+        densifiable_csr = sp.csr_matrix(
+            (noise_count_posterior_coo.data, (densifiable_coo_rows, noise_count_posterior_coo.col)),
+            shape=[len(unique_rows), noise_count_posterior_coo.shape[1]],
+        )
         chunk_size = int(np.ceil(densifiable_csr.shape[0] / n_chunks))
 
         m = []
@@ -1093,40 +1117,40 @@ class PRq(PosteriorRegularization):
         for i in range(n_chunks):
             # B index here represents a batch: the re-defined m-index
             log_pdf_noise_counts_BC = torch.tensor(
-                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size):((i + 1) * chunk_size)])
+                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)])
             ).to(device)
-            noise_count_BC = (torch.arange(log_pdf_noise_counts_BC.shape[1])
-                              .to(log_pdf_noise_counts_BC.device)
-                              .unsqueeze(0)
-                              .expand(log_pdf_noise_counts_BC.shape))
-            m_indices_for_chunk = unique_rows[(i * chunk_size):((i + 1) * chunk_size)]
-            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets.get(m, 0)
-                                                             for m in m_indices_for_chunk],
-                                                            dtype=torch.float)
-                                               .unsqueeze(-1)
-                                               .to(device))
+            noise_count_BC = (
+                torch.arange(log_pdf_noise_counts_BC.shape[1])
+                .to(log_pdf_noise_counts_BC.device)
+                .unsqueeze(0)
+                .expand(log_pdf_noise_counts_BC.shape)
+            )
+            m_indices_for_chunk = unique_rows[(i * chunk_size) : ((i + 1) * chunk_size)]
+            noise_count_BC = noise_count_BC + (
+                torch.tensor([(noise_offsets or {}).get(m, 0) for m in m_indices_for_chunk], dtype=torch.float)
+                .unsqueeze(-1)
+                .to(device)
+            )
 
             # Parallel binary search for beta for each entry of count matrix
             beta_B = torch_binary_search(
-                evaluate_outcome_given_value=lambda x:
-                log_constraint_violation_fcn(
-                    beta_B=x,
-                    log_pdf_noise_counts_BC=log_pdf_noise_counts_BC,
-                    noise_count_BC=noise_count_BC,
-                    log_mu_plus_alpha_sigma_B=log_target_M[(i * chunk_size):((i + 1) * chunk_size)],
+                evaluate_outcome_given_value=lambda x: log_constraint_violation_fcn(
+                    x,
+                    log_pdf_noise_counts_BC,
+                    noise_count_BC,
+                    log_target_M[(i * chunk_size) : ((i + 1) * chunk_size)],
                 ),
                 target_outcome=torch.zeros(noise_count_BC.shape[0]).to(device),
-                init_range=(torch.tensor([-100., 100.])
-                            .to(device)
-                            .unsqueeze(0)
-                            .expand((noise_count_BC.shape[0],) + (2,))),
+                init_range=(
+                    torch.tensor([-100.0, 100.0]).to(device).unsqueeze(0).expand((noise_count_BC.shape[0],) + (2,))
+                ),
                 target_tolerance=target_tolerance,
                 max_iterations=100,
             )
 
             # Generate regularized posteriors.
             log_pdf_reg_BC = log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC
-            log_pdf_reg_BC = log_pdf_reg_BC - torch.logsumexp(log_pdf_reg_BC, -1, keepdims=True)
+            log_pdf_reg_BC = log_pdf_reg_BC - torch.logsumexp(log_pdf_reg_BC, -1, keepdim=True)
 
             # Store sparse COO values in lists.
             tensor_for_nonzeros = log_pdf_reg_BC.clone().exp()  # probability
@@ -1134,32 +1158,33 @@ class PRq(PosteriorRegularization):
                 log_pdf_reg_BC,
                 tensor_for_nonzeros=tensor_for_nonzeros,
             )
-            m_i = np.array([m_indices_for_chunk[j] for j in m_i])  # chunk m to actual m
+            m_i_arr = np.array([m_indices_for_chunk[j] for j in m_i])  # chunk m to actual m
 
             # Add sparse matrix values to lists.
             try:
-                m.extend(m_i.tolist())
+                m.extend(m_i_arr.tolist())
                 c.extend(c_i.tolist())
                 log_prob_reg.extend(log_prob_reg_i.tolist())
-            except TypeError as e:
+            except TypeError:
                 # edge case of a single value
-                m.append(m_i)
+                m.append(m_i_arr)
                 c.append(c_i)
                 log_prob_reg.append(log_prob_reg_i)
 
-        reg_noise_count_posterior_coo = sp.coo_matrix((log_prob_reg, (m, c)),
-                                                      shape=noise_count_posterior_coo.shape)
+        reg_noise_count_posterior_coo = sp.coo_matrix((log_prob_reg, (m, c)), shape=noise_count_posterior_coo.shape)
         return reg_noise_count_posterior_coo
 
     @staticmethod
     @torch.no_grad()
-    def regularize(noise_count_posterior_coo: sp.coo_matrix,
-                   noise_offsets: Dict[int, int],
-                   alpha: float,
-                   device: str = 'cuda',
-                   target_tolerance: float = 0.001,
-                   n_chunks: Optional[int] = None,
-                   **kwargs) -> sp.coo_matrix:
+    def regularize(
+        noise_count_posterior_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        alpha: float = 0.0,
+        device: str = "cuda",
+        target_tolerance: float = 0.001,
+        n_chunks: Optional[int] = None,
+        **kwargs,
+    ) -> sp.coo_matrix:
         """Perform posterior regularization using approximate quantile-targeting.
 
         Args:
@@ -1178,7 +1203,7 @@ class PRq(PosteriorRegularization):
                 posterior data structure
 
         """
-        logger.info(f'Regularizing noise count posterior using approximate quantile-targeting with alpha={alpha}')
+        logger.info(f"Regularizing noise count posterior using approximate quantile-targeting with alpha={alpha}")
 
         # Compute the expectation for the mean post-regularization.
         log_target_dict = PRq._compute_log_target_dict(
@@ -1215,24 +1240,23 @@ class PRmu(PosteriorRegularization):
 
     @staticmethod
     def name():
-        return 'PRmu'
+        return "PRmu"
 
     @staticmethod
     def _binary_search_for_posterior_regularization_factor(
-            noise_count_posterior_coo: sp.coo_matrix,
-            noise_offsets: Dict[int, int],
-            index_converter: 'IndexConverter',
-            target_removal: torch.Tensor,
-            shape: int,
-            target_tolerance: float = 100,
-            max_iterations: int = 20,
-            device: str = 'cpu',
+        noise_count_posterior_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        index_converter: "IndexConverter",
+        target_removal: torch.Tensor,
+        shape: int,
+        target_tolerance: float = 100,
+        max_iterations: int = 20,
+        device: str = "cpu",
     ) -> torch.Tensor:
         """Go through posterior and compute regularization factor(s),
         using the defined targets"""
 
-        def summarize_map_noise_counts(x: torch.Tensor,
-                                       per_gene: bool) -> torch.Tensor:
+        def summarize_map_noise_counts(x: torch.Tensor, per_gene: bool) -> torch.Tensor:
             """Given a (subset of the) noise posterior, compute the MAP estimate
             and summarize it either as the overall sum or per-gene.
             """
@@ -1269,13 +1293,9 @@ class PRmu(PosteriorRegularization):
                 per_gene = True
 
         beta = torch_binary_search(
-            evaluate_outcome_given_value=lambda x:
-            summarize_map_noise_counts(x=x, per_gene=per_gene),
+            evaluate_outcome_given_value=lambda x: summarize_map_noise_counts(x=x, per_gene=per_gene),
             target_outcome=target_removal,
-            init_range=(torch.tensor([-100., 200.])
-                        .to(device)
-                        .unsqueeze(0)
-                        .expand((shape,) + (2,))),
+            init_range=(torch.tensor([-100.0, 200.0]).to(device).unsqueeze(0).expand((shape,) + (2,))),
             target_tolerance=target_tolerance,
             max_iterations=max_iterations,
             debug=True,
@@ -1284,28 +1304,34 @@ class PRmu(PosteriorRegularization):
 
     @staticmethod
     def _chunked_compute_regularized_posterior(
-            noise_count_posterior_coo: sp.coo_matrix,
-            noise_offsets: Dict[int, int],
-            index_converter: 'IndexConverter',
-            beta: torch.Tensor,
-            device: str = 'cpu',
-            n_chunks: Optional[int] = None,
+        noise_count_posterior_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        index_converter: "IndexConverter",
+        beta: torch.Tensor,
+        device: str = "cpu",
+        n_chunks: Optional[int] = None,
     ) -> sp.coo_matrix:
         """Go through posterior in chunks and compute regularized posterior,
         using the defined targets"""
 
         # Compute using dense chunks, chunked on m-index.
         if n_chunks is None:
-            dense_size_gb = (len(np.unique(noise_count_posterior_coo.row))
-                             * (noise_count_posterior_coo.shape[1]
-                                + np.array(list(noise_offsets.values())).max())) * 4 / 1e9  # GB
+            dense_size_gb = (
+                (
+                    len(np.unique(noise_count_posterior_coo.row))
+                    * (noise_count_posterior_coo.shape[1] + np.array(list((noise_offsets or {}).values())).max())
+                )
+                * 4
+                / 1e9
+            )  # GB
             n_chunks = max(1, int(dense_size_gb // 1))  # approx 1 GB each
 
         # Make the sparse matrix compact in the sense that it should use contiguous row values.
         unique_rows, densifiable_coo_rows = np.unique(noise_count_posterior_coo.row, return_inverse=True)
-        densifiable_csr = sp.csr_matrix((noise_count_posterior_coo.data,
-                                         (densifiable_coo_rows, noise_count_posterior_coo.col)),
-                                        shape=[len(unique_rows), noise_count_posterior_coo.shape[1]])
+        densifiable_csr = sp.csr_matrix(
+            (noise_count_posterior_coo.data, (densifiable_coo_rows, noise_count_posterior_coo.col)),
+            shape=[len(unique_rows), noise_count_posterior_coo.shape[1]],
+        )
         chunk_size = int(np.ceil(densifiable_csr.shape[0] / n_chunks))
 
         m = []
@@ -1315,18 +1341,20 @@ class PRmu(PosteriorRegularization):
         for i in range(n_chunks):
             # B index here represents a batch: the re-defined m-index
             log_pdf_noise_counts_BC = torch.tensor(
-                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size):((i + 1) * chunk_size)])
+                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)])
             ).to(device)
-            noise_count_BC = (torch.arange(log_pdf_noise_counts_BC.shape[1])
-                              .to(log_pdf_noise_counts_BC.device)
-                              .unsqueeze(0)
-                              .expand(log_pdf_noise_counts_BC.shape))
-            m_indices_for_chunk = unique_rows[(i * chunk_size):((i + 1) * chunk_size)]
-            noise_count_BC = noise_count_BC + (torch.tensor([noise_offsets.get(m, 0)
-                                                             for m in m_indices_for_chunk],
-                                                            dtype=torch.float)
-                                               .unsqueeze(-1)
-                                               .to(device))
+            noise_count_BC = (
+                torch.arange(log_pdf_noise_counts_BC.shape[1])
+                .to(log_pdf_noise_counts_BC.device)
+                .unsqueeze(0)
+                .expand(log_pdf_noise_counts_BC.shape)
+            )
+            m_indices_for_chunk = unique_rows[(i * chunk_size) : ((i + 1) * chunk_size)]
+            noise_count_BC = noise_count_BC + (
+                torch.tensor([(noise_offsets or {}).get(m, 0) for m in m_indices_for_chunk], dtype=torch.float)
+                .unsqueeze(-1)
+                .to(device)
+            )
 
             # Get beta for this chunk.
             if len(beta) == 1:
@@ -1339,7 +1367,7 @@ class PRmu(PosteriorRegularization):
 
             # Generate regularized posteriors.
             log_pdf_reg_BC = log_pdf_noise_counts_BC + beta_B.unsqueeze(-1) * noise_count_BC
-            log_pdf_reg_BC = log_pdf_reg_BC - torch.logsumexp(log_pdf_reg_BC, -1, keepdims=True)
+            log_pdf_reg_BC = log_pdf_reg_BC - torch.logsumexp(log_pdf_reg_BC, -1, keepdim=True)
 
             # Store sparse COO values in lists.
             tensor_for_nonzeros = log_pdf_reg_BC.clone().exp()  # probability
@@ -1348,27 +1376,26 @@ class PRmu(PosteriorRegularization):
                 log_pdf_reg_BC,
                 tensor_for_nonzeros=tensor_for_nonzeros,
             )
-            m_i = np.array([m_indices_for_chunk[j] for j in m_i])  # chunk m to actual m
+            m_i_arr = np.array([m_indices_for_chunk[j] for j in m_i])  # chunk m to actual m
 
             # Add sparse matrix values to lists.
             try:
-                m.extend(m_i.tolist())
+                m.extend(m_i_arr.tolist())
                 c.extend(c_i.tolist())
                 log_prob_reg.extend(log_prob_reg_i.tolist())
-            except TypeError as e:
+            except TypeError:
                 # edge case of a single value
-                m.append(m_i)
+                m.append(m_i_arr)
                 c.append(c_i)
                 log_prob_reg.append(log_prob_reg_i)
 
-        reg_noise_count_posterior_coo = sp.coo_matrix((log_prob_reg, (m, c)),
-                                                      shape=noise_count_posterior_coo.shape)
+        reg_noise_count_posterior_coo = sp.coo_matrix((log_prob_reg, (m, c)), shape=noise_count_posterior_coo.shape)
         return reg_noise_count_posterior_coo
 
     @staticmethod
-    def _subset_posterior_by_cells(noise_count_posterior_coo: sp.coo_matrix,
-                                   index_converter: 'IndexConverter',
-                                   n_cells: int) -> sp.coo_matrix:
+    def _subset_posterior_by_cells(
+        noise_count_posterior_coo: sp.coo_matrix, index_converter: "IndexConverter", n_cells: int
+    ) -> sp.coo_matrix:
         """Return a random slice of the full posterior with a specified number
         of cells.
 
@@ -1388,7 +1415,7 @@ class PRmu(PosteriorRegularization):
         n, g = index_converter.get_ng_indices(m_inds=m)
         unique_cell_inds = np.unique(n)
         if n_cells > len(unique_cell_inds):
-            logger.debug(f'Limiting n_cells during PRmu regularizer binary search to {unique_cell_inds}')
+            logger.debug(f"Limiting n_cells during PRmu regularizer binary search to {unique_cell_inds}")
             n_cells = len(unique_cell_inds)
         chosen_n_values = set(np.random.choice(unique_cell_inds, size=n_cells, replace=False))
         element_logic = [val in chosen_n_values for val in n]
@@ -1397,22 +1424,23 @@ class PRmu(PosteriorRegularization):
         data_subset = noise_count_posterior_coo.data[element_logic]
         row_subset = noise_count_posterior_coo.row[element_logic]
         col_subset = noise_count_posterior_coo.col[element_logic]
-        return sp.coo_matrix((data_subset, (row_subset, col_subset)),
-                             shape=noise_count_posterior_coo.shape)
+        return sp.coo_matrix((data_subset, (row_subset, col_subset)), shape=noise_count_posterior_coo.shape)
 
     @staticmethod
     @torch.no_grad()
-    def regularize(noise_count_posterior_coo: sp.coo_matrix,
-                   noise_offsets: Dict[int, int],
-                   index_converter: 'IndexConverter',
-                   raw_count_matrix: sp.csr_matrix,
-                   fpr: float,
-                   per_gene: bool = False,
-                   device: str = 'cuda',
-                   target_tolerance: float = 0.5,
-                   n_cells: int = 1000,
-                   n_chunks: Optional[int] = None,
-                   **kwargs) -> sp.coo_matrix:
+    def regularize(
+        noise_count_posterior_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        index_converter: Optional["IndexConverter"] = None,
+        raw_count_matrix: Optional[sp.csr_matrix] = None,
+        fpr: float = 0.01,
+        per_gene: bool = False,
+        device: str = "cuda",
+        target_tolerance: float = 0.5,
+        n_cells: int = 1000,
+        n_chunks: Optional[int] = None,
+        **kwargs,
+    ) -> sp.coo_matrix:
         """Perform posterior regularization using mean-targeting.
 
         Args:
@@ -1439,10 +1467,13 @@ class PRmu(PosteriorRegularization):
 
         """
 
-        logger.info('Regularizing noise count posterior using mean-targeting')
+        logger.info("Regularizing noise count posterior using mean-targeting")
+
+        assert index_converter is not None, "index_converter is required for PRmu.regularize"
+        assert raw_count_matrix is not None, "raw_count_matrix is required for PRmu.regularize"
 
         # Use a subset of the data to find regularization factors, to reduce time.
-        logger.debug(f'Subsetting posterior to {n_cells} cells for this computation')
+        logger.debug(f"Subsetting posterior to {n_cells} cells for this computation")
         posterior_subset_coo = PRmu._subset_posterior_by_cells(
             noise_count_posterior_coo=noise_count_posterior_coo,
             index_converter=index_converter,
@@ -1453,10 +1484,9 @@ class PRmu(PosteriorRegularization):
         n, g = index_converter.get_ng_indices(m_inds=posterior_subset_coo.row)
         included_cells = set(np.unique(n))
         excluded_barcode_inds = set(range(raw_count_matrix.shape[0])) - included_cells
-        raw_count_csr_for_cells = csr_set_rows_to_zero(csr=raw_count_matrix,
-                                                       row_inds=excluded_barcode_inds)
+        raw_count_csr_for_cells = csr_set_rows_to_zero(csr=raw_count_matrix, row_inds=excluded_barcode_inds)
         # print(raw_count_csr_for_cells)
-        logger.debug('Computing target removal')
+        logger.debug("Computing target removal")
         target_fun = compute_mean_target_removal_as_function(
             noise_count_posterior_coo=posterior_subset_coo,
             noise_offsets=noise_offsets,
@@ -1467,14 +1497,14 @@ class PRmu(PosteriorRegularization):
             per_gene=per_gene,
         )
         target_removal = target_fun(fpr) * len(included_cells)
-        logger.debug(f'Target removal is {target_removal}')
+        logger.debug(f"Target removal is {target_removal}")
 
         # Find the posterior regularization factor(s).
         if per_gene:
-            logger.debug('Computing optimal posterior regularization factors for each gene')
+            logger.debug("Computing optimal posterior regularization factors for each gene")
             shape = index_converter.total_n_genes
         else:
-            logger.debug('Computing optimal posterior regularization factor')
+            logger.debug("Computing optimal posterior regularization factor")
             shape = 1
         beta = PRmu._binary_search_for_posterior_regularization_factor(
             noise_count_posterior_coo=posterior_subset_coo,
@@ -1485,10 +1515,10 @@ class PRmu(PosteriorRegularization):
             target_tolerance=target_tolerance,
             shape=shape,
         )
-        logger.debug(f'Optimal posterior regularization factor\n{beta}')
+        logger.debug(f"Optimal posterior regularization factor\n{beta}")
 
         # Compute the posterior using the regularization factor(s).
-        logger.debug('Computing full regularized posterior')
+        logger.debug("Computing full regularized posterior")
         regularized_noise_posterior_coo = PRmu._chunked_compute_regularized_posterior(
             noise_count_posterior_coo=noise_count_posterior_coo,
             noise_offsets=noise_offsets,
@@ -1501,7 +1531,6 @@ class PRmu(PosteriorRegularization):
 
 
 class IndexConverter:
-
     def __init__(self, total_n_cells: int, total_n_genes: int):
         """Convert between (n, g) indices and flattened 'm' indices
 
@@ -1515,47 +1544,57 @@ class IndexConverter:
         self.matrix_shape = (total_n_cells, total_n_genes)
 
     def __repr__(self):
-        return (f'IndexConverter with'
-                f'\n\ttotal_n_cells: {self.total_n_cells}'
-                f'\n\ttotal_n_genes: {self.total_n_genes}'
-                f'\n\tmatrix_shape: {self.matrix_shape}')
+        return (
+            f"IndexConverter with"
+            f"\n\ttotal_n_cells: {self.total_n_cells}"
+            f"\n\ttotal_n_genes: {self.total_n_genes}"
+            f"\n\tmatrix_shape: {self.matrix_shape}"
+        )
 
-    def get_m_indices(self,
-                      cell_inds: Union[np.ndarray, torch.Tensor],
-                      gene_inds: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
+    def get_m_indices(
+        self, cell_inds: Union[np.ndarray, torch.Tensor], gene_inds: Union[np.ndarray, torch.Tensor]
+    ) -> Union[np.ndarray, torch.Tensor]:
         """Given arrays of cell indices and gene indices, suitable for a sparse matrix,
         convert them to 'm' index values.
         """
         if not ((cell_inds >= 0) & (cell_inds < self.total_n_cells)).all():
-            raise ValueError(f'Requested cell_inds out of range: '
-                             f'{cell_inds[(cell_inds < 0) | (cell_inds >= self.total_n_cells)]}')
+            raise ValueError(
+                f"Requested cell_inds out of range: {cell_inds[(cell_inds < 0) | (cell_inds >= self.total_n_cells)]}"
+            )
         if not ((gene_inds >= 0) & (gene_inds < self.total_n_genes)).all():
-            raise ValueError(f'Requested gene_inds out of range: '
-                             f'{gene_inds[(gene_inds < 0) | (gene_inds >= self.total_n_genes)]}')
-        if type(cell_inds) == np.ndarray:
+            raise ValueError(
+                f"Requested gene_inds out of range: {gene_inds[(gene_inds < 0) | (gene_inds >= self.total_n_genes)]}"
+            )
+        if isinstance(cell_inds, np.ndarray):
+            assert isinstance(gene_inds, np.ndarray)
             return cell_inds.astype(np.uint64) * self.total_n_genes + gene_inds.astype(np.uint64)
-        elif type(cell_inds) == torch.Tensor:
+        elif isinstance(cell_inds, torch.Tensor):
+            assert isinstance(gene_inds, torch.Tensor)
             return cell_inds.type(torch.int64) * self.total_n_genes + gene_inds.type(torch.int64)
         else:
-            raise ValueError('IndexConverter.get_m_indices received cell_inds of unkown object type')
+            raise ValueError("IndexConverter.get_m_indices received cell_inds of unkown object type")
 
     def get_ng_indices(self, m_inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Given a list of 'm' index values, return two arrays: cell index values
         and gene index values, suitable for a sparse matrix.
         """
         if not ((m_inds >= 0) & (m_inds < self.total_n_cells * self.total_n_genes)).all():
-            raise ValueError(f'Requested m_inds out of range: '
-                             f'{m_inds[(m_inds < 0) | (m_inds >= self.total_n_cells * self.total_n_genes)]}')
+            raise ValueError(
+                f"Requested m_inds out of range: "
+                f"{m_inds[(m_inds < 0) | (m_inds >= self.total_n_cells * self.total_n_genes)]}"
+            )
         return np.divmod(m_inds, self.total_n_genes)
 
 
-def compute_mean_target_removal_as_function(noise_count_posterior_coo: sp.coo_matrix,
-                                            noise_offsets: Dict[int, int],
-                                            index_converter: IndexConverter,
-                                            raw_count_csr_for_cells: sp.csr_matrix,
-                                            n_cells: int,
-                                            device: str,
-                                            per_gene: bool) -> Callable[[float], torch.Tensor]:
+def compute_mean_target_removal_as_function(
+    noise_count_posterior_coo: sp.coo_matrix,
+    noise_offsets: Optional[Dict[int, int]],
+    index_converter: IndexConverter,
+    raw_count_csr_for_cells: sp.csr_matrix,
+    n_cells: int,
+    device: str,
+    per_gene: bool,
+) -> Callable[[float], torch.Tensor]:
     """Given the noise count posterior, return a function that computes target
     removal (either overall or per-gene) as a function of FPR.
 
@@ -1588,13 +1627,13 @@ def compute_mean_target_removal_as_function(noise_count_posterior_coo: sp.coo_ma
         noise_offsets=noise_offsets,
         device=device,
     )
-    logger.debug(f'Total counts in raw matrix for cells = {raw_count_csr_for_cells.sum()}')
-    logger.debug(f'Total noise counts from mean noise estimator = {mean_noise_csr.sum()}')
+    logger.debug(f"Total counts in raw matrix for cells = {raw_count_csr_for_cells.sum()}")
+    logger.debug(f"Total noise counts from mean noise estimator = {mean_noise_csr.sum()}")
 
     # Compute the target removal.
     approx_signal_csr = raw_count_csr_for_cells - mean_noise_csr
-    logger.debug(f'Approximate signal has total counts = {approx_signal_csr.sum()}')
-    logger.debug(f'Number of cells = {n_cells}')
+    logger.debug(f"Approximate signal has total counts = {approx_signal_csr.sum()}")
+    logger.debug(f"Number of cells = {n_cells}")
 
     def _target_fun(fpr: float) -> torch.Tensor:
         """The function which gets returned"""
@@ -1616,7 +1655,7 @@ def torch_binary_search(
     evaluate_outcome_given_value: Callable[[torch.Tensor], torch.Tensor],
     target_outcome: torch.Tensor,
     init_range: torch.Tensor,
-    target_tolerance: Optional[float] = 0.001,
+    target_tolerance: float = 0.001,
     max_iterations: int = consts.POSTERIOR_REG_SEARCH_MAX_ITER,
     debug: bool = False,
 ) -> torch.Tensor:
@@ -1646,20 +1685,21 @@ def torch_binary_search(
 
     """
 
-    logger.debug('Binary search commencing')
+    logger.debug("Binary search commencing")
 
-    assert (target_tolerance > 0), 'target_tolerance should be > 0.'
-    assert len(init_range.shape) > 1, 'init_range must be at least two-dimensional ' \
-                                      '(last dimension contains lower and upper bounds)'
-    assert init_range.shape[-1] == 2, 'Last dimension of init_range should be 2: low and high'
+    assert target_tolerance > 0, "target_tolerance should be > 0."
+    assert len(init_range.shape) > 1, (
+        "init_range must be at least two-dimensional (last dimension contains lower and upper bounds)"
+    )
+    assert init_range.shape[-1] == 2, "Last dimension of init_range should be 2: low and high"
 
     value_bracket = init_range.clone()
 
     # Binary search algorithm.
     for i in range(max_iterations):
-
-        logger.debug(f'Binary search limits [batch_dim=0, :]: '
-                     f'{value_bracket.reshape(-1, value_bracket.shape[-1])[0, :]}')
+        logger.debug(
+            f"Binary search limits [batch_dim=0, :]: {value_bracket.reshape(-1, value_bracket.shape[-1])[0, :]}"
+        )
 
         # Current test value.
         value = value_bracket.mean(dim=-1)
@@ -1673,46 +1713,56 @@ def torch_binary_search(
         if stop_condition:
             break
         else:
-            value_bracket[..., 0] = torch.where(outcome < target_outcome - target_tolerance,
-                                                value,
-                                                value_bracket[..., 0])
-            value_bracket[..., 1] = torch.where(outcome > target_outcome + target_tolerance,
-                                                value,
-                                                value_bracket[..., 1])
+            value_bracket[..., 0] = torch.where(
+                outcome < target_outcome - target_tolerance, value, value_bracket[..., 0]
+            )
+            value_bracket[..., 1] = torch.where(
+                outcome > target_outcome + target_tolerance, value, value_bracket[..., 1]
+            )
 
     # If we stopped due to iteration limit, take the average value.
     if i == max_iterations:
         value = value_bracket.mean(dim=-1)
-        logger.warning(f'Binary search target not achieved in {max_iterations} attempts. '
-                       f'Output is estimated to be {outcome.mean().item():.4f}')
+        logger.warning(
+            f"Binary search target not achieved in {max_iterations} attempts. "
+            f"Output is estimated to be {outcome.mean().item():.4f}"
+        )
 
     # Warn if we railed out at the limits of the search
     if debug:
         if (value - target_tolerance <= init_range[..., 0]).sum() > 0:
-            logger.debug(f'{(value - target_tolerance <= init_range[..., 0]).sum()} '
-                         f'entries in the binary search hit the lower limit')
+            logger.debug(
+                f"{(value - target_tolerance <= init_range[..., 0]).sum()} "
+                f"entries in the binary search hit the lower limit"
+            )
             logger.debug(value[value - target_tolerance <= init_range[..., 0]])
         if (value + target_tolerance >= init_range[..., 1]).sum() > 0:
-            logger.debug(f'{(value + target_tolerance >= init_range[..., 1]).sum()} '
-                         f'entries in the binary search hit the upper limit')
+            logger.debug(
+                f"{(value + target_tolerance >= init_range[..., 1]).sum()} "
+                f"entries in the binary search hit the upper limit"
+            )
             logger.debug(value[value + target_tolerance >= init_range[..., 1]])
 
     return value
 
 
-def restore_from_checkpoint(tarball_name: str, input_file: str) \
-        -> Tuple['SingleCellRNACountsDataset', 'RemoveBackgroundPyroModel', Posterior]:
+def restore_from_checkpoint(
+    tarball_name: str, input_file: str
+) -> Tuple["SingleCellRNACountsDataset", "RemoveBackgroundPyroModel", Posterior]:
     """Convenience function not used by the codebase"""
 
     d = load_checkpoint(filebase=None, tarball_name=tarball_name)
-    d.update(load_from_checkpoint(filebase=None, tarball_name=tarball_name, to_load=['posterior']))
-    d['args'].input_file = input_file
+    d.update(load_from_checkpoint(filebase=None, tarball_name=tarball_name, to_load=["posterior"]))
+    args = cast("argparse.Namespace", d["args"])
+    args.input_file = input_file
 
-    dataset_obj = get_dataset_obj(args=d['args'])
+    dataset_obj = get_dataset_obj(args=args)
+    model = cast("RemoveBackgroundPyroModel", d["model"])
+    posterior_file = cast(str, d["posterior_file"])
 
     posterior = Posterior(
         dataset_obj=dataset_obj,
-        vi_model=d['model'],
+        vi_model=model,
     )
-    posterior.load(file=d['posterior_file'])
-    return dataset_obj, d['model'], posterior
+    posterior.load(file=posterior_file)
+    return dataset_obj, model, posterior

@@ -1,4 +1,5 @@
 import torch
+
 from cellbender.remove_background.vae.base import FullyConnectedNetwork
 
 

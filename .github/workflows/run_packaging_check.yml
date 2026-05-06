@@ -1,18 +1,18 @@
 # Package for PyPI
 
-name: 'packaging'
+name: packaging-check
 
 on: 
   pull_request:
-    branches: [ master, dev ]
+    branches: [ main ]
 
 jobs:
-  build:
+  install-and-build:
 
     runs-on: 'ubuntu-latest'
     strategy:
       matrix:
-        python-version: ['3.9']
+        python-version: [ '3.10', '3.11', '3.12' ]
 
     steps:
     - name: 'Checkout repo'

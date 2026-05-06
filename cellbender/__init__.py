@@ -1,3 +1,6 @@
-from .base_cli import get_version
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = get_version()
+try:
+    __version__ = version("cellbender")
+except PackageNotFoundError:
+    __version__ = "unknown"

@@ -1,25 +1,25 @@
 """Classes and methods for estimation of noise counts, given a posterior."""
 
-import scipy.sparse as sp
+import concurrent.futures
+import logging
+import multiprocessing as mp
+import time
+from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import TYPE_CHECKING, Callable, Dict, Generator, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from cellbender.remove_background.posterior import IndexConverter
+
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import torch
 from torch.distributions.categorical import Categorical
 
 from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
 
-from abc import ABC, abstractmethod
-from functools import partial
-from itertools import repeat
-import multiprocessing as mp
-import concurrent.futures
-import time
-from datetime import datetime
-import logging
-from typing import Callable, Union, Dict, Generator, Tuple, List, Optional
-
-
-logger = logging.getLogger('cellbender')
+logger = logging.getLogger("cellbender")
 
 N_CELLS_DATATYPE = np.int32
 N_GENES_DATATYPE = np.int32
@@ -29,7 +29,7 @@ COUNT_DATATYPE = np.int32
 class EstimationMethod(ABC):
     """Base class for estimation of noise counts, given a posterior."""
 
-    def __init__(self, index_converter: 'IndexConverter'):
+    def __init__(self, index_converter: "IndexConverter"):
         """Instantiate the EstimationMethod.
         Args:
             index_converter: The IndexConverter that can be used to translate
@@ -40,10 +40,9 @@ class EstimationMethod(ABC):
         super(EstimationMethod, self).__init__()
 
     @abstractmethod
-    def estimate_noise(self,
-                       noise_log_prob_coo: sp.coo_matrix,
-                       noise_offsets: Dict[int, int],
-                       **kwargs) -> sp.csr_matrix:
+    def estimate_noise(
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], **kwargs
+    ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts.
         Args:
             noise_log_prob_coo: The noise log prob data structure: log prob
@@ -52,11 +51,9 @@ class EstimationMethod(ABC):
         """
         pass
 
-    def _estimation_array_to_csr(self,
-                                 data: np.ndarray,
-                                 m: np.ndarray,
-                                 noise_offsets: Optional[Dict[int, int]],
-                                 dtype=COUNT_DATATYPE) -> sp.csr_matrix:
+    def _estimation_array_to_csr(
+        self, data: np.ndarray, m: np.ndarray, noise_offsets: Optional[Dict[int, int]], dtype=COUNT_DATATYPE
+    ) -> sp.csr_matrix:
         """Say you have point estimates for each count matrix element (data) and
         you have the 'm'-indices for each value (m). This returns a CSR matrix
         that has the shape of the count matrix, where duplicate entries have
@@ -93,11 +90,9 @@ class SingleSample(EstimationMethod):
     """A single sample from the noise count posterior"""
 
     @torch.no_grad()
-    def estimate_noise(self,
-                       noise_log_prob_coo: sp.coo_matrix,
-                       noise_offsets: Dict[int, int],
-                       device: str = 'cpu',
-                       **kwargs) -> sp.csr_matrix:
+    def estimate_noise(
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
+    ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts by
         taking a single sample from each probability distribution.
 
@@ -111,24 +106,20 @@ class SingleSample(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
+
         def _torch_sample(x):
             return Categorical(logits=x, validate_args=False).sample()
 
-        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                             fun=_torch_sample,
-                                             device=device)
-        return self._estimation_array_to_csr(data=result['result'], m=result['m'],
-                                             noise_offsets=noise_offsets)
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo, fun=_torch_sample, device=device)
+        return self._estimation_array_to_csr(data=result["result"], m=result["m"], noise_offsets=noise_offsets)
 
 
 class Mean(EstimationMethod):
     """Posterior mean"""
 
-    def estimate_noise(self,
-                       noise_log_prob_coo: sp.coo_matrix,
-                       noise_offsets: Dict[int, int],
-                       device: str = 'cpu',
-                       **kwargs) -> sp.csr_matrix:
+    def estimate_noise(
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
+    ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts by
         taking the mean of each probability distribution.
 
@@ -146,12 +137,10 @@ class Mean(EstimationMethod):
             c = torch.arange(x.shape[1], dtype=float).to(x.device)
             return torch.matmul(x.exp(), c.t())
 
-        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                             fun=_torch_mean,
-                                             device=device)
-        return self._estimation_array_to_csr(data=result['result'], m=result['m'],
-                                             noise_offsets=noise_offsets,
-                                             dtype=np.float32)
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo, fun=_torch_mean, device=device)
+        return self._estimation_array_to_csr(
+            data=result["result"], m=result["m"], noise_offsets=noise_offsets, dtype=np.float32
+        )
 
 
 class MAP(EstimationMethod):
@@ -161,11 +150,9 @@ class MAP(EstimationMethod):
     def torch_argmax(x):
         return x.argmax(dim=-1)
 
-    def estimate_noise(self,
-                       noise_log_prob_coo: sp.coo_matrix,
-                       noise_offsets: Dict[int, int],
-                       device: str = 'cpu',
-                       **kwargs) -> sp.csr_matrix:
+    def estimate_noise(
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
+    ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts by
         taking the maximum a posteriori (MAP) of each probability distribution.
 
@@ -179,11 +166,10 @@ class MAP(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                             fun=self.torch_argmax,
-                                             device=device)
-        return self._estimation_array_to_csr(data=result['result'], m=result['m'],
-                                             noise_offsets=noise_offsets)
+        result = apply_function_dense_chunks(
+            noise_log_prob_coo=noise_log_prob_coo, fun=self.torch_argmax, device=device
+        )
+        return self._estimation_array_to_csr(data=result["result"], m=result["m"], noise_offsets=noise_offsets)
 
 
 class ThresholdCDF(EstimationMethod):
@@ -193,12 +179,14 @@ class ThresholdCDF(EstimationMethod):
     def torch_cdf_fun(x: torch.Tensor, q: float):
         return (x.exp().cumsum(dim=-1) <= q).sum(dim=-1)
 
-    def estimate_noise(self,
-                       noise_log_prob_coo: sp.coo_matrix,
-                       noise_offsets: Dict[int, int],
-                       q: float = 0.5,
-                       device: str = 'cpu',
-                       **kwargs) -> sp.csr_matrix:
+    def estimate_noise(
+        self,
+        noise_log_prob_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        q: float = 0.5,
+        device: str = "cpu",
+        **kwargs,
+    ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts
 
         Args:
@@ -210,19 +198,15 @@ class ThresholdCDF(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                             fun=self.torch_cdf_fun,
-                                             device=device,
-                                             q=q)
-        return self._estimation_array_to_csr(data=result['result'], m=result['m'],
-                                             noise_offsets=noise_offsets)
+        result = apply_function_dense_chunks(
+            noise_log_prob_coo=noise_log_prob_coo, fun=self.torch_cdf_fun, device=device, q=q
+        )
+        return self._estimation_array_to_csr(data=result["result"], m=result["m"], noise_offsets=noise_offsets)
 
 
-def _estimation_array_to_csr(index_converter,
-                             data: np.ndarray,
-                             m: np.ndarray,
-                             noise_offsets: Optional[Dict[int, int]],
-                             dtype=COUNT_DATATYPE) -> sp.csr_matrix:
+def _estimation_array_to_csr(
+    index_converter, data: np.ndarray, m: np.ndarray, noise_offsets: Optional[Dict[int, int]], dtype=COUNT_DATATYPE
+) -> sp.csr_matrix:
     """Say you have point estimates for each count matrix element (data) and
     you have the 'm'-indices for each value (m). This returns a CSR matrix
     that has the shape of the count matrix, where duplicate entries have
@@ -242,20 +226,24 @@ def _estimation_array_to_csr(index_converter,
     row, col = index_converter.get_ng_indices(m_inds=m)
     if noise_offsets is not None:
         data = data + np.array([noise_offsets.get(i, 0) for i in m])
-    coo = sp.coo_matrix((data.astype(dtype), (row.astype(N_CELLS_DATATYPE), col.astype(N_GENES_DATATYPE))),
-                        shape=index_converter.matrix_shape, dtype=dtype)
+    coo = sp.coo_matrix(
+        (data.astype(dtype), (row.astype(N_CELLS_DATATYPE), col.astype(N_GENES_DATATYPE))),
+        shape=index_converter.matrix_shape,
+        dtype=dtype,
+    )
     coo.sum_duplicates()
     return coo.tocsr()
 
 
 def _mckp_chunk_estimate_noise(
-        noise_log_prob_coo: sp.coo_matrix,
-        index_and_logic: Tuple[int, np.ndarray],
-        noise_offsets: Dict[int, int],
-        noise_targets_per_gene: np.ndarray,
-        index_converter: 'IndexConverter',
-        n_chunks: int,
-        verbose: bool = False) -> sp.csr_matrix:
+    noise_log_prob_coo: sp.coo_matrix,
+    index_and_logic: Tuple[int, np.ndarray],
+    noise_offsets: Dict[int, int],
+    noise_targets_per_gene: np.ndarray,
+    index_converter: "IndexConverter",
+    n_chunks: int,
+    verbose: bool = False,
+) -> sp.csr_matrix:
     """Given the full probabilistic posterior, compute noise counts. This is
     to be run for a given chunk of genes at a time.
 
@@ -281,119 +269,117 @@ def _mckp_chunk_estimate_noise(
 
     coo = _subset_coo(noise_log_prob_coo, index_and_logic[1])
 
-    assert noise_targets_per_gene.size == index_converter.total_n_genes, \
-        f'The number of noise count targets ({noise_targets_per_gene.size}) ' \
-        f'must match the number of genes ({index_converter.total_n_genes})'
+    assert noise_targets_per_gene.size == index_converter.total_n_genes, (
+        f"The number of noise count targets ({noise_targets_per_gene.size}) "
+        f"must match the number of genes ({index_converter.total_n_genes})"
+    )
 
     # First we need to compute the MAP to find out which direction to go.
     t = time.time()
     map_dict = apply_function_dense_chunks(
         noise_log_prob_coo=coo,
         fun=MAP.torch_argmax,
-        device='cpu',
+        device="cpu",
     )
     map_csr = _estimation_array_to_csr(
-        data=map_dict['result'],
-        m=map_dict['m'],
+        data=map_dict["result"],
+        m=map_dict["m"],
         noise_offsets=noise_offsets,
         index_converter=index_converter,
     )
-    logger.debug(f'{timestamp()} Computed initial MAP estimate')
-    logger.debug(f'{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec')
+    logger.debug(f"{timestamp()} Computed initial MAP estimate")
+    logger.debug(f"{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec")
     map_noise_counts_per_gene = np.array(map_csr.sum(axis=0)).squeeze()
-    additional_noise_counts_per_gene = (noise_targets_per_gene
-                                        - map_noise_counts_per_gene).astype(int)
+    additional_noise_counts_per_gene = (noise_targets_per_gene - map_noise_counts_per_gene).astype(int)
     set_positive_genes = set(np.where(additional_noise_counts_per_gene > 0)[0])
     set_negative_genes = set(np.where(additional_noise_counts_per_gene < 0)[0])  # leave out exact matches
     abs_additional_noise_counts_per_gene = np.abs(additional_noise_counts_per_gene)
 
     # Determine which genes need to add and which need to subtract noise counts.
     n, g = index_converter.get_ng_indices(m_inds=coo.row)
-    df = pd.DataFrame(data={'m': coo.row,
-                            'n': n,
-                            'g': g,
-                            'c': coo.col,
-                            'log_prob': coo.data})
-    logger.debug(f'{timestamp()} Computing step directions')
-    df['positive_step_gene'] = df['g'].apply(lambda gene: gene in set_positive_genes)
-    df['negative_step_gene'] = df['g'].apply(lambda gene: gene in set_negative_genes)
-    df['step_direction'] = (df['positive_step_gene'].astype(int)
-                            - df['negative_step_gene'].astype(int))  # -1 or 1
-    logger.debug(f'{timestamp()} Step directions done')
+    df = pd.DataFrame(data={"m": coo.row, "n": n, "g": g, "c": coo.col, "log_prob": coo.data})
+    logger.debug(f"{timestamp()} Computing step directions")
+    df["positive_step_gene"] = df["g"].apply(lambda gene: gene in set_positive_genes)
+    df["negative_step_gene"] = df["g"].apply(lambda gene: gene in set_negative_genes)
+    df["step_direction"] = df["positive_step_gene"].astype(int) - df["negative_step_gene"].astype(int)  # -1 or 1
+    logger.debug(f"{timestamp()} Step directions done")
 
     if verbose:
-        pd.set_option('display.width', 120)
-        pd.set_option('display.max_columns', 20)
-        print(df, end='\n\n')
+        pd.set_option("display.width", 120)
+        pd.set_option("display.max_columns", 20)
+        print(df, end="\n\n")
 
     # Remove all 'm' entries corresponding to genes where target is met by MAP.
-    df = df[df['step_direction'] != 0]
+    df = df[df["step_direction"] != 0]
 
     # Now we mask out log probs (-np.inf) that represent steps in the wrong direction.
-    logger.debug(f'{timestamp()} Masking')
-    lookup_map_from_m = dict(zip(map_dict['m'], map_dict['result']))
-    df['map'] = df['m'].apply(lambda x: lookup_map_from_m[x])
-    df['mask'] = ((df['negative_step_gene'] & (df['c'] > df['map']))
-                  | (df['positive_step_gene'] & (df['c'] < df['map'])))  # keep MAP
-    df.loc[df['mask'], 'log_prob'] = -np.inf
-    logger.debug(f'{timestamp()} Masking done')
+    logger.debug(f"{timestamp()} Masking")
+    lookup_map_from_m = dict(zip(map_dict["m"], map_dict["result"]))
+    df["map"] = df["m"].apply(lambda x: lookup_map_from_m[x])
+    df["mask"] = (df["negative_step_gene"] & (df["c"] > df["map"])) | (
+        df["positive_step_gene"] & (df["c"] < df["map"])
+    )  # keep MAP
+    df.loc[df["mask"], "log_prob"] = -np.inf
+    logger.debug(f"{timestamp()} Masking done")
 
     # And we remove those entries.
-    df = df[~df['mask']]
-    df = df[[c for c in df.columns if (c != 'mask')]]
+    df = df[~df["mask"]]
+    df = df[[c for c in df.columns if (c != "mask")]]
 
     # Sort
-    logger.debug(f'{timestamp()} Sorting')
-    df = df.sort_values(by=['m', 'c'])
-    logger.debug(f'{timestamp()} Sorting done')
+    logger.debug(f"{timestamp()} Sorting")
+    df = df.sort_values(by=["m", "c"])
+    logger.debug(f"{timestamp()} Sorting done")
 
     if verbose:
-        print(df, end='\n\n')
+        print(df, end="\n\n")
 
     # Do diff for positive and negative separately, without grouping (faster)
-    df_positive_steps = df[df['step_direction'] == 1].copy()
-    df_negative_steps = df[df['step_direction'] == -1].copy()
+    df_positive_steps = df[df["step_direction"] == 1].copy()
+    df_negative_steps = df[df["step_direction"] == -1].copy()
 
-    logger.debug(f'{timestamp()} Computing deltas')
+    logger.debug(f"{timestamp()} Computing deltas")
     if len(df_positive_steps > 0):
-        df_positive_steps.loc[:, 'delta'] = df_positive_steps['log_prob'].diff(periods=1).apply(np.abs)
-        df_positive_steps.loc[df_positive_steps['c'] == df_positive_steps['map'], 'delta'] = np.nan
+        df_positive_steps.loc[:, "delta"] = df_positive_steps["log_prob"].diff(periods=1).apply(np.abs)
+        df_positive_steps.loc[df_positive_steps["c"] == df_positive_steps["map"], "delta"] = np.nan
     if len(df_negative_steps > 0):
-        df_negative_steps.loc[:, 'delta'] = df_negative_steps['log_prob'].diff(periods=-1).apply(np.abs)
-        df_negative_steps.loc[df_negative_steps['c'] == df_negative_steps['map'], 'delta'] = np.nan
+        df_negative_steps.loc[:, "delta"] = df_negative_steps["log_prob"].diff(periods=-1).apply(np.abs)
+        df_negative_steps.loc[df_negative_steps["c"] == df_negative_steps["map"], "delta"] = np.nan
     df = pd.concat([df_positive_steps, df_negative_steps], axis=0)
-    logger.debug(f'{timestamp()} Computing deltas done')
+    logger.debug(f"{timestamp()} Computing deltas done")
 
     if verbose:
-        print(df, end='\n\n')
+        print(df, end="\n\n")
 
     # if this is an empty dataframe, we are not doing anything here beyond MAP
     if len(df) == 0:
         return map_csr
 
     # Remove irrelevant entries: those with infinite delta.
-    df = df[df['delta'].apply(np.isfinite)]
+    df = df[df["delta"].apply(np.isfinite)]
 
     # if this is an empty dataframe, we are not doing anything here beyond MAP
     if len(df) == 0:
         return map_csr
 
     # How many additional noise counts ("steps") we will need for each gene.
-    logger.debug(f'{timestamp()} Computing nsmallest')
-    df['topk'] = df['g'].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
+    logger.debug(f"{timestamp()} Computing nsmallest")
+    df["topk"] = df["g"].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
 
     if verbose:
-        print(df, end='\n\n')
+        print(df, end="\n\n")
 
     # Now we want the smallest additional_noise_counts_per_gene deltas for each gene.
     # https://stackoverflow.com/questions/55179493/
-    df_out = df[['m', 'g', 'delta', 'topk']].groupby('g', group_keys=False).apply(
-        lambda x: x.nsmallest(x['topk'].iat[0], columns='delta')
+    df_out = (
+        df[["m", "g", "delta", "topk"]]
+        .groupby("g", group_keys=False)
+        .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"))
     )
-    logger.debug(f'{timestamp()} Computing nsmallest done')
+    logger.debug(f"{timestamp()} Computing nsmallest done")
 
     if verbose:
-        print(df_out, end='\n\n')
+        print(df_out, end="\n\n")
 
     # if this is an empty dataframe, we are not doing anything here beyond MAP
     if len(df_out) == 0:
@@ -401,30 +387,30 @@ def _mckp_chunk_estimate_noise(
 
     # And the number by which to increment noise counts per entry 'm' is
     # now the number of times that each m value appears in this dataframe.
-    logger.debug(f'{timestamp()} Summarizing steps')
-    vc = df_out['m'].value_counts()
-    vc_df = pd.DataFrame(data={'m': vc.index, 'steps': vc.values})
-    step_direction_lookup_from_m = dict(zip(df['m'], df['step_direction']))
-    vc_df['step_direction'] = vc_df['m'].apply(lambda x: step_direction_lookup_from_m[x])
-    vc_df['counts'] = vc_df['steps'] * vc_df['step_direction']
+    logger.debug(f"{timestamp()} Summarizing steps")
+    vc = df_out["m"].value_counts()
+    vc_df = pd.DataFrame(data={"m": vc.index, "steps": vc.values})
+    step_direction_lookup_from_m = dict(zip(df["m"], df["step_direction"]))
+    vc_df["step_direction"] = vc_df["m"].apply(lambda x: step_direction_lookup_from_m[x])
+    vc_df["counts"] = vc_df["steps"] * vc_df["step_direction"]
     steps_csr = _estimation_array_to_csr(
-        data=vc_df['counts'],
-        m=vc_df['m'],
+        data=vc_df["counts"],
+        m=vc_df["m"],
         noise_offsets=None,
         index_converter=index_converter,
     )
-    logger.debug(f'{timestamp()} Summarizing steps done')
+    logger.debug(f"{timestamp()} Summarizing steps done")
 
     if verbose:
-        print(vc_df, end='\n\n')
-        print('MAP:')
+        print(vc_df, end="\n\n")
+        print("MAP:")
         print(map_csr.todense())
 
-    logger.info(f'Completed chunk ({i + 1} / {n_chunks})')
-    print(f'Completed chunk ({i + 1} / {n_chunks})')  # because logging from a process does not work right
+    logger.info(f"Completed chunk ({i + 1} / {n_chunks})")
+    print(f"Completed chunk ({i + 1} / {n_chunks})")  # because logging from a process does not work right
     if i == 0:
-        logger.info(f'    [single chunk took {(time.time() - tt):.2f} mins]')
-        print(f'    [single chunk took {(time.time() - tt):.2f} mins]')
+        logger.info(f"    [single chunk took {(time.time() - tt):.2f} mins]")
+        print(f"    [single chunk took {(time.time() - tt):.2f} mins]")
 
     # The final output is those tabulated steps added to the MAP.
     # The MAP already has the noise offsets, so they are not added to steps_csr.
@@ -434,14 +420,16 @@ def _mckp_chunk_estimate_noise(
 class MultipleChoiceKnapsack(EstimationMethod):
     """Noise estimation via solving a constrained multiple choice knapsack problem"""
 
-    def estimate_noise(self,
-                       noise_log_prob_coo: sp.coo_matrix,
-                       noise_offsets: Dict[int, int],
-                       noise_targets_per_gene: np.ndarray,
-                       verbose: bool = False,
-                       n_chunks: Optional[int] = None,
-                       use_multiple_processes: bool = False,
-                       **kwargs) -> sp.csr_matrix:
+    def estimate_noise(
+        self,
+        noise_log_prob_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        noise_targets_per_gene: np.ndarray | None = None,
+        verbose: bool = False,
+        n_chunks: Optional[int] = None,
+        use_multiple_processes: bool = False,
+        **kwargs,
+    ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts
 
         Args:
@@ -460,19 +448,23 @@ class MultipleChoiceKnapsack(EstimationMethod):
         """
         if n_chunks is None:
             n_chunks = max(1, self.index_converter.total_n_genes // 5000)
-            logger.debug(f'Running MCKP estimator in {n_chunks} chunks')
+            logger.debug(f"Running MCKP estimator in {n_chunks} chunks")
+
+        assert noise_offsets is not None, "noise_offsets is required for MultipleChoiceKnapsack.estimate_noise"
+        assert noise_targets_per_gene is not None, (
+            "noise_targets_per_gene is required for MultipleChoiceKnapsack.estimate_noise"
+        )
 
         t0 = time.time()
 
         if use_multiple_processes:
-
-            logger.info('Dividing dataset into chunks of genes')
+            logger.info("Dividing dataset into chunks of genes")
             chunk_logic_list = self._gene_chunk_iterator(
                 noise_log_prob_coo=noise_log_prob_coo,
                 n_chunks=n_chunks,
             )
 
-            logger.info('Computing the output in asynchronous chunks in parallel...')
+            logger.info("Computing the output in asynchronous chunks in parallel...")
 
             # with mp.get_context('spawn').Pool(processes=mp.cpu_count()) as pool:
             #     csr_matrices = pool.starmap(
@@ -490,17 +482,17 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
             futures = []
             with concurrent.futures.ProcessPoolExecutor(
-                    max_workers=mp.cpu_count(),
-                    mp_context=mp.get_context('spawn')) as executor:
+                max_workers=mp.cpu_count(), mp_context=mp.get_context("spawn")
+            ) as executor:
                 for i, logic in enumerate(chunk_logic_list):
                     kwargs = {
-                        'noise_log_prob_coo': noise_log_prob_coo,
-                        'index_and_logic': (i, logic),
-                        'noise_offsets': noise_offsets,
-                        'noise_targets_per_gene': noise_targets_per_gene,
-                        'index_converter': self.index_converter,
-                        'n_chunks': n_chunks,
-                        'verbose': False,
+                        "noise_log_prob_coo": noise_log_prob_coo,
+                        "index_and_logic": (i, logic),
+                        "noise_offsets": noise_offsets,
+                        "noise_targets_per_gene": noise_targets_per_gene,
+                        "index_converter": self.index_converter,
+                        "n_chunks": n_chunks,
+                        "verbose": False,
                     }
                     future = executor.submit(_mckp_chunk_estimate_noise, **kwargs)
                     futures.append(future)
@@ -512,17 +504,16 @@ class MultipleChoiceKnapsack(EstimationMethod):
                 csr_matrices = [f.result() for f in futures]
 
         else:
-
             t = time.time()
 
             csr_matrices = []
             for i, logic in enumerate(
-                    self._gene_chunk_iterator(
-                        noise_log_prob_coo=noise_log_prob_coo,
-                        n_chunks=n_chunks,
-                    )
+                self._gene_chunk_iterator(
+                    noise_log_prob_coo=noise_log_prob_coo,
+                    n_chunks=n_chunks,
+                )
             ):
-                logger.info(f'Working on chunk ({i + 1}/{n_chunks})')
+                logger.info(f"Working on chunk ({i + 1}/{n_chunks})")
                 chunk_csr = self._chunk_estimate_noise(
                     noise_log_prob_coo=_subset_coo(noise_log_prob_coo, logic),
                     noise_offsets=noise_offsets,
@@ -531,16 +522,13 @@ class MultipleChoiceKnapsack(EstimationMethod):
                 )
                 csr_matrices.append(chunk_csr)
                 if i == 0:
-                    logger.info(f'    [{(time.time() - t) / 60:.2f} mins per chunk]')
-                logger.debug(f'{timestamp()} Estimator chunk {i}: shape is {chunk_csr.shape}')
+                    logger.info(f"    [{(time.time() - t) / 60:.2f} mins per chunk]")
+                logger.debug(f"{timestamp()} Estimator chunk {i}: shape is {chunk_csr.shape}")
 
-        logger.info(f'{timestamp()} Total MCKP estimation time = {(time.time() - t0):.2f} sec')
+        logger.info(f"{timestamp()} Total MCKP estimation time = {(time.time() - t0):.2f} sec")
         return sum(csr_matrices)
 
-    def _gene_chunk_iterator(self,
-                             noise_log_prob_coo: sp.coo_matrix,
-                             n_chunks: int) \
-            -> List[np.ndarray]:
+    def _gene_chunk_iterator(self, noise_log_prob_coo: sp.coo_matrix, n_chunks: int) -> List[np.ndarray]:
         """Return a list of logical (size m) arrays used to select gene chunks
         on which to compute the MCKP estimate. These chunks are independent.
 
@@ -561,11 +549,13 @@ class MultipleChoiceKnapsack(EstimationMethod):
         gene_logic_arrays = [genes_series.isin(x).values for x in gene_chunk_arrays]
         return gene_logic_arrays
 
-    def _chunk_estimate_noise(self,
-                              noise_log_prob_coo: sp.coo_matrix,
-                              noise_offsets: Dict[int, int],
-                              noise_targets_per_gene: np.ndarray,
-                              verbose: bool = False) -> sp.csr_matrix:
+    def _chunk_estimate_noise(
+        self,
+        noise_log_prob_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        noise_targets_per_gene: np.ndarray,
+        verbose: bool = False,
+    ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts. This is
         to be run for a given chunk of genes at a time.
 
@@ -580,116 +570,112 @@ class MultipleChoiceKnapsack(EstimationMethod):
             noise_count_csr: Estimated noise count matrix.
         """
 
-        assert noise_targets_per_gene.size == self.index_converter.total_n_genes, \
-            f'The number of noise count targets ({noise_targets_per_gene.size}) ' \
-            f'must match the number of genes ({self.index_converter.total_n_genes})'
+        assert noise_targets_per_gene.size == self.index_converter.total_n_genes, (
+            f"The number of noise count targets ({noise_targets_per_gene.size}) "
+            f"must match the number of genes ({self.index_converter.total_n_genes})"
+        )
 
         coo = noise_log_prob_coo.copy()  # we will be modifying values
 
         # First we need to compute the MAP to find out which direction to go.
         t = time.time()
-        map_dict = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo,
-                                               fun=MAP.torch_argmax,
-                                               device='cpu')
-        map_csr = self._estimation_array_to_csr(data=map_dict['result'],
-                                                m=map_dict['m'],
-                                                noise_offsets=noise_offsets)
-        logger.debug(f'{timestamp()} Computed initial MAP estimate')
-        logger.debug(f'{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec')
+        map_dict = apply_function_dense_chunks(
+            noise_log_prob_coo=noise_log_prob_coo, fun=MAP.torch_argmax, device="cpu"
+        )
+        map_csr = self._estimation_array_to_csr(data=map_dict["result"], m=map_dict["m"], noise_offsets=noise_offsets)
+        logger.debug(f"{timestamp()} Computed initial MAP estimate")
+        logger.debug(f"{timestamp()} Time for MAP calculation = {(time.time() - t):.2f} sec")
         map_noise_counts_per_gene = np.array(map_csr.sum(axis=0)).squeeze()
-        additional_noise_counts_per_gene = (noise_targets_per_gene
-                                            - map_noise_counts_per_gene).astype(int)
+        additional_noise_counts_per_gene = (noise_targets_per_gene - map_noise_counts_per_gene).astype(int)
         set_positive_genes = set(np.where(additional_noise_counts_per_gene > 0)[0])
         set_negative_genes = set(np.where(additional_noise_counts_per_gene < 0)[0])  # leave out exact matches
         abs_additional_noise_counts_per_gene = np.abs(additional_noise_counts_per_gene)
 
         # Determine which genes need to add and which need to subtract noise counts.
         n, g = self.index_converter.get_ng_indices(m_inds=coo.row)
-        df = pd.DataFrame(data={'m': coo.row,
-                                'n': n,
-                                'g': g,
-                                'c': coo.col,
-                                'log_prob': coo.data})
-        logger.debug(f'{timestamp()} Computing step directions')
-        df['positive_step_gene'] = df['g'].apply(lambda gene: gene in set_positive_genes)
-        df['negative_step_gene'] = df['g'].apply(lambda gene: gene in set_negative_genes)
-        df['step_direction'] = (df['positive_step_gene'].astype(int)
-                                - df['negative_step_gene'].astype(int))  # -1 or 1
-        logger.debug(f'{timestamp()} Step directions done')
+        df = pd.DataFrame(data={"m": coo.row, "n": n, "g": g, "c": coo.col, "log_prob": coo.data})
+        logger.debug(f"{timestamp()} Computing step directions")
+        df["positive_step_gene"] = df["g"].apply(lambda gene: gene in set_positive_genes)
+        df["negative_step_gene"] = df["g"].apply(lambda gene: gene in set_negative_genes)
+        df["step_direction"] = df["positive_step_gene"].astype(int) - df["negative_step_gene"].astype(int)  # -1 or 1
+        logger.debug(f"{timestamp()} Step directions done")
 
         if verbose:
-            pd.set_option('display.width', 120)
-            pd.set_option('display.max_columns', 20)
-            print(df, end='\n\n')
+            pd.set_option("display.width", 120)
+            pd.set_option("display.max_columns", 20)
+            print(df, end="\n\n")
 
         # Remove all 'm' entries corresponding to genes where target is met by MAP.
-        df = df[df['step_direction'] != 0]
+        df = df[df["step_direction"] != 0]
 
         # Now we mask out log probs (-np.inf) that represent steps in the wrong direction.
-        logger.debug(f'{timestamp()} Masking')
-        lookup_map_from_m = dict(zip(map_dict['m'], map_dict['result']))
-        df['map'] = df['m'].apply(lambda x: lookup_map_from_m[x])
-        df['mask'] = ((df['negative_step_gene'] & (df['c'] > df['map']))
-                      | (df['positive_step_gene'] & (df['c'] < df['map'])))  # keep MAP
-        df.loc[df['mask'], 'log_prob'] = -np.inf
-        logger.debug(f'{timestamp()} Masking done')
+        logger.debug(f"{timestamp()} Masking")
+        lookup_map_from_m = dict(zip(map_dict["m"], map_dict["result"]))
+        df["map"] = df["m"].apply(lambda x: lookup_map_from_m[x])
+        df["mask"] = (df["negative_step_gene"] & (df["c"] > df["map"])) | (
+            df["positive_step_gene"] & (df["c"] < df["map"])
+        )  # keep MAP
+        df.loc[df["mask"], "log_prob"] = -np.inf
+        logger.debug(f"{timestamp()} Masking done")
 
         # And we remove those entries.
-        df = df[~df['mask']]
-        df = df[[c for c in df.columns if (c != 'mask')]]
+        df = df[~df["mask"]]
+        df = df[[c for c in df.columns if (c != "mask")]]
 
         # Sort
-        logger.debug(f'{timestamp()} Sorting')
-        df = df.sort_values(by=['m', 'c'])
-        logger.debug(f'{timestamp()} Sorting done')
+        logger.debug(f"{timestamp()} Sorting")
+        df = df.sort_values(by=["m", "c"])
+        logger.debug(f"{timestamp()} Sorting done")
 
         if verbose:
-            print(df, end='\n\n')
+            print(df, end="\n\n")
 
         # Do diff for positive and negative separately, without grouping (faster)
-        df_positive_steps = df[df['step_direction'] == 1].copy()
-        df_negative_steps = df[df['step_direction'] == -1].copy()
+        df_positive_steps = df[df["step_direction"] == 1].copy()
+        df_negative_steps = df[df["step_direction"] == -1].copy()
 
-        logger.debug(f'{timestamp()} Computing deltas')
+        logger.debug(f"{timestamp()} Computing deltas")
         if len(df_positive_steps > 0):
-            df_positive_steps.loc[:, 'delta'] = df_positive_steps['log_prob'].diff(periods=1).apply(np.abs)
-            df_positive_steps.loc[df_positive_steps['c'] == df_positive_steps['map'], 'delta'] = np.nan
+            df_positive_steps.loc[:, "delta"] = df_positive_steps["log_prob"].diff(periods=1).apply(np.abs)
+            df_positive_steps.loc[df_positive_steps["c"] == df_positive_steps["map"], "delta"] = np.nan
         if len(df_negative_steps > 0):
-            df_negative_steps.loc[:, 'delta'] = df_negative_steps['log_prob'].diff(periods=-1).apply(np.abs)
-            df_negative_steps.loc[df_negative_steps['c'] == df_negative_steps['map'], 'delta'] = np.nan
+            df_negative_steps.loc[:, "delta"] = df_negative_steps["log_prob"].diff(periods=-1).apply(np.abs)
+            df_negative_steps.loc[df_negative_steps["c"] == df_negative_steps["map"], "delta"] = np.nan
         df = pd.concat([df_positive_steps, df_negative_steps], axis=0)
-        logger.debug(f'{timestamp()} Computing deltas done')
+        logger.debug(f"{timestamp()} Computing deltas done")
 
         if verbose:
-            print(df, end='\n\n')
+            print(df, end="\n\n")
 
         # if this is an empty dataframe, we are not doing anything here beyond MAP
         if len(df) == 0:
             return map_csr
 
         # Remove irrelevant entries: those with infinite delta.
-        df = df[df['delta'].apply(np.isfinite)]
+        df = df[df["delta"].apply(np.isfinite)]
 
         # if this is an empty dataframe, we are not doing anything here beyond MAP
         if len(df) == 0:
             return map_csr
 
         # How many additional noise counts ("steps") we will need for each gene.
-        logger.debug(f'{timestamp()} Computing nsmallest')
-        df['topk'] = df['g'].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
+        logger.debug(f"{timestamp()} Computing nsmallest")
+        df["topk"] = df["g"].apply(lambda gene: abs_additional_noise_counts_per_gene[gene])
 
         if verbose:
-            print(df, end='\n\n')
+            print(df, end="\n\n")
 
         # Now we want the smallest additional_noise_counts_per_gene deltas for each gene.
         # https://stackoverflow.com/questions/55179493/
-        df_out = df[['m', 'g', 'delta', 'topk']].groupby('g', group_keys=False).apply(
-            lambda x: x.nsmallest(x['topk'].iat[0], columns='delta')
+        df_out = (
+            df[["m", "g", "delta", "topk"]]
+            .groupby("g", group_keys=False)
+            .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"))
         )
-        logger.debug(f'{timestamp()} Computing nsmallest done')
+        logger.debug(f"{timestamp()} Computing nsmallest done")
 
         if verbose:
-            print(df_out, end='\n\n')
+            print(df_out, end="\n\n")
 
         # if this is an empty dataframe, we are not doing anything here beyond MAP
         if len(df_out) == 0:
@@ -697,20 +683,18 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
         # And the number by which to increment noise counts per entry 'm' is
         # now the number of times that each m value appears in this dataframe.
-        logger.debug(f'{timestamp()} Summarizing steps')
-        vc = df_out['m'].value_counts()
-        vc_df = pd.DataFrame(data={'m': vc.index, 'steps': vc.values})
-        step_direction_lookup_from_m = dict(zip(df['m'], df['step_direction']))
-        vc_df['step_direction'] = vc_df['m'].apply(lambda x: step_direction_lookup_from_m[x])
-        vc_df['counts'] = vc_df['steps'] * vc_df['step_direction']
-        steps_csr = self._estimation_array_to_csr(data=vc_df['counts'],
-                                                  m=vc_df['m'],
-                                                  noise_offsets=None)
-        logger.debug(f'{timestamp()} Summarizing steps done')
+        logger.debug(f"{timestamp()} Summarizing steps")
+        vc = df_out["m"].value_counts()
+        vc_df = pd.DataFrame(data={"m": vc.index, "steps": vc.values})
+        step_direction_lookup_from_m = dict(zip(df["m"], df["step_direction"]))
+        vc_df["step_direction"] = vc_df["m"].apply(lambda x: step_direction_lookup_from_m[x])
+        vc_df["counts"] = vc_df["steps"] * vc_df["step_direction"]
+        steps_csr = self._estimation_array_to_csr(data=vc_df["counts"], m=vc_df["m"], noise_offsets=None)
+        logger.debug(f"{timestamp()} Summarizing steps done")
 
         if verbose:
-            print(vc_df, end='\n\n')
-            print('MAP:')
+            print(vc_df, end="\n\n")
+            print("MAP:")
             print(map_csr.todense())
 
         # The final output is those tabulated steps added to the MAP.
@@ -718,9 +702,9 @@ class MultipleChoiceKnapsack(EstimationMethod):
         return map_csr + steps_csr
 
 
-def chunked_iterator(coo: sp.coo_matrix,
-                     max_dense_batch_size_GB: float = 1.) \
-        -> Generator[Tuple[sp.coo_matrix, np.ndarray], None, None]:
+def chunked_iterator(
+    coo: sp.coo_matrix, max_dense_batch_size_GB: float = 1.0
+) -> Generator[Tuple[sp.coo_matrix, np.ndarray, np.ndarray], None, None]:
     """Return an iterator which yields the full dataset in chunks.
 
     NOTE: Idea is to prevent memory overflow. The use case is for worst-case
@@ -760,11 +744,9 @@ def chunked_iterator(coo: sp.coo_matrix,
         yield (chunk_coo, unique_row_values, unique_col_values)
 
 
-def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
-                                fun: Callable[[torch.Tensor], torch.Tensor],
-                                device: str = 'cpu',
-                                **kwargs) \
-        -> Dict[str, np.ndarray]:
+def apply_function_dense_chunks(
+    noise_log_prob_coo: sp.coo_matrix, fun: Callable[..., torch.Tensor], device: str = "cpu", **kwargs
+) -> Dict[str, np.ndarray]:
     """Uses chunked_iterator to densify chunked portions of a COO sparse
     matrix and then applies a function to the dense chunks, keeping track
     of the results per row.
@@ -804,18 +786,20 @@ def apply_function_dense_chunks(noise_log_prob_coo: sp.coo_matrix,
             len_s = 1
         else:
             len_s = len(s)
-        m[a:(a + len_s)] = row
-        out[a:(a + len_s)] = s.detach().cpu().numpy()
+        m[a : (a + len_s)] = row
+        out[a : (a + len_s)] = s.detach().cpu().numpy()
         a = a + len_s
 
-    return {'m': m, 'result': out}
+    return {"m": m, "result": out}
 
 
-def pandas_grouped_apply(coo: sp.coo_matrix,
-                         fun: Callable[[pd.DataFrame], Union[int, float]],
-                         extra_data: Optional[Dict[str, np.ndarray]] = None,
-                         sort_first: bool = False,
-                         parallel: bool = False) -> Dict[str, np.array]:
+def pandas_grouped_apply(
+    coo: sp.coo_matrix,
+    fun: Callable[[pd.DataFrame], Union[int, float]],
+    extra_data: Optional[Dict[str, np.ndarray]] = None,
+    sort_first: bool = False,
+    parallel: bool = False,
+) -> Dict[str, np.ndarray]:
     """Apply function on a sparse COO format (noise log probs) to compute output
     noise counts using pandas groupby and apply operations on CPU.
 
@@ -837,24 +821,24 @@ def pandas_grouped_apply(coo: sp.coo_matrix,
     Returns:
         output_csr: The aggregated sparse matrix, in row format
     """
-    df = pd.DataFrame(data={'m': coo.row, 'c': coo.col, 'log_prob': coo.data})
+    df = pd.DataFrame(data={"m": coo.row, "c": coo.col, "log_prob": coo.data})
     if extra_data is not None:
         for k, v in extra_data.items():
             df[k] = v
     if sort_first:
-        df = df.sort_values(by=['m', 'c'], ascending=[True, True])
+        df = df.sort_values(by=["m", "c"], ascending=[True, True])
     if parallel:
-        m, result_per_m = _parallel_pandas_apply(df_grouped=df.groupby('m'), fun=fun)
+        m, result_per_m = _parallel_pandas_apply(df_grouped=df.groupby("m"), fun=fun)
     else:
-        df = df.groupby('m').apply(fun).reset_index()
-        m = df['m'].values
+        df = df.groupby("m").apply(fun).reset_index()
+        m = df["m"].values
         result_per_m = df[0].values
-    return {'m': m, 'result': result_per_m}
+    return {"m": m, "result": result_per_m}
 
 
-def _parallel_pandas_apply(df_grouped: pd.core.groupby.DataFrameGroupBy,
-                           fun: Callable[[pd.DataFrame], Union[int, float]])\
-        -> Tuple[np.ndarray, np.ndarray]:
+def _parallel_pandas_apply(
+    df_grouped: pd.core.groupby.DataFrameGroupBy, fun: Callable[[pd.DataFrame], Union[int, float]]
+) -> Tuple[np.ndarray, np.ndarray]:
     """Use multiprocessing to apply a function to a grouped dataframe in pandas.
 
     Args:
@@ -866,8 +850,7 @@ def _parallel_pandas_apply(df_grouped: pd.core.groupby.DataFrameGroupBy,
 
     NOTE: see https://stackoverflow.com/questions/26187759/parallelize-apply-after-pandas-groupby
     """
-    groupby_val, group_df_list = zip(*[(group_val, group_df)
-                                       for group_val, group_df in df_grouped])
+    groupby_val, group_df_list = zip(*[(group_val, group_df) for group_val, group_df in df_grouped])
     with mp.Pool(mp.cpu_count()) as p:
         output_list = p.map(fun, group_df_list)
     return np.array(groupby_val), np.array(output_list)
@@ -878,4 +861,4 @@ def _subset_coo(coo: sp.coo_matrix, logic: np.ndarray) -> sp.coo_matrix:
 
 
 def timestamp() -> str:
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

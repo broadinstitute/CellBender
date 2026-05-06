@@ -5,13 +5,12 @@ pandas
 pyro-ppl>=1.8.4
 torch
 matplotlib
-anndata>=0.7
-loompy
+anndata>=0.9
 ipython
 jupyter
 jupyter_contrib_nbextensions
-notebook<7.0.0
-nbconvert<7.0.0
+notebook
+nbconvert
 lxml_html_clean
 psutil
 dill>0.3.1

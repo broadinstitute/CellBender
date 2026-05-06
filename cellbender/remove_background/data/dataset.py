@@ -14,7 +14,7 @@ from cellbender.remove_background.data.priors import get_priors, \
 from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero, \
     overwrite_matrix_with_columns_from_another
 
-from typing import Dict, List, Optional, Iterable, Callable
+from typing import Any, Dict, List, Optional, Iterable, Callable
 import logging
 import argparse
 
@@ -85,7 +85,7 @@ class SingleCellRNACountsDataset:
         self.analyzed_barcode_inds = np.array([])  # Barcodes trained each epoch
         self.empty_barcode_inds = np.array([])  # Barcodes sampled randomly each epoch
         self.low_count_cutoff = low_count_threshold
-        self.data = None
+        self.data: dict | None = None
         self.gmm = None
         self.exclude_features = exclude_features
         self.model_name = model_name
@@ -93,7 +93,7 @@ class SingleCellRNACountsDataset:
         self.is_trimmed = False
         self.low_count_threshold = low_count_threshold
         self.ambient_counts_in_cells_low_limit = ambient_counts_in_cells_low_limit
-        self.priors = {}
+        self.priors: Dict[str, Any] = {}
         self.posterior = None
         self.fpr = fpr
 
@@ -102,7 +102,7 @@ class SingleCellRNACountsDataset:
 
         # Load the dataset.
         self.data = load_data(self.input_file)
-        self.analyzed_gene_logic = True
+        self.analyzed_gene_logic: np.ndarray | bool = True
 
         # Eliminate feature types not used in the analysis.
         self._exclude_feature_types()
@@ -133,7 +133,7 @@ class SingleCellRNACountsDataset:
                     # If this isn't getting recomputed next, recompute now
                     self.priors.update(
                         get_empty_count_given_expected_cells_and_total_droplets(
-                            umi_counts=counts, expected_cells=self.priors['expected_cells'],
+                            umi_counts=counts, expected_cells=int(self.priors['expected_cells']),
                             total_droplets=total_drops,
                         )
                     )
@@ -142,7 +142,7 @@ class SingleCellRNACountsDataset:
             self.priors['total_droplets'] = total_droplet_barcodes
             self.priors.update(
                 get_empty_count_given_expected_cells_and_total_droplets(
-                    umi_counts=counts, expected_cells=self.priors['expected_cells'],
+                    umi_counts=counts, expected_cells=int(self.priors['expected_cells']),
                     total_droplets=total_droplet_barcodes,
                 )
             )
@@ -239,6 +239,7 @@ class SingleCellRNACountsDataset:
         logger.info("Trimming features for inference.")
 
         # Get data matrix and barcode order that sorts barcodes by UMI count.
+        assert self.data is not None
         matrix = self.data['matrix']
 
         # Choose which genes to use based on their having nonzero counts.
@@ -251,8 +252,8 @@ class SingleCellRNACountsDataset:
 
         # Remove blacklisted genes.
         if len(gene_blacklist) > 0:
-            gene_blacklist = set(gene_blacklist)
-            inclusion_logic = np.array([g not in gene_blacklist
+            gene_blacklist_set = set(gene_blacklist)
+            inclusion_logic = np.array([g not in gene_blacklist_set
                                         for g in range(len(self.analyzed_gene_logic))])
             logger.info(f"Ignoring {np.logical_not(inclusion_logic).sum()} "
                         f"specified features.")
@@ -261,6 +262,7 @@ class SingleCellRNACountsDataset:
                 inclusion_logic,
             )
 
+        assert isinstance(self.analyzed_gene_logic, np.ndarray)
         if self.analyzed_gene_logic.sum() == 0:
             logger.warning("No features remain after eliminating zero-count "
                            "and ignored features. Terminating analysis.")
@@ -281,6 +283,7 @@ class SingleCellRNACountsDataset:
         assert len(self.priors.keys()) > 0, 'Run self.priors = get_priors() before ' \
                                             'self._trim_noiseless_features()'
 
+        assert self.data is not None
         # Find average counts per gene in empty droplets.
         count_matrix = self.data['matrix'][:, self.analyzed_gene_logic]
         counts = np.array(count_matrix.sum(axis=1)).squeeze()
@@ -403,6 +406,7 @@ class SingleCellRNACountsDataset:
     def _estimate_chi_ambient(self) -> Dict[str, torch.Tensor]:
         """Estimate chi_ambient and chi_bar"""
 
+        assert self.data is not None
         matrix = self.data['matrix'].tocsc()
         count_matrix = matrix[:, self.analyzed_gene_inds].tocsr()
         umi_counts = np.array(count_matrix.sum(axis=1)).squeeze()
@@ -411,16 +415,17 @@ class SingleCellRNACountsDataset:
         ep = np.finfo(np.float32).eps.item()  # small value
         empty_droplet_logic = ((umi_counts < self.priors['surely_empty_counts'])
                                & (umi_counts > self.low_count_cutoff))
-        chi_ambient = np.array(count_matrix[empty_droplet_logic, :].sum(axis=0)).squeeze() + ep
-        chi_ambient = torch.tensor(chi_ambient / chi_ambient.sum()).float()
-        chi_bar = np.array(count_matrix.sum(axis=0)).squeeze() + ep
-        chi_bar = torch.tensor(chi_bar / chi_bar.sum()).float()
+        chi_ambient_arr = np.array(count_matrix[empty_droplet_logic, :].sum(axis=0)).squeeze() + ep
+        chi_ambient: torch.Tensor = torch.tensor(chi_ambient_arr / chi_ambient_arr.sum()).float()
+        chi_bar_arr = np.array(count_matrix.sum(axis=0)).squeeze() + ep
+        chi_bar: torch.Tensor = torch.tensor(chi_bar_arr / chi_bar_arr.sum()).float()
 
         return {'chi_ambient': chi_ambient, 'chi_bar': chi_bar}
 
     def get_count_matrix(self) -> sp.csr_matrix:
         """Get the count matrix, trimmed if trimming has occurred."""
 
+        assert self.data is not None
         # Return the count matrix for selected barcodes and genes.
         trimmed_bc_matrix = self.data['matrix'][self.analyzed_barcode_inds,
                                                 :].tocsc()
@@ -430,6 +435,7 @@ class SingleCellRNACountsDataset:
     def get_count_matrix_empties(self) -> sp.csr_matrix:
         """Get the count matrix for empty drops, trimmed if possible."""
 
+        assert self.data is not None
         # Return the count matrix for selected barcodes and genes.
         trimmed_bc_matrix = self.data['matrix'][self.empty_barcode_inds,
                                                 :].tocsc()
@@ -439,6 +445,7 @@ class SingleCellRNACountsDataset:
     def get_count_matrix_all_barcodes(self) -> sp.csr_matrix:
         """Get the count matrix, trimming only genes, not barcodes."""
 
+        assert self.data is not None
         # Return the count matrix for selected barcodes and genes.
         trimmed_bc_matrix = self.data['matrix'].tocsc()
         trimmed_matrix = trimmed_bc_matrix[:, self.analyzed_gene_inds].tocsr()
@@ -449,7 +456,7 @@ class SingleCellRNACountsDataset:
                        batch_size: int = 200,
                        shuffle: bool = False,
                        analyzed_bcs_only: bool = True,
-                       sort_by: Optional[Callable[[sp.csr_matrix], float]] = None,
+                       sort_by: Callable[[sp.csr_matrix], np.ndarray] | None = None,
                        ) -> DataLoader:
         """Return a dataloader for the count matrix.
 
@@ -506,6 +513,7 @@ class SingleCellRNACountsDataset:
         """
 
         # Rescue the raw data for ignored features.
+        assert self.data is not None
         out = overwrite_matrix_with_columns_from_another(
             mat1=inferred_count_matrix,
             mat2=self.data['matrix'],

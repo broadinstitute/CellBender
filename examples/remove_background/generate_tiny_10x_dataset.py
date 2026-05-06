@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 
-import sys
 import os
+import sys
+
 import numpy as np
+
 from cellbender.remove_background.downstream import load_anndata_from_input
 
 dataset_name = "heart10k (CellRanger 3.0.0, v3 Chemistry)"
@@ -19,16 +21,18 @@ rng = np.random.RandomState(random_seed)
 
 
 if not os.path.exists(dataset_local_filename):
-
     print(f"Downloading {dataset_name}...")
     try:
-        os.system(f'wget -O {dataset_local_filename} {dataset_url}')
+        os.system(f"wget -O {dataset_local_filename} {dataset_url}")
 
     except Exception:
-        print(f"10x Genomics website is preventing an automatic download. Please visit "
-              f"https://www.10xgenomics.com/resources/datasets/10-k-heart-cells-from-an-e-18-mouse-v-3-chemistry-3-standard-3-0-0 "
-              f"in a browser and manually download 'Gene / cell matrix HDF5 (raw)' into "
-              f"this folder and re-run this script.")
+        print(
+            "10x Genomics website is preventing an automatic download. Please visit "
+            "https://www.10xgenomics.com/resources/datasets/"
+            "10-k-heart-cells-from-an-e-18-mouse-v-3-chemistry-3-standard-3-0-0 "
+            "in a browser and manually download 'Gene / cell matrix HDF5 (raw)' into "
+            "this folder and re-run this script."
+        )
         sys.exit()
 
 print("Loading the dataset...")
@@ -54,9 +58,11 @@ empty_indices = umi_sorted_barcode_indices[start_of_empties:last_barcode]
 
 # putative list of barcodes to keep
 cell_barcodes_to_keep_indices = np.asarray(cell_indices)[
-    rng.permutation(len(cell_indices))[:num_cell_barcodes_to_keep]].tolist()
+    rng.permutation(len(cell_indices))[:num_cell_barcodes_to_keep]
+].tolist()
 empty_barcodes_to_keep_indices = np.asarray(empty_indices)[
-    rng.permutation(len(empty_indices))[:num_empty_barcodes_to_keep]].tolist()
+    rng.permutation(len(empty_indices))[:num_empty_barcodes_to_keep]
+].tolist()
 barcodes_to_keep_indices = cell_barcodes_to_keep_indices + empty_barcodes_to_keep_indices
 
 # slice dataset on barcodes
@@ -72,7 +78,7 @@ print(f"Expected number of cells in the trimmed dataset: {num_cell_barcodes_to_k
 print(adata)
 
 # save
-output_file = 'tiny_raw_feature_bc_matrix.h5ad'
+output_file = "tiny_raw_feature_bc_matrix.h5ad"
 print(f"Saving the trimmed dataset as {output_file} ...")
 adata.write(output_file)
 

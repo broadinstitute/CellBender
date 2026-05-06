@@ -12,7 +12,11 @@ import torch
 import pyro
 import random
 import matplotlib.pyplot as plt
-from typing import List, Union, Dict, Optional
+from typing import TYPE_CHECKING, Any, List, Union, Dict, Optional, cast
+
+if TYPE_CHECKING:
+    import anndata
+    from cellbender.remove_background.model import RemoveBackgroundPyroModel
 
 
 if torch.cuda.is_available():
@@ -215,7 +219,7 @@ def generate_sample_dirichlet_dataset(
         cells_of_each_type: List[int] = [100, 100, 100],
         n_droplets: int = 5000,
         model_type: str = 'full',
-        dirichlet_alpha: Union[float, np.ndarray] = 0.05,
+        dirichlet_alpha: float | np.ndarray | None = 0.05,
         chi: Optional[np.ndarray] = None,
         chi_artificial_similarity: float = 0,
         vector_to_add_to_chi_ambient: Optional[np.ndarray] = None,
@@ -262,13 +266,14 @@ def generate_sample_dirichlet_dataset(
     # Draw gene expression profiles for each cell type.
     if chi is None:
         chi = np.zeros((n_cell_types, n_genes))
+        assert dirichlet_alpha is not None
         for i in range(chi.shape[0]):
             chi[i, :] = draw_random_chi(alpha=dirichlet_alpha, n_genes=n_genes).cpu().numpy()
             if i > 0:
                 # Make expression profiles similar (if chi_artificial_similarity > 0) via gating.
                 chi[i, :] = chi[i, :] * (1 - chi_artificial_similarity) + chi[0, :] * chi_artificial_similarity
     else:
-        dirichlet_alpha = ['None: chi was input to generate_sample_dataset()']
+        dirichlet_alpha = None  # chi was provided
 
     # Get chi_ambient: a weighted average of expression, possibly with extra.
     if chi_ambient is None:
@@ -284,6 +289,7 @@ def generate_sample_dirichlet_dataset(
                   'Ignoring `vector_to_add_to_chi_ambient` and using `chi_ambient` '
                   'as provided.')
     chi_ambient = chi_ambient / chi_ambient.sum()
+    assert chi_ambient is not None
 
     c_real = np.zeros((n_droplets, n_genes))
     c_bkg = np.zeros((n_droplets, n_genes))
@@ -371,8 +377,8 @@ def generate_sample_model_dataset(
         cells_of_each_type: List[int] = [100, 100, 100],
         n_droplets: int = 5000,
         model_type: str = 'full',
-        dirichlet_alpha: Union[float, np.ndarray] = 0.05,
-        chi: Optional[np.ndarray] = None,
+        dirichlet_alpha: float | np.ndarray | None = 0.05,
+        chi: Optional[torch.Tensor] = None,
         chi_artificial_similarity: float = 0,
         vector_to_add_to_chi_ambient: Optional[np.ndarray] = None,
         cell_mean_umi: List[int] = [5000],
@@ -418,30 +424,33 @@ def generate_sample_model_dataset(
     # Draw gene expression profiles for each cell type.
     if chi is None:
         chi = torch.zeros((n_cell_types, n_genes)).to(DEVICE)
+        assert dirichlet_alpha is not None
         for i in range(chi.shape[0]):
             chi[i, :] = draw_random_chi(alpha=dirichlet_alpha, n_genes=n_genes)
             if i > 0:
                 # Make expression profiles similar (if chi_artificial_similarity > 0) via gating.
                 chi[i, :] = chi[i, :] * (1 - chi_artificial_similarity) + chi[0, :] * chi_artificial_similarity
     else:
-        dirichlet_alpha = ['None: chi was input to generate_sample_model_dataset()']
+        dirichlet_alpha = None  # chi was provided
 
     # Get chi_ambient: a weighted average of expression, possibly with extra.
-    chi_ambient = torch.zeros(n_genes).to(DEVICE)
+    chi_ambient: torch.Tensor = torch.zeros(n_genes).to(DEVICE)
     for i in range(n_cell_types):
         chi_ambient = chi_ambient + chi[i, :] * cells_of_each_type[i] * cell_mean_umi[i]
     if vector_to_add_to_chi_ambient is None:
-        vector_to_add_to_chi_ambient = torch.zeros(n_genes)
-    chi_ambient = chi_ambient + vector_to_add_to_chi_ambient
-    chi_ambient = chi_ambient / chi_ambient.sum()
+        extra_vec: torch.Tensor = torch.zeros(n_genes)
+    else:
+        extra_vec = torch.tensor(vector_to_add_to_chi_ambient, dtype=torch.float32).to(DEVICE)
+    chi_ambient = cast(torch.Tensor, chi_ambient + extra_vec)
+    chi_ambient = (chi_ambient / chi_ambient.sum()).to(DEVICE)
 
-    c_real = torch.zeros((n_droplets, n_genes)).to(DEVICE)
-    c_bkg = torch.zeros((n_droplets, n_genes)).to(DEVICE)
-    labels = torch.zeros(n_droplets).to(DEVICE)
-    epsilon = torch.zeros(n_droplets).to(DEVICE)
-    rho = torch.zeros(n_droplets).to(DEVICE)
-    d_cell = torch.zeros(n_droplets).to(DEVICE)
-    d_empty = torch.zeros(n_droplets).to(DEVICE)
+    c_real: torch.Tensor = torch.zeros((n_droplets, n_genes)).to(DEVICE)
+    c_bkg: torch.Tensor = torch.zeros((n_droplets, n_genes)).to(DEVICE)
+    labels: torch.Tensor = torch.zeros(n_droplets).to(DEVICE)
+    epsilon: torch.Tensor = torch.zeros(n_droplets).to(DEVICE)
+    rho: torch.Tensor = torch.zeros(n_droplets).to(DEVICE)
+    d_cell: torch.Tensor = torch.zeros(n_droplets).to(DEVICE)
+    d_empty: torch.Tensor = torch.zeros(n_droplets).to(DEVICE)
 
     # Sample counts from cell-containing droplets.
     i = 0
@@ -496,12 +505,13 @@ def generate_sample_model_dataset(
     counts_true = sp.csr_matrix(c_real.cpu().numpy(), shape=c_real.shape, dtype=int)
     counts_bkg = sp.csr_matrix(c_bkg.cpu().numpy(), shape=c_bkg.shape, dtype=int)
 
+    assert chi is not None
     return {'counts_true': counts_true,
             'counts_bkg': counts_bkg,
             'barcodes': np.array([f'bc{n:06d}' for n in np.arange(n_droplets)]),
             'gene_names': np.array([f'g{n:05d}' for n in np.arange(n_genes)]),
-            'chi': {str(i + 1): chi[i, :].cpu().numpy() for i in range(chi.shape[0])},
-            'chi_ambient': chi_ambient.cpu().numpy(),
+            'chi': {str(i + 1): cast(torch.Tensor, chi[i, :]).cpu().numpy() for i in range(chi.shape[0])},
+            'chi_ambient': chi_ambient.cpu().numpy() if isinstance(chi_ambient, torch.Tensor) else chi_ambient,
             'droplet_labels': labels.int().cpu().numpy(),
             'd_cell': d_cell.cpu().numpy(),
             'd_empty': d_empty.cpu().numpy(),
@@ -517,7 +527,7 @@ def generate_sample_model_dataset(
             'model': [model_type]}
 
 
-def draw_random_chi(alpha: float = 1.,
+def draw_random_chi(alpha: float | np.ndarray = 1.,
                     n_genes: int = 10000) -> torch.Tensor:
     """Sample a gene expression vector, chi, from a Dirichlet prior.
     Args:
@@ -534,7 +544,7 @@ def draw_random_chi(alpha: float = 1.,
     assert n_genes > 0, "Number of genes, n_genes, must be > 0."
 
     # Draw gene expression from a Dirichlet distribution.
-    chi = torch.distributions.Dirichlet(alpha * torch.ones(n_genes).to(DEVICE)).sample().squeeze()
+    chi = torch.distributions.Dirichlet(torch.as_tensor(alpha, dtype=torch.float32) * torch.ones(n_genes).to(DEVICE)).sample().squeeze()
 
     return chi
 
@@ -560,12 +570,14 @@ def sample_from_inferred_model(num: int,
     model_trace = pyro.poutine.trace(tracing_model).get_trace(data)
 
     # Get outputs of model (mu, alpha, lambda).
-    model_output = model_trace.nodes['_RETURN']['value']
+    assert model_trace.nodes is not None
+    nodes: Dict[str, Any] = model_trace.nodes
+    model_output = nodes['_RETURN']['value']
 
     # Get traced parameters.
-    params = {name: (model_trace.nodes[name]['value'].unconstrained()
-                     if (model_trace.nodes[name]['type'] == 'param')
-                     else model_trace.nodes[name]['value'])
+    params = {name: (nodes[name]['value'].unconstrained()
+                     if (nodes[name]['type'] == 'param')
+                     else nodes[name]['value'])
               for name in ['chi'] + model_trace.param_nodes + model_trace.stochastic_nodes
               if (not ('$$$' in name) and name not in do_list)}  # the do-samples are dummies
 
@@ -805,7 +817,7 @@ def sample_from_dirichlet_model(num: int,
 
 
 def get_dataset_dict_as_anndata(
-        sample_dataset: Dict[str, Union[float, np.ndarray, sp.csr_matrix]]
+        sample_dataset: Dict[str, Any]
 ) -> 'anndata.AnnData':
     """Return a simulated dataset as an AnnData object."""
 
@@ -838,7 +850,7 @@ def get_dataset_dict_as_anndata(
 
 
 def write_simulated_data_to_h5(output_file: str,
-                               d: Dict[str, Union[float, np.ndarray, sp.csr_matrix]],
+                               d: Dict[str, Any],
                                cellranger_version: int = 3) -> bool:
     """Helper function to write the full (noisy) simulate dataset to an H5 file.
 
@@ -865,7 +877,7 @@ def write_simulated_data_to_h5(output_file: str,
 
 
 def write_simulated_truth_to_h5(output_file: str,
-                                d: Dict[str, Union[float, np.ndarray, sp.csr_matrix]],
+                                d: Dict[str, Any],
                                 cellranger_version: int = 3) -> bool:
     """Helper function to write the full (noisy) simulate dataset to an H5 file.
 

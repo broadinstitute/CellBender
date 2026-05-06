@@ -4,26 +4,23 @@ Parses arguments and determines which tool should be called.
 
 """
 
-import sys
-import os
 import argparse
-from abc import ABC, abstractmethod
-from typing import Dict
 import importlib
-import codecs
+import sys
+from abc import ABC, abstractmethod
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _importlib_version
+from typing import Dict
 
 # New tools should be added to this list.
-TOOL_NAME_LIST = ['remove-background']
-
-
-def read(rel_path):
-    here = os.path.abspath(os.path.dirname(__file__))
-    with codecs.open(os.path.join(here, rel_path), 'r') as fp:
-        return fp.read()
+TOOL_NAME_LIST = ["remove-background"]
 
 
 def get_version() -> str:
-    return read('VERSION.txt').splitlines()[0]
+    try:
+        return _importlib_version("cellbender")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 class AbstractCLI(ABC):
@@ -42,7 +39,7 @@ class AbstractCLI(ABC):
 
     @staticmethod
     @abstractmethod
-    def validate_args(parser: argparse) -> argparse.Namespace:
+    def validate_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
         """Do tool-specific argument validation, returning args."""
         pass
 
@@ -55,14 +52,14 @@ class AbstractCLI(ABC):
 
 def generate_cli_dictionary() -> Dict[str, AbstractCLI]:
     # Add the tool-specific arguments using sub-parsers.
-    cli_dict = dict(keys=TOOL_NAME_LIST)
+    cli_dict: Dict[str, AbstractCLI] = {}
     for tool_name in TOOL_NAME_LIST:
         # Note: tool name contains a dash, while folder name uses an underscore.
         # Generate the name of the module that contains the tool.
         module_cli_str_list = ["cellbender", tool_name.replace("-", "_"), "cli"]
 
         # Import the module.
-        module_cli = importlib.import_module('.'.join(module_cli_str_list))
+        module_cli = importlib.import_module(".".join(module_cli_str_list))
 
         # Note: the module must have a file named cli.py in the main
         # directory, containing a class named CLI, which implements AbstractCLI.
@@ -76,21 +73,19 @@ def get_populated_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cellbender",
         description="CellBender is a software package for eliminating technical "
-                    "artifacts from high-throughput single-cell RNA sequencing "
-                    "(scRNA-seq) data.")
+        "artifacts from high-throughput single-cell RNA sequencing "
+        "(scRNA-seq) data.",
+    )
 
     # Add the ability to display the version.
-    parser.add_argument('-v', '--version', action='version', version=get_version())
+    parser.add_argument("-v", "--version", action="version", version=get_version())
 
     # Declare the existence of sub-parsers.
-    subparsers = parser.add_subparsers(
-        title="sub-commands",
-        description="valid cellbender commands",
-        dest="tool")
+    subparsers = parser.add_subparsers(title="sub-commands", description="valid cellbender commands", dest="tool")
 
     for tool_name in TOOL_NAME_LIST:
         module_argparse_str_list = ["cellbender", tool_name.replace("-", "_"), "argparser"]
-        module_argparse = importlib.import_module('.'.join(module_argparse_str_list))
+        module_argparse = importlib.import_module(".".join(module_argparse_str_list))
         subparsers = module_argparse.add_subparser_args(subparsers)
 
     return parser
@@ -118,11 +113,10 @@ def main():
         cli_dict[args.tool].run(args)
 
     else:
-
         parser.print_help()
 
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

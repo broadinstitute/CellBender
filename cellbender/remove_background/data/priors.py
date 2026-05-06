@@ -6,7 +6,7 @@ from scipy.stats import gaussian_kde
 
 from cellbender.remove_background import consts
 
-from typing import Dict, Tuple, Union
+from typing import Any, Dict, Tuple, Union
 import logging
 
 
@@ -89,11 +89,11 @@ def _peak_density_given_cutoff(umi_counts: np.ndarray,
     # resample them: the magic of looking at a log log plot
     n_putative_cells = (umi_counts > cell_count_low_limit).sum()
     n_putative_empties = len(noncell_counts)
-    inds = np.logspace(np.log10(n_putative_cells),
-                       np.log10(n_putative_cells + n_putative_empties),
-                       num=1000,
-                       base=10)
-    inds = [max(0, min(int(ind - n_putative_cells), len(noncell_counts) - 1)) for ind in inds]
+    inds_array = np.logspace(np.log10(n_putative_cells),
+                             np.log10(n_putative_cells + n_putative_empties),
+                             num=1000,
+                             base=10)
+    inds: list[int] = [max(0, min(int(ind - n_putative_cells), len(noncell_counts) - 1)) for ind in inds_array]
 
     noncell_counts = np.sort(noncell_counts)[::-1][inds]
 
@@ -221,8 +221,8 @@ def get_cell_count_empty_count(umi_counts: np.ndarray,
     # initial conditions for the loop
     # start low, but have a failsafe (especially for simulated data)
     cutoff = max(0.1 * cell_count_low_limit, umi_counts_for_kde[-100])
-    empty_count_prior = -100
-    empty_count_upper_limit = None
+    empty_count_prior: float = -100.0
+    empty_count_upper_limit: float = 0.0
     delta = np.inf
     a = 0
 
@@ -267,8 +267,8 @@ def get_expected_cells_and_total_droplets(umi_counts: np.ndarray,
                                           cell_counts: float,
                                           empty_counts: float,
                                           empty_count_upper_limit: float,
-                                          max_empties: int = consts.MAX_EMPTIES_TO_INCLUDE) \
-        -> Dict[str, int]:
+                                          max_empties: int | float = consts.MAX_EMPTIES_TO_INCLUDE) \
+        -> Dict[str, float]:
     """Obtain priors on cell counts and empty droplet counts from a UMI curve
     using heuristics, and without applying any other prior information.
 
@@ -313,7 +313,7 @@ def get_expected_cells_and_total_droplets(umi_counts: np.ndarray,
 def get_priors(umi_counts: np.ndarray,
                low_count_threshold: float,
                max_total_droplets: int = consts.MAX_TOTAL_DROPLETS_GUESSED) \
-        -> Dict[str, Union[int, float]]:
+        -> Dict[str, Any]:
     """Get all priors using get_cell_count_empty_count() and
     get_expected_cells_and_total_droplets(), employing a failsafe if
     total_droplets is improbably large.
