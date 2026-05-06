@@ -7,8 +7,7 @@ torch
 matplotlib
 anndata>=0.9
 ipython
-jupyter
-notebook
+ipykernel
 nbconvert
 lxml_html_clean
 psutil
