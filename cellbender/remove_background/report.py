@@ -881,7 +881,7 @@ def plot_counts_and_probs_per_cell(adata, input_layer_key="raw"):
     plt.ylabel("Unique UMI counts" + ("\n(for features analyzed by CellBender)" if limit_to_features_analyzed else ""))
     plt.legend(loc="lower left", title="UMI counts")
     plt.gca().twinx()
-    plt.plot(adata.obs["cell_probability"][order].values, ".", ms=2, alpha=0.2, color="red")
+    plt.plot(adata.obs["cell_probability"].iloc[order].values, ".", ms=2, alpha=0.2, color="red")
     plt.ylabel("Inferred cell probability", color="red")
     plt.yticks([0, 0.25, 0.5, 0.75, 1.0], color="red")
     plt.ylim([-0.05, 1.05])
