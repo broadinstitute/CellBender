@@ -59,3 +59,7 @@ def test_full_run(tmpdir_factory, h5_v3_file, cuda):
 
     # ensure there are no negative count matrix entries in the output
     assert np.all(adata.X.data >= 0), "Negative count matrix entries in output"
+
+    # ensure the HTML report was created
+    report_file = str(filename)[:-3] + "_report.html"
+    assert os.path.exists(report_file), f"HTML report was not created at {report_file}"
