@@ -29,6 +29,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          ref: ${{ steps.version.outputs.value }}
           fetch-depth: 0  # required for setuptools-git-versioning to read tags
 
       - name: Authenticate to Google Cloud
