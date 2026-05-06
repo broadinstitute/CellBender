@@ -1750,32 +1750,18 @@ def _set_legend_dot_size(lgnd, size: int):
     Just give up and move on if it doesn't work.
     I know this is a bit ridiculous but so is matplotlib.
     """
-    for h in lgnd.legendHandles:
-        worked = False
-        try:
-            h._legmarker.set_markersize(size)
-            worked = True
-        except AttributeError:
-            pass
-        if worked:
-            continue
+    handles = lgnd.legend_handles if hasattr(lgnd, "legend_handles") else lgnd.legendHandles
+    for h in handles:
+        # PathCollection (scatter plots)
         try:
             h.set_sizes([size])
-            worked = True
+            continue
         except AttributeError:
             pass
-        if worked:
-            continue
-        try:
-            h._sizes = [size]
-            worked = True
-        except AttributeError:
-            pass
-        if worked:
-            continue
+        # Line2D (line/marker plots)
         try:
             h.set_markersize(size)
-            worked = True
+            continue
         except AttributeError:
             pass
 
