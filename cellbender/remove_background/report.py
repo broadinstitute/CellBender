@@ -1717,8 +1717,8 @@ def mixed_species_plots(
         for genome2 in genomes[(i + 1) :]:
             plt.figure(figsize=(5, 5))
             for k in [input_layer_key, output_layer_key]:
-                x = np.array(adata.layers[k][:, (adata.var["genome"] == genome1)].sum(axis=1)).squeeze()
-                y = np.array(adata.layers[k][:, (adata.var["genome"] == genome2)].sum(axis=1)).squeeze()
+                x = np.array(adata.layers[k][:, (adata.var["genome"].values == genome1)].sum(axis=1)).squeeze()
+                y = np.array(adata.layers[k][:, (adata.var["genome"].values == genome2)].sum(axis=1)).squeeze()
                 plt.plot(x + 1, y + 1, ".", ms=2, label=k, alpha=0.3, color="k" if (k == input_layer_key) else "r")
                 x = x[cells]
                 y = y[cells]
