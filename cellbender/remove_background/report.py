@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import subprocess
+import warnings
 from typing import Any, Dict
 
 import matplotlib.pyplot as plt
@@ -23,12 +24,16 @@ from cellbender.remove_background.downstream import (
 )
 
 logger = logging.getLogger("cellbender")
-warnings: list[str] = []
+report_warnings: list[str] = []
 TIMEOUT = 1200  # twenty minutes should always be way more than enough
 
 # counteract an error when I run locally
 # https://stackoverflow.com/questions/53014306/error-15-initializing-libiomp5-dylib-but-found-libiomp5-dylib-already-initial
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
+
+
+# ignore a specific dtype FutureWarning, I think from anndata
+warnings.filterwarnings("ignore", message="The dtype argument is deprecated and will be removed in late 2024.")
 
 
 def run_notebook_str(file):
@@ -96,8 +101,8 @@ def generate_summary_plots(
 
     """
 
-    global warnings
-    warnings = []
+    global report_warnings
+    report_warnings = []
 
     display(Markdown(f"### CellBender version {get_version()}"))
     display(Markdown(str(datetime.datetime.now()).split(".")[0]))
@@ -366,7 +371,7 @@ def generate_summary_plots(
         )
         if isinstance(adata.uns["target_false_positive_rate"][0], np.float64):
             if true_fpr > adata.uns["target_false_positive_rate"][0]:
-                warnings.append("FPR exceeds target FPR.")
+                report_warnings.append("FPR exceeds target FPR.")
                 display(
                     Markdown(
                         f"WARNING: FPR of {true_fpr:.4f} exceeds target FPR of "
@@ -380,10 +385,10 @@ def generate_summary_plots(
                 )
 
     display(Markdown("# Summary of warnings:"))
-    if len(warnings) == 0:
+    if len(report_warnings) == 0:
         display(Markdown("None."))
     else:
-        for warning in warnings:
+        for warning in report_warnings:
             display(Markdown(warning))
 
 
@@ -398,7 +403,7 @@ def plot_input_umi_curve(inputfile):
 
 
 def assess_overall_count_removal(adata, raw_full_adata, input_layer_key="raw", out_key="cellbender"):
-    global warnings
+    global report_warnings
     cells = adata.obs["cell_probability"] > 0.5
     initial_counts = adata.layers[input_layer_key][cells.values].sum()
     removed_counts = initial_counts - adata.layers[out_key][cells.values].sum()
@@ -501,12 +506,12 @@ def assess_overall_count_removal(adata, raw_full_adata, input_layer_key="raw", o
             )
     elif removed_percentage - expected_percentage > 5:
         display(Markdown("The algorithm seems to have removed more overall counts than would be naively expected."))
-        warnings.append(
+        report_warnings.append(
             "Algorithm removed more counts overall than naive expectations.",
         )
     elif expected_percentage - removed_percentage > 5:
         display(Markdown("The algorithm seems to have removed fewer overall counts than would be naively expected."))
-        warnings.append(
+        report_warnings.append(
             "Algorithm removed fewer counts overall than naive expectations.",
         )
 
@@ -514,7 +519,7 @@ def assess_overall_count_removal(adata, raw_full_adata, input_layer_key="raw", o
 def assess_learning_curve(
     adata, spike_size: float = 0.5, deviation_size: float = 0.25, monotonicity_cutoff: float = 0.1
 ):
-    global warnings
+    global report_warnings
     display(Markdown("## Assessing convergence of the algorithm"))
     plot_learning_curve(adata)
     if "learning_curve_train_elbo" not in adata.uns.keys():
@@ -542,7 +547,7 @@ def assess_learning_curve(
 
     if adata.uns["learning_curve_train_epoch"][-1] < 50:
         display(Markdown("Short run.  Will not analyze the learning curve."))
-        warnings.append(f"Short run of only {adata.uns['learning_curve_train_epoch'][-1]} epochs")
+        report_warnings.append(f"Short run of only {adata.uns['learning_curve_train_epoch'][-1]} epochs")
         return
 
     train_elbo_min_max = np.percentile(adata.uns["learning_curve_train_elbo"], q=[5, 95])
@@ -607,10 +612,10 @@ def assess_learning_curve(
 
     display(Markdown("**Automated assessment** --------"))
     if large_spikes_in_train:
-        warnings.append("Large spikes in training ELBO.")
+        report_warnings.append("Large spikes in training ELBO.")
         display(Markdown("- *WARNING*: Large spikes detected in the training ELBO."))
     if large_deviation_in_train:
-        warnings.append("Large deviation in training ELBO from max value late in learning.")
+        report_warnings.append("Large deviation in training ELBO from max value late in learning.")
         display(
             Markdown(
                 "- *WARNING*: The training ELBO deviates quite a bit from "
@@ -618,10 +623,10 @@ def assess_learning_curve(
             )
         )
     if low_end_in_train:
-        warnings.append("Large deviation in training ELBO from max value at end.")
+        report_warnings.append("Large deviation in training ELBO from max value at end.")
         display(Markdown("- The training ELBO deviates quite a bit from the max value at the last epoch."))
     if non_monotonic:
-        warnings.append("Non-monotonic training ELBO.")
+        report_warnings.append("Non-monotonic training ELBO.")
         display(
             Markdown(
                 "- We typically expect to see the training ELBO increase almost "
@@ -630,7 +635,7 @@ def assess_learning_curve(
             )
         )
     if backtracking:
-        warnings.append("Back-tracking in training ELBO.")
+        report_warnings.append("Back-tracking in training ELBO.")
         display(
             Markdown(
                 "- We typically expect to see the training ELBO increase almost "
@@ -640,7 +645,7 @@ def assess_learning_curve(
             )
         )
     if runaway_test:
-        warnings.append("Final test ELBO is much lower than the max test ELBO.")
+        report_warnings.append("Final test ELBO is much lower than the max test ELBO.")
         display(
             Markdown(
                 "- We hope to see the test ELBO follow the training ELBO, "
@@ -652,7 +657,7 @@ def assess_learning_curve(
             )
         )
     if non_convergence:
-        warnings.append("Non-convergence of training ELBO.")
+        report_warnings.append("Non-convergence of training ELBO.")
         display(
             Markdown(
                 "- We typically expect to see the training ELBO come to a "
@@ -731,7 +736,7 @@ def plot_learning_curve(adata):
 
 def assess_count_removal_per_gene(adata, raw_full_adata, input_layer_key="raw", r_squared_cutoff=0.5, extended=True):
 
-    global warnings
+    global report_warnings
     display(Markdown("## Examine count removal per gene"))
 
     # how well does it correlate with our expectation about the ambient RNA profile?
@@ -807,7 +812,7 @@ def assess_count_removal_per_gene(adata, raw_full_adata, input_layer_key="raw", 
     if r_squared > r_squared_cutoff:
         display(Markdown("This meets expectations."))
     else:
-        warnings.append(
+        report_warnings.append(
             "Per-gene removal does not closely match a naive estimate "
             "of ambient RNA from empty droplets.  Does it look like "
             "CellBender correctly identified the empty droplets?"
@@ -837,7 +842,7 @@ def assess_count_removal_per_gene(adata, raw_full_adata, input_layer_key="raw", 
     for g in adata.var[
         (adata.var[f"n_{input_layer_key}_cells"] > genecount_lowlim) & (adata.var["fraction_removed"] > 0.8)
     ].index:
-        warnings.append(f"Expression of gene {g} decreases quite a bit")
+        report_warnings.append(f"Expression of gene {g} decreases quite a bit")
         display(
             Markdown(
                 f"**WARNING**: The expression of the highly-expressed "
@@ -881,7 +886,7 @@ def plot_counts_and_probs_per_cell(adata, input_layer_key="raw"):
     plt.ylabel("Unique UMI counts" + ("\n(for features analyzed by CellBender)" if limit_to_features_analyzed else ""))
     plt.legend(loc="lower left", title="UMI counts")
     plt.gca().twinx()
-    plt.plot(adata.obs["cell_probability"][order].values, ".", ms=2, alpha=0.2, color="red")
+    plt.plot(adata.obs["cell_probability"].iloc[order].values, ".", ms=2, alpha=0.2, color="red")
     plt.ylabel("Inferred cell probability", color="red")
     plt.yticks([0, 0.25, 0.5, 0.75, 1.0], color="red")
     plt.ylim([-0.05, 1.05])
@@ -1140,15 +1145,15 @@ def show_gene_expression_before_and_after(adata, input_layer_key: str = "raw", n
 
 def plot_gene_expression_pca(adata, key="cellbender_embedding", input_layer_key="raw", extended=True):
 
-    cells = adata.obs["cell_probability"] > 0.5
+    cells = (adata.obs["cell_probability"] > 0.5).values
     adata.obsm["X_pca"] = pca_2d(adata.obsm[key]).detach().numpy()
 
     # plot z PCA colored by latent size
-    sizeorder = np.argsort(adata.obs["cell_size"][cells])
+    sizeorder = np.argsort(adata.obs["cell_size"].iloc[cells])
     s = plt.scatter(
         x=adata.obsm["X_pca"][:, 0][cells][sizeorder],
         y=adata.obsm["X_pca"][:, 1][cells][sizeorder],
-        c=np.log10(adata.obs["cell_size"][cells][sizeorder]),
+        c=np.log10(adata.obs["cell_size"].iloc[cells][sizeorder]),
         s=2,
         cmap="brg",
         alpha=0.5,
@@ -1717,8 +1722,8 @@ def mixed_species_plots(
         for genome2 in genomes[(i + 1) :]:
             plt.figure(figsize=(5, 5))
             for k in [input_layer_key, output_layer_key]:
-                x = np.array(adata.layers[k][:, (adata.var["genome"] == genome1)].sum(axis=1)).squeeze()
-                y = np.array(adata.layers[k][:, (adata.var["genome"] == genome2)].sum(axis=1)).squeeze()
+                x = np.array(adata.layers[k][:, (adata.var["genome"].values == genome1)].sum(axis=1)).squeeze()
+                y = np.array(adata.layers[k][:, (adata.var["genome"].values == genome2)].sum(axis=1)).squeeze()
                 plt.plot(x + 1, y + 1, ".", ms=2, label=k, alpha=0.3, color="k" if (k == input_layer_key) else "r")
                 x = x[cells]
                 y = y[cells]
@@ -1745,32 +1750,18 @@ def _set_legend_dot_size(lgnd, size: int):
     Just give up and move on if it doesn't work.
     I know this is a bit ridiculous but so is matplotlib.
     """
-    for h in lgnd.legendHandles:
-        worked = False
-        try:
-            h._legmarker.set_markersize(size)
-            worked = True
-        except AttributeError:
-            pass
-        if worked:
-            continue
+    handles = lgnd.legend_handles if hasattr(lgnd, "legend_handles") else lgnd.legendHandles
+    for h in handles:
+        # PathCollection (scatter plots)
         try:
             h.set_sizes([size])
-            worked = True
+            continue
         except AttributeError:
             pass
-        if worked:
-            continue
-        try:
-            h._sizes = [size]
-            worked = True
-        except AttributeError:
-            pass
-        if worked:
-            continue
+        # Line2D (line/marker plots)
         try:
             h.set_markersize(size)
-            worked = True
+            continue
         except AttributeError:
             pass
 
