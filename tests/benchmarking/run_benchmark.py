@@ -212,8 +212,6 @@ if __name__ == "__main__":
                 this_dir,
                 "..",
                 "..",
-                "..",
-                "..",
                 "wdl",
                 "cellbender_remove_background.wdl",
             )
