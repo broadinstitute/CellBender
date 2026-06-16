@@ -26,7 +26,7 @@ packages you may have installed.
 
 .. code-block:: console
 
-  $ conda create -n cellbender python=3.9
+  $ conda create -n cellbender python=3.12
   $ conda activate cellbender
   (cellbender) $ pip install cellbender
 
@@ -38,7 +38,7 @@ Create a conda environment and activate it:
 
 .. code-block:: console
 
-  $ conda create -n cellbender python=3.9
+  $ conda create -n cellbender python=3.12
   $ conda activate cellbender
 
 Install the `pytables <https://www.pytables.org>`_ module:
@@ -87,7 +87,7 @@ A GPU-enabled docker image is available from the Google Container Registry (GCR)
 
 Older versions are available at the same location, for example as
 
-``us.gcr.io/broad-dsde-methods/cellbender:0.2.0``
+``us.gcr.io/broad-dsde-methods/cellbender:0.3.2``
 
 
 Terra Workflow

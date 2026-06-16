@@ -11,6 +11,12 @@ edge case bug fixes, speedups, and small new features might bump up the last
 digit of the version number. For example, the difference between 0.2.1 and 0.2.0
 represents this kind of small change.
 
+Version 0.4.0
+-------------
+
+Modernization of the codebase to make it compatible with python 3.10+ and modern 
+versions of pytorch and pyro. This version does not introduce any changes in the 
+algorithm or the output, but it should be more robust and easier to maintain.
 
 Version 0.3.2
 -------------
@@ -183,3 +189,12 @@ v0.3.2
 
 This appears identical to v0.3.0, as the changes were intended to fix bugs and 
 reduce memory footprint.
+
+v0.4.0
+~~~~~~
+
+.. image:: /_static/remove_background/v0.4.0_hgmm.png
+   :width: 750 px
+
+This appears identical to v0.3.2 and v0.3.0, as the changes were intended to upgrade 
+python and software dependencies.
