@@ -190,11 +190,11 @@ v0.3.2
 This appears identical to v0.3.0, as the changes were intended to fix bugs and 
 reduce memory footprint.
 
-v0.4.0
-~~~~~~
+.. v0.4.0
+.. ~~~~~~
 
-.. image:: /_static/remove_background/v0.4.0_hgmm.png
-   :width: 750 px
+.. .. image:: /_static/remove_background/v0.4.0_hgmm.png
+..    :width: 750 px
 
-This appears identical to v0.3.2 and v0.3.0, as the changes were intended to upgrade 
-python and software dependencies.
+.. This appears identical to v0.3.2 and v0.3.0, as the changes were intended to upgrade 
+.. python and software dependencies.
