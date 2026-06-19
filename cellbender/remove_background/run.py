@@ -26,7 +26,8 @@ from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
-from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, SingleSample, ThresholdCDF
+from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, MultipleChoiceKnapsackFast, \
+    SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.posterior import (
@@ -258,8 +259,11 @@ def compute_output_denoised_counts_reports_metrics(
         estimator = SingleSample
     elif args.estimator == "cdf":
         estimator = ThresholdCDF
-    elif args.estimator == "mckp":
-        estimator = MultipleChoiceKnapsack
+    elif args.estimator == "mckp" or args.estimator == "fast-mckp":
+        if args.estimator == "mckp":
+            estimator = MultipleChoiceKnapsack
+        elif args.estimator == "fast-mckp":
+            estimator = MultipleChoiceKnapsackFast
 
         # Prep specific for MCKP: target estimation.
         logger.info("Computing target noise counts per gene for MCKP estimator")
@@ -281,7 +285,7 @@ def compute_output_denoised_counts_reports_metrics(
         def noise_target_fun(x):
             return noise_target_fun_per_cell(x) * len(cell_inds)
     else:
-        raise ValueError('Input --estimator must be one of ["map", "mean", "sample", "cdf", "mckp"]')
+        raise ValueError('Input --estimator must be one of ["map", "mean", "sample", "cdf", "mckp", "fast-mckp"]')
 
     # Save denoised count matrix outputs (for each FPR if applicable).
     success = True

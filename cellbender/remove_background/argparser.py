@@ -336,7 +336,7 @@ def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubP
         "--estimator",
         type=str,
         default="mckp",
-        choices=["map", "mean", "cdf", "sample", "mckp"],
+        choices=["map", "mean", "cdf", "sample", "mckp", "fast-mckp"],
         dest="estimator",
         help="Output denoised count estimation method. (For "
         "experts: not required for normal usage, see "
