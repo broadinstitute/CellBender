@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from cellbender.remove_background.model import RemoveBackgroundPyroModel
 
 import numpy as np
+import cupy as cp
 import pyro
 import pyro.distributions as dist
 import scipy.sparse as sp
@@ -1574,7 +1575,10 @@ class IndexConverter:
         else:
             raise ValueError("IndexConverter.get_m_indices received cell_inds of unkown object type")
 
-    def get_ng_indices(self, m_inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def get_ng_indices(
+        self,
+        m_inds: np.ndarray | cp.ndarray,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Given a list of 'm' index values, return two arrays: cell index values
         and gene index values, suitable for a sparse matrix.
         """
@@ -1583,7 +1587,10 @@ class IndexConverter:
                 f"Requested m_inds out of range: "
                 f"{m_inds[(m_inds < 0) | (m_inds >= self.total_n_cells * self.total_n_genes)]}"
             )
-        return np.divmod(m_inds, self.total_n_genes)
+
+        xp = cp.get_array_module(m_inds)
+
+        return xp.divmod(m_inds, self.total_n_genes)
 
 
 def compute_mean_target_removal_as_function(
