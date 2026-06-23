@@ -262,17 +262,8 @@ def compute_output_denoised_counts_reports_metrics(
     elif args.estimator == "mckp" or args.estimator == "fast-mckp":
         if args.estimator == "mckp":
             estimator = MultipleChoiceKnapsack
-
-            use_cuda_compute_mean_device = "cuda"
         else: #args.estimator == "fast-mckp":
             estimator = MultipleChoiceKnapsackFast
-
-            # TODO: check to see if fast-MCKP is in GPU mode
-
-            # Disables GPU calculations here to save VRAM for fast-MCKP.
-            # Might instead be able to manually free memory after noise target computation, but
-            # there wasn't a noticeable performance difference.
-            use_cuda_compute_mean_device = "cpu"
 
         # Prep specific for MCKP: target estimation.
         logger.info("Computing target noise counts per gene for MCKP estimator")
@@ -287,7 +278,7 @@ def compute_output_denoised_counts_reports_metrics(
             index_converter=posterior.index_converter,
             raw_count_csr_for_cells=cell_counts,
             n_cells=len(cell_inds),
-            device=use_cuda_compute_mean_device if args.use_cuda else "cpu",  # TODO check this
+            device="cuda" if args.use_cuda else "cpu",  # TODO check this
             per_gene=True,
         )
 

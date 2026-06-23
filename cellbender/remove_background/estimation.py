@@ -177,17 +177,59 @@ class Mean(EstimationMethod):
         Returns:
             noise_count_csr: Estimated noise count matrix.
         """
-        # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
-        def _torch_mean(x):
-            c = torch.arange(x.shape[1], dtype=float).to(x.device)
-            return torch.matmul(x.exp(), c.t())
+        # TODO: I don't think xp.asnumpy will work if CuPy is not installed
 
-        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo, fun=_torch_mean, device=device)
-        return self._estimation_array_to_csr(
-            data=result["result"], m=result["m"], noise_offsets=noise_offsets, dtype=np.float32
+        # TODO: noise_log_prob_coo.has_canonical_form is false to begin with, which freaks me out.
+        #       noise_log_prob_coo.sum_duplicates() fixes it, but takes a few seconds.
+        #       This should probably be called before saving the posterior, but why are there duplicates to begin with?
+
+        t0 = time.time()
+
+        xp = cp if device == "cuda" else np
+
+        c = xp.asarray(noise_log_prob_coo.col)
+
+        data = xp.asarray(noise_log_prob_coo.data, copy=True)
+        xp.exp(data, out = data)
+
+        # Indices are grouped by m.
+        # group_indices is an array of length m that indexes into _ = xp.unique(m) such that _[group_indices] == m.
+        _, group_indices, group_sizes = xp.unique(xp.asarray(noise_log_prob_coo.row),
+                                                  return_inverse=True,
+                                                  return_counts=True)
+
+        # Gets the mean for each group.
+        # len(group_means) == group_indices.max() + 1 == len(xp.unique(m))
+        # Divides by group_sizes since the csr constructor sums data with duplicate coords.
+        group_means = xp.bincount(group_indices, weights=data * c) / group_sizes
+
+        # Since group_means is ordered the same as xp.unique(m), we can invert it.
+        data_out = group_means[group_indices]
+
+        if noise_offsets is not None and len(noise_offsets.keys()) != 0:
+            noise_offsets_n, noise_offsets_g = (
+                self.index_converter.get_ng_indices(m_inds=np.fromiter(noise_offsets.keys(), dtype=np.int64))
+            )
+        else:
+            noise_offsets_n, noise_offsets_g = None, None
+
+        new_return = sp.csr_matrix(
+            (xp.asnumpy(data_out) if device == "cuda" else data_out,
+             self.index_converter.get_ng_indices(noise_log_prob_coo.row)),
+            shape=self.index_converter.matrix_shape,
+            dtype=np.float32,
         )
 
+        if noise_offsets is not None and len(noise_offsets.keys()) != 0:
+            new_return[noise_offsets_n, noise_offsets_g] += np.fromiter(noise_offsets.values(), dtype=np.int64)
+
+        new_return.eliminate_zeros()
+        new_return.sum_duplicates()
+
+        logger.info(f"Mean.estimate_noise(): time = {(time.time() - t0):.2f} sec")
+
+        return new_return
 
 class MAP(EstimationMethod):
     """The canonical maximum a posteriori"""
