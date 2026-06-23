@@ -187,8 +187,12 @@ def test_single_sample(log_prob_coo):
         print(out_per_m[i])
         assert out_per_m[i] in allowed_vals, f"sample {out_per_m[i]} is not allowed for {dense[i, :]}"
 
-
-def test_mean(log_prob_coo):
+@pytest.mark.parametrize(
+    "device",
+    ("cpu", "cuda"),
+    ids=["cpu", "cuda"],
+)
+def test_mean(log_prob_coo, device):
     """Test the mean estimator"""
 
     def _add_offsets_to_truth(truth: np.ndarray, offset_dict: Dict[int, int]):
@@ -207,7 +211,7 @@ def test_mean(log_prob_coo):
 
     # set up and estimate
     estimator = Mean(index_converter=converter)
-    noise_csr = estimator.estimate_noise(noise_log_prob_coo=log_prob_coo["coo"], noise_offsets=offset_dict)
+    noise_csr = estimator.estimate_noise(noise_log_prob_coo=log_prob_coo["coo"], noise_offsets=offset_dict, device=device)
 
     # output
     print("dense noise count estimate, per m")
