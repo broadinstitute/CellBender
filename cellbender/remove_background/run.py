@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, Union, cast
@@ -249,6 +250,8 @@ def compute_output_denoised_counts_reports_metrics(
     # Choose output count matrix estimation method.
     from cellbender.remove_background.estimation import EstimationMethod
 
+    t0 = time.time()
+
     estimator: type[EstimationMethod]
     noise_target_fun = None
     if args.estimator == "map":
@@ -327,6 +330,8 @@ def compute_output_denoised_counts_reports_metrics(
             device="cuda" if args.use_cuda else "cpu",
             use_multiple_processes=args.use_multiprocessing_estimation,
         )
+
+        logger.info(f"Total target estimation + denoise time = {(time.time() - t0):.2f} sec")
 
         # Restore eliminated features in cells.
         logger.debug("Restoring eliminated features in cells")

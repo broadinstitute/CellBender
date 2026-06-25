@@ -3,6 +3,7 @@
 import concurrent.futures
 import logging
 import multiprocessing as mp
+import sys
 from multiprocessing import shared_memory
 from multiprocessing.managers import SharedMemoryManager
 import torch.multiprocessing as torchmp
@@ -806,6 +807,7 @@ def unique_with_indices(x, sort = False, return_counts = False):
     else:
         return u, first_idx, inv
 
+@torch.no_grad()
 def _estimate_fast_mckp2(
     process_index,
     gene_chunks,
@@ -818,19 +820,23 @@ def _estimate_fast_mckp2(
     c_sorted,
     data_sorted,
     noise_targets_per_gene,
-    index_converter,
+    total_n_cells,
+    total_n_genes,
     data_dtype,
-    n_threads
+    n_threads,
+    t_start,
 ):
-    t0 = time.time()
+    print(f"{timestamp()} fast-mckp2 process {process_index} time to start = {(time.time() - t_start):.2f} sec")
 
-    out_data = []
-    out_row_indices = []
-    out_col_indices = []
+    t0 = time.time()
 
     torch.set_num_threads(n_threads)
 
-    for i in np.array(gene_chunks[process_index]):
+    out_data = torch.zeros(0, dtype=torch.int64, device=data_sorted.device)
+    out_row_indices = torch.zeros(0, dtype=torch.int64, device=data_sorted.device)
+    out_col_indices = torch.zeros(0, dtype=torch.int64, device=data_sorted.device)
+
+    for i in gene_chunks[process_index]:
         # print(f"i: {i}")
 
         gene_idx = unique_genes[i]
@@ -954,36 +960,29 @@ def _estimate_fast_mckp2(
                         additional_noise_counts = noise_target - torch.sum(map_argmax)
                         # print("loop")
 
-        if torch.count_nonzero(gene_noise_counts) != 0:
-            out_data.extend(gene_noise_counts.numpy(force=True))
-            out_row_indices.extend(nonzero_rows.numpy(force=True))
-            out_col_indices.extend(np.ones_like(nonzero_rows.numpy(force=True)) * gene_idx.numpy(force=True))
+        nonzero_mask = gene_noise_counts != 0
+
+        if torch.sum(nonzero_mask) != 0:
+            nz_noise_counts = gene_noise_counts[nonzero_mask]
+
+            out_data = torch.cat((out_data, nz_noise_counts), dim=0)
+            out_row_indices = torch.cat((out_row_indices, nonzero_rows[nonzero_mask]), dim=0)
+            out_col_indices = torch.cat((out_col_indices, torch.ones_like(nz_noise_counts) * gene_idx), dim=0)
 
             # logger.debug("added col")
 
     if use_multiple_processes:
-        out_coo = sp.coo_matrix(
-            (np.array(out_data), (np.array(out_row_indices), np.array(out_col_indices))),
-            shape=(index_converter.total_n_cells, index_converter.total_n_genes),
-        )
-        out_coo.eliminate_zeros()
-        #TODO: zero-mask data and subset, no conversion to coo needed (hopefully fast)
-
         out_stack_queue.put(
-            torch.stack((torch.tensor(out_coo.data), torch.tensor(out_coo.row), torch.tensor(out_coo.col)))
+            torch.stack((out_data, out_row_indices, out_col_indices))
         )
-
-
 
         out_csr = None
     else:
-        out_coo = sp.coo_matrix(
-            (np.array(out_data), (np.array(out_row_indices), np.array(out_col_indices))),
-            shape=(index_converter.total_n_cells, index_converter.total_n_genes),
+        out_csr = sp.csr_matrix(
+            (out_data.numpy(force=True),
+             (out_row_indices.numpy(force=True), out_col_indices.numpy(force=True))),
+            shape=(total_n_cells, total_n_genes),
         )
-
-        out_csr = sp.csr_matrix(out_coo)
-        out_csr.eliminate_zeros()
 
     print(f"{timestamp()} fast-mckp2 process {process_index} time = {(time.time() - t0):.2f} sec")
 
@@ -1112,29 +1111,40 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
 
         noise_targets_per_gene = torch.from_numpy(noise_targets_per_gene).to(device)
 
-        if not use_gpu:
-            device = "cpu"
+        device = "cuda" if use_gpu else "cpu"
 
-            n_sorted = n_sorted.to(device)
-            c_sorted = c_sorted.to(device)
-            data_sorted = data_sorted.to(device)
+        n_sorted = n_sorted.to(device)
+        c_sorted = c_sorted.to(device)
+        data_sorted = data_sorted.to(device)
 
-            unique_genes = unique_genes.to(device)
-            start_idx = start_idx.to(device)
-            counts = counts.to(device)
+        unique_genes = unique_genes.to(device)
+        start_idx = start_idx.to(device)
+        counts = counts.to(device)
 
-            noise_targets_per_gene = noise_targets_per_gene.to(device)
+        noise_targets_per_gene = noise_targets_per_gene.to(device)
 
         t_setup = time.time()
 
         logger.info(f"{timestamp()} fast-mckp2 setup time = {(t_setup - t0):.2f} sec")
 
         if use_multiple_processes:
-            gene_chunks = torch.arange(unique_genes.shape[0]).tensor_split(n_processes)
+            gene_chunks = torch.arange(unique_genes.shape[0], device=device).tensor_split(n_processes)
 
             out_stack_queue = torchmp.Queue()
 
-            process_context = torchmp.spawn(
+            # Sharing CUDA tensors requires spawn or forkserver.
+            # Only spawn works on Windows and Mac, but is slow.
+            # see https://docs.python.org/3/library/sys.html#sys.platform
+            # see https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
+            # see https://docs.pytorch.org/docs/2.12/multiprocessing.html#sharing-cuda-tensors
+            # TODO: Check compatibility for other platforms.
+            start_method = "spawn"
+            if sys.platform == "linux":
+                start_method = "forkserver"
+
+            t_start = time.time()
+
+            process_context = torchmp.start_processes(
                 _estimate_fast_mckp2,
                 args=(
                     gene_chunks,
@@ -1147,14 +1157,17 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
                     c_sorted,
                     data_sorted,
                     noise_targets_per_gene,
-                    self.index_converter,
+                    self.index_converter.total_n_cells,
+                    self.index_converter.total_n_genes,
                     data_dtype,
                     n_threads_per_process_multiple,
+                    t_start,
                 ),
                 nprocs=n_processes,
                 join=False,
                 daemon=True,
-                #TODO: start_method = "fork" on linux (might not work with CUDA (might need forkserver))
+                start_method=start_method
+                # TODO: start_method = "fork" on linux (might not work with CUDA (might need forkserver))
             )
 
             t_collect = time.time()
@@ -1162,10 +1175,10 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
             out_csr_list = []
 
             for i in range(n_processes):
-                out_stack = out_stack_queue.get()
+                out_stack = out_stack_queue.get().numpy(force=True)
 
                 out_csr_list.append(
-                    sp.csr_matrix((np.array(out_stack[0]), (np.array(out_stack[1]), np.array(out_stack[2]))),
+                    sp.csr_matrix((out_stack[0], (out_stack[1], out_stack[2])),
                                         shape=(self.index_converter.total_n_cells, self.index_converter.total_n_genes),)
                 )
 
@@ -1181,6 +1194,8 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
             logger.info(f"{timestamp()} fast-mckp2 collection time = {(time.time() - t_collect):.2f} sec")
 
         else:
+            t_start = time.time()
+
             out_csr = _estimate_fast_mckp2(
                 0,
                 torch.unsqueeze(torch.arange(unique_genes.shape[0]), dim=0),
@@ -1193,9 +1208,11 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
                 c_sorted,
                 data_sorted,
                 noise_targets_per_gene,
-                self.index_converter,
+                self.index_converter.total_n_cells,
+                self.index_converter.total_n_genes,
                 data_dtype,
                 n_threads_per_process_single,
+                t_start,
             )
 
         torch.set_num_threads(original_torch_num_thread)
