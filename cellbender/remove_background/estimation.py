@@ -782,6 +782,276 @@ class MultipleChoiceKnapsack(EstimationMethod):
         # The MAP already has the noise offsets, so they are not added to steps_csr.
         return map_csr + steps_csr
 
+@torch.no_grad()
+def unique_with_indices(x, sort = False, return_counts = False):
+    # TODO: scatter_reduce_ is in beta and can be nondeterministic on GPU, not sure if that matters here
+    # TODO: try torch.use_deterministic_algorithms(True)
+    # TODO: might not matter because we aren't using floats
+    # TODO: other implementations here https://github.com/pytorch/pytorch/issues/36748, but the ones I tried were slow.
+    # TODO: I have no idea how this works and I used my last free copilot credits to get this.
+    idx = torch.arange(x.numel(), device=x.device)
+
+    if return_counts:
+        u, inv, counts = torch.unique(x, sorted=sort, return_inverse=True, return_counts=True)
+    else:
+        u, inv = torch.unique(x, sorted=sort, return_inverse=True)
+        counts = None
+
+    first_idx = torch.full((u.numel(),), x.numel(), dtype=idx.dtype, device=x.device)
+    first_idx.scatter_reduce_(0, inv, idx, reduce="amin", include_self=True)
+
+    if return_counts:
+        return u, first_idx, inv, counts
+    else:
+        return u, first_idx, inv
+
+class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
+    @staticmethod
+    @torch.no_grad()
+    def densify_without_zero_rows(
+        coo: sp.coo_array | cusp.coo_matrix,
+        dtype: torch.dtype,
+        device: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # TODO: Claude made this, I'm not sure how or if it works.
+
+        coo_row = torch.from_numpy(coo.row).to(device)
+
+        nonzero_rows_ = torch.unique(coo_row)
+
+        rows_ = torch.searchsorted(nonzero_rows_, coo_row)
+
+        dense = torch.zeros((len(nonzero_rows_), coo.shape[1]), dtype=dtype)
+        dense[rows_, torch.from_numpy(coo.col).to(device)] = torch.from_numpy(coo.data).to(device)
+
+        return dense, nonzero_rows_
+
+    @staticmethod
+    @torch.no_grad()
+    def densify_without_zero_rows2(
+        data,
+        row,
+        col,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # TODO: Claude made this, I'm not sure how or if it works.
+
+        nonzero_rows_ = torch.unique(row)
+
+        rows_ = torch.searchsorted(nonzero_rows_, row)
+
+        dense = torch.zeros((nonzero_rows_.shape[0], torch.max(col) + 1), dtype=data.dtype, device=data.device)
+        dense[rows_, col] = data
+
+        return dense, nonzero_rows_
+
+    @torch.no_grad()
+    def estimate_noise(
+        self,
+        noise_log_prob_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        noise_targets_per_gene: np.ndarray | None = None,
+        verbose: bool = False,
+        n_chunks: Optional[int] = None,
+        use_multiple_processes: bool = False,
+        **kwargs,
+    ) -> sp.csr_matrix:
+
+        # TODO: handle noise_offsets
+
+        t0 = time.time()
+
+        setup_gpu = True
+        use_gpu = False
+
+        data_dtype = torch.float32
+        index_dtype = np.int32
+
+        device = "cuda" if setup_gpu else "cpu"
+
+        n, g = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
+        n = torch.from_numpy(n).to(device)
+        g = torch.from_numpy(g).to(device)
+
+        c = torch.from_numpy(noise_log_prob_coo.col).to(device)
+
+        data = torch.from_numpy(noise_log_prob_coo.data).to(device, copy=True)
+        data = data - (torch.floor(data.min()) - 1) #TODO: consider exp
+
+        order = torch.argsort(g)
+        g_sorted = g[order]
+        n_sorted = n[order]
+        c_sorted = c[order]
+        data_sorted = data[order]
+
+        unique_genes, start_idx, _, counts = unique_with_indices(g_sorted, return_counts=True)
+
+        noise_targets_per_gene = torch.from_numpy(noise_targets_per_gene).to(device)
+
+        t_setup = time.time()
+
+        if not use_gpu:
+            device = "cpu"
+
+            n_sorted = n_sorted.to(device)
+            c_sorted = c_sorted.to(device)
+            data_sorted = data_sorted.to(device)
+
+            unique_genes = unique_genes.to(device)
+            start_idx = start_idx.to(device)
+            counts = counts.to(device)
+
+            noise_targets_per_gene = noise_targets_per_gene.to(device)
+
+        logger.info(f"{timestamp()} fast-mckp2 setup time = {(t_setup - t0):.2f} sec")
+
+        out_data = []
+        out_row_indices = []
+        out_col_indices = []
+
+        for i in range(unique_genes.shape[0]):
+            #print(f"i: {i}")
+
+            gene_idx = unique_genes[i]
+            start = start_idx[i]
+            count = counts[i]
+
+            end = start + count
+
+            gene_n = n_sorted[start:end]
+            gene_c = c_sorted[start:end]
+            gene_data = data_sorted[start:end]
+
+            gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast2.densify_without_zero_rows2(
+                gene_data, gene_n, gene_c
+            )
+
+            map_argmax = torch.argmax(gene_nonzero, dim=1)
+
+            noise_target = torch.floor(noise_targets_per_gene[gene_idx])
+
+            additional_noise_counts = noise_target - torch.sum(map_argmax, dtype=data_dtype)
+
+            step_direction = torch.sign(additional_noise_counts)
+
+            if step_direction == 0:
+                # Target == MAP
+                gene_noise_counts = map_argmax
+            elif step_direction > 0:
+                # Target > MAP
+
+                # print("step+")
+
+                max_c_idx = torch.tensor(gene_nonzero.shape[1] - 1)
+
+                while True:
+                    delta_argmax = map_argmax + 1
+
+                    overflowed_rows_mask = delta_argmax > max_c_idx
+
+                    delta_argmax = torch.minimum(delta_argmax, max_c_idx)
+
+                    delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
+
+                    delta_rewards[overflowed_rows_mask] = -torch.inf
+
+                    # TODO: maybe switch to xp.partition
+                    topk_reward_values, topk_reward_indices = torch.topk(
+                        delta_rewards,
+                        k=int(torch.minimum(additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
+                        largest=True,
+                        sorted=False,
+                    )
+
+                    if torch.any((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf)):
+                        # print("not enough extra possible counts")
+                        topk_reward_indices = topk_reward_indices[
+                            ~((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf))
+                        ]
+
+                        map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                        gene_noise_counts = map_argmax
+
+                        break
+
+                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                    if map_argmax.sum() == noise_target:  # probly inconsistent rounding
+                        gene_noise_counts = map_argmax
+                        # print("break")
+
+                        break
+                    else:
+                        if torch.all(delta_argmax == max_c_idx):
+                            # target not achievable with all noise counts maxed
+                            # print("impossible break")
+                            gene_noise_counts = map_argmax
+
+                            break
+                        else:
+                            additional_noise_counts = noise_target - torch.sum(map_argmax)
+                            # print("loop")
+
+            elif step_direction < 0:
+                # Target < MAP
+                # print("step-")
+
+                while True:
+                    delta_argmax = map_argmax - 1
+
+                    underflowed_rows_mask = delta_argmax < 0
+
+                    delta_argmax = torch.maximum(delta_argmax, torch.tensor(0))
+
+                    delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
+
+                    delta_rewards[underflowed_rows_mask] = -torch.inf
+
+                    topk_reward_values, topk_reward_indices = torch.topk(
+                        delta_rewards,
+                        k=int(torch.minimum(-additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
+                        largest=True,
+                        sorted=False,
+                    )
+
+                    # TODO: check for invalid topk_reward_values as above
+
+                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                    if map_argmax.sum() == noise_target:  # probly inconsistent rounding
+                        gene_noise_counts = map_argmax
+                        # print("break")
+
+                        break
+                    else:
+                        if torch.all(delta_argmax == 0):
+                            # target not achievable with all noise counts at min
+                            # print("impossible break")
+                            gene_noise_counts = map_argmax
+
+                            break
+                        else:
+                            additional_noise_counts = noise_target - torch.sum(map_argmax)
+                            # print("loop")
+
+            if torch.count_nonzero(gene_noise_counts) != 0:
+                out_data.extend(gene_noise_counts.numpy(force=True))
+                out_row_indices.extend(nonzero_rows.numpy(force=True))
+                out_col_indices.extend(np.ones_like(nonzero_rows.numpy(force=True)) * gene_idx.numpy(force=True))
+
+                # logger.debug("added col")
+
+        out_coo = sp.coo_matrix((np.array(out_data), (np.array(out_row_indices), np.array(out_col_indices))),
+                                shape=(self.index_converter.total_n_cells, self.index_converter.total_n_genes))
+
+        out_csr = sp.csr_matrix(out_coo)
+        out_csr.eliminate_zeros()
+
+        logger.info(f"{timestamp()} fast-mckp2 estimation time after prep = {(time.time() - t_setup):.2f} sec")
+        logger.info(f"{timestamp()} Total fast-mckp2 estimation time = {(time.time() - t0):.2f} sec")
+
+        return out_csr
+
 class MultipleChoiceKnapsackFast(SharedEstimationMethod):
     @staticmethod
     def densify_without_zero_rows(coo: sp.coo_array | cusp.coo_matrix) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
