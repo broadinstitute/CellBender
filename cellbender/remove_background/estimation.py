@@ -5,6 +5,7 @@ import logging
 import multiprocessing as mp
 from multiprocessing import shared_memory
 from multiprocessing.managers import SharedMemoryManager
+import torch.multiprocessing as torchmp
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -805,6 +806,189 @@ def unique_with_indices(x, sort = False, return_counts = False):
     else:
         return u, first_idx, inv
 
+def _estimate_fast_mckp2(
+    process_index,
+    gene_chunks,
+    use_multiple_processes,
+    out_stack_queue,
+    unique_genes,
+    start_idx, 
+    counts,
+    n_sorted,
+    c_sorted,
+    data_sorted,
+    noise_targets_per_gene,
+    index_converter,
+    data_dtype,
+    n_threads
+):
+    t0 = time.time()
+
+    out_data = []
+    out_row_indices = []
+    out_col_indices = []
+
+    torch.set_num_threads(n_threads)
+
+    for i in np.array(gene_chunks[process_index]):
+        # print(f"i: {i}")
+
+        gene_idx = unique_genes[i]
+        start = start_idx[i]
+        count = counts[i]
+
+        end = start + count
+
+        gene_n = n_sorted[start:end]
+        gene_c = c_sorted[start:end]
+        gene_data = data_sorted[start:end]
+
+        gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast2.densify_without_zero_rows2(gene_data, gene_n, gene_c)
+
+        map_argmax = torch.argmax(gene_nonzero, dim=1)
+
+        noise_target = torch.floor(noise_targets_per_gene[gene_idx])
+
+        additional_noise_counts = noise_target - torch.sum(map_argmax, dtype=data_dtype)
+
+        step_direction = torch.sign(additional_noise_counts)
+
+        if step_direction == 0:
+            # Target == MAP
+            gene_noise_counts = map_argmax
+        elif step_direction > 0:
+            # Target > MAP
+
+            # print("step+")
+
+            max_c_idx = torch.tensor(gene_nonzero.shape[1] - 1)
+
+            while True:
+                delta_argmax = map_argmax + 1
+
+                overflowed_rows_mask = delta_argmax > max_c_idx
+
+                delta_argmax = torch.minimum(delta_argmax, max_c_idx)
+
+                delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
+
+                delta_rewards[overflowed_rows_mask] = -torch.inf
+
+                # TODO: maybe switch to xp.partition
+                topk_reward_values, topk_reward_indices = torch.topk(
+                    delta_rewards,
+                    k=int(torch.minimum(additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
+                    largest=True,
+                    sorted=False,
+                )
+
+                if torch.any((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf)):
+                    # print("not enough extra possible counts")
+                    topk_reward_indices = topk_reward_indices[
+                        ~((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf))
+                    ]
+
+                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                    gene_noise_counts = map_argmax
+
+                    break
+
+                map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                if map_argmax.sum() == noise_target:  # probly inconsistent rounding
+                    gene_noise_counts = map_argmax
+                    # print("break")
+
+                    break
+                else:
+                    if torch.all(delta_argmax == max_c_idx):
+                        # target not achievable with all noise counts maxed
+                        # print("impossible break")
+                        gene_noise_counts = map_argmax
+
+                        break
+                    else:
+                        additional_noise_counts = noise_target - torch.sum(map_argmax)
+                        # print("loop")
+
+        elif step_direction < 0:
+            # Target < MAP
+            # print("step-")
+
+            while True:
+                delta_argmax = map_argmax - 1
+
+                underflowed_rows_mask = delta_argmax < 0
+
+                delta_argmax = torch.maximum(delta_argmax, torch.tensor(0))
+
+                delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
+
+                delta_rewards[underflowed_rows_mask] = -torch.inf
+
+                topk_reward_values, topk_reward_indices = torch.topk(
+                    delta_rewards,
+                    k=int(torch.minimum(-additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
+                    largest=True,
+                    sorted=False,
+                )
+
+                # TODO: check for invalid topk_reward_values as above
+
+                map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                if map_argmax.sum() == noise_target:  # probly inconsistent rounding
+                    gene_noise_counts = map_argmax
+                    # print("break")
+
+                    break
+                else:
+                    if torch.all(delta_argmax == 0):
+                        # target not achievable with all noise counts at min
+                        # print("impossible break")
+                        gene_noise_counts = map_argmax
+
+                        break
+                    else:
+                        additional_noise_counts = noise_target - torch.sum(map_argmax)
+                        # print("loop")
+
+        if torch.count_nonzero(gene_noise_counts) != 0:
+            out_data.extend(gene_noise_counts.numpy(force=True))
+            out_row_indices.extend(nonzero_rows.numpy(force=True))
+            out_col_indices.extend(np.ones_like(nonzero_rows.numpy(force=True)) * gene_idx.numpy(force=True))
+
+            # logger.debug("added col")
+
+    if use_multiple_processes:
+        out_coo = sp.coo_matrix(
+            (np.array(out_data), (np.array(out_row_indices), np.array(out_col_indices))),
+            shape=(index_converter.total_n_cells, index_converter.total_n_genes),
+        )
+        out_coo.eliminate_zeros()
+        #TODO: zero-mask data and subset, no conversion to coo needed (hopefully fast)
+
+        out_stack_queue.put(
+            torch.stack((torch.tensor(out_coo.data), torch.tensor(out_coo.row), torch.tensor(out_coo.col)))
+        )
+
+
+
+        out_csr = None
+    else:
+        out_coo = sp.coo_matrix(
+            (np.array(out_data), (np.array(out_row_indices), np.array(out_col_indices))),
+            shape=(index_converter.total_n_cells, index_converter.total_n_genes),
+        )
+
+        out_csr = sp.csr_matrix(out_coo)
+        out_csr.eliminate_zeros()
+
+    print(f"{timestamp()} fast-mckp2 process {process_index} time = {(time.time() - t0):.2f} sec")
+
+    return out_csr
+
 class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
     @staticmethod
     @torch.no_grad()
@@ -863,10 +1047,48 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
         setup_gpu = True
         use_gpu = False
 
+        n_processes = 6
+        n_threads_per_process_single = 6
+        n_threads_per_process_multiple = 1
+
         data_dtype = torch.float32
         index_dtype = np.int32
 
         device = "cuda" if setup_gpu else "cpu"
+
+        # restored later
+        original_torch_num_thread = torch.get_num_threads()
+
+        if not use_multiple_processes:
+            torch.set_num_threads(n_threads_per_process_single)
+
+        # TODO: test RAM and VRAM usage
+
+        # p-core/e-core counts are hard to get programmatically without obscure hacks.
+        # This effects recent Intel and Apple CPUs, and there is no library support.
+        # Looks like number of physical p-cores is best.
+
+        # wtih setup_gpu = False, use_gpu = False, use_multiple_processes = False
+        # 1
+        #   setup:  4.8
+        #   run:    11.69
+        #   total:  16.49
+        # 6 (p-core count)
+        #   setup:  3.52
+        #   run:    10.03
+        #   total:  13.55
+        # 12 (p-core thread count)
+        #   setup:  3.58
+        #   run:    11.81
+        #   total:  15.39
+        # 14 (default)
+        #   setup:  3.61
+        #   run:    11.75
+        #   total:  15.36
+        # 20 (p-core + e-core thread count)
+        #   setup:  6.81
+        #   run:    22.53
+        #   total:  29.34
 
         n, g = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
         n = torch.from_numpy(n).to(device)
@@ -875,7 +1097,10 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
         c = torch.from_numpy(noise_log_prob_coo.col).to(device)
 
         data = torch.from_numpy(noise_log_prob_coo.data).to(device, copy=True)
-        data = data - (torch.floor(data.min()) - 1) #TODO: consider exp
+
+        # Exponentiating works, but reduces floating-point precision.
+        # TODO: I forget, why does this not work for negative data now that I'm not using BISSA?
+        data = data - (torch.floor(data.min()) - 1)
 
         order = torch.argsort(g)
         g_sorted = g[order]
@@ -886,8 +1111,6 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
         unique_genes, start_idx, _, counts = unique_with_indices(g_sorted, return_counts=True)
 
         noise_targets_per_gene = torch.from_numpy(noise_targets_per_gene).to(device)
-
-        t_setup = time.time()
 
         if not use_gpu:
             device = "cpu"
@@ -902,150 +1125,80 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
 
             noise_targets_per_gene = noise_targets_per_gene.to(device)
 
+        t_setup = time.time()
+
         logger.info(f"{timestamp()} fast-mckp2 setup time = {(t_setup - t0):.2f} sec")
 
-        out_data = []
-        out_row_indices = []
-        out_col_indices = []
+        if use_multiple_processes:
+            gene_chunks = torch.arange(unique_genes.shape[0]).tensor_split(n_processes)
 
-        for i in range(unique_genes.shape[0]):
-            #print(f"i: {i}")
+            out_stack_queue = torchmp.Queue()
 
-            gene_idx = unique_genes[i]
-            start = start_idx[i]
-            count = counts[i]
-
-            end = start + count
-
-            gene_n = n_sorted[start:end]
-            gene_c = c_sorted[start:end]
-            gene_data = data_sorted[start:end]
-
-            gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast2.densify_without_zero_rows2(
-                gene_data, gene_n, gene_c
+            process_context = torchmp.spawn(
+                _estimate_fast_mckp2,
+                args=(
+                    gene_chunks,
+                    use_multiple_processes,
+                    out_stack_queue,
+                    unique_genes,
+                    start_idx,
+                    counts,
+                    n_sorted,
+                    c_sorted,
+                    data_sorted,
+                    noise_targets_per_gene,
+                    self.index_converter,
+                    data_dtype,
+                    n_threads_per_process_multiple,
+                ),
+                nprocs=n_processes,
+                join=False,
+                daemon=True,
+                #TODO: start_method = "fork" on linux (might not work with CUDA (might need forkserver))
             )
 
-            map_argmax = torch.argmax(gene_nonzero, dim=1)
+            t_collect = time.time()
 
-            noise_target = torch.floor(noise_targets_per_gene[gene_idx])
+            out_csr_list = []
 
-            additional_noise_counts = noise_target - torch.sum(map_argmax, dtype=data_dtype)
+            for i in range(n_processes):
+                out_stack = out_stack_queue.get()
 
-            step_direction = torch.sign(additional_noise_counts)
+                out_csr_list.append(
+                    sp.csr_matrix((np.array(out_stack[0]), (np.array(out_stack[1]), np.array(out_stack[2]))),
+                                        shape=(self.index_converter.total_n_cells, self.index_converter.total_n_genes),)
+                )
 
-            if step_direction == 0:
-                # Target == MAP
-                gene_noise_counts = map_argmax
-            elif step_direction > 0:
-                # Target > MAP
+                del out_stack
 
-                # print("step+")
+            process_context.join()
 
-                max_c_idx = torch.tensor(gene_nonzero.shape[1] - 1)
+            #TODO: Warning on process close when using CUDA. This might be a pain to fix, see
+            # https://docs.pytorch.org/docs/2.12/multiprocessing.html#multiprocessing-cuda-sharing-details
 
-                while True:
-                    delta_argmax = map_argmax + 1
+            out_csr = sum(out_csr_list)
 
-                    overflowed_rows_mask = delta_argmax > max_c_idx
+            logger.info(f"{timestamp()} fast-mckp2 collection time = {(time.time() - t_collect):.2f} sec")
 
-                    delta_argmax = torch.minimum(delta_argmax, max_c_idx)
+        else:
+            out_csr = _estimate_fast_mckp2(
+                0,
+                torch.unsqueeze(torch.arange(unique_genes.shape[0]), dim=0),
+                use_multiple_processes,
+                None,
+                unique_genes,
+                start_idx,
+                counts,
+                n_sorted,
+                c_sorted,
+                data_sorted,
+                noise_targets_per_gene,
+                self.index_converter,
+                data_dtype,
+                n_threads_per_process_single,
+            )
 
-                    delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
-
-                    delta_rewards[overflowed_rows_mask] = -torch.inf
-
-                    # TODO: maybe switch to xp.partition
-                    topk_reward_values, topk_reward_indices = torch.topk(
-                        delta_rewards,
-                        k=int(torch.minimum(additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
-                        largest=True,
-                        sorted=False,
-                    )
-
-                    if torch.any((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf)):
-                        # print("not enough extra possible counts")
-                        topk_reward_indices = topk_reward_indices[
-                            ~((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf))
-                        ]
-
-                        map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
-
-                        gene_noise_counts = map_argmax
-
-                        break
-
-                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
-
-                    if map_argmax.sum() == noise_target:  # probly inconsistent rounding
-                        gene_noise_counts = map_argmax
-                        # print("break")
-
-                        break
-                    else:
-                        if torch.all(delta_argmax == max_c_idx):
-                            # target not achievable with all noise counts maxed
-                            # print("impossible break")
-                            gene_noise_counts = map_argmax
-
-                            break
-                        else:
-                            additional_noise_counts = noise_target - torch.sum(map_argmax)
-                            # print("loop")
-
-            elif step_direction < 0:
-                # Target < MAP
-                # print("step-")
-
-                while True:
-                    delta_argmax = map_argmax - 1
-
-                    underflowed_rows_mask = delta_argmax < 0
-
-                    delta_argmax = torch.maximum(delta_argmax, torch.tensor(0))
-
-                    delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
-
-                    delta_rewards[underflowed_rows_mask] = -torch.inf
-
-                    topk_reward_values, topk_reward_indices = torch.topk(
-                        delta_rewards,
-                        k=int(torch.minimum(-additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
-                        largest=True,
-                        sorted=False,
-                    )
-
-                    # TODO: check for invalid topk_reward_values as above
-
-                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
-
-                    if map_argmax.sum() == noise_target:  # probly inconsistent rounding
-                        gene_noise_counts = map_argmax
-                        # print("break")
-
-                        break
-                    else:
-                        if torch.all(delta_argmax == 0):
-                            # target not achievable with all noise counts at min
-                            # print("impossible break")
-                            gene_noise_counts = map_argmax
-
-                            break
-                        else:
-                            additional_noise_counts = noise_target - torch.sum(map_argmax)
-                            # print("loop")
-
-            if torch.count_nonzero(gene_noise_counts) != 0:
-                out_data.extend(gene_noise_counts.numpy(force=True))
-                out_row_indices.extend(nonzero_rows.numpy(force=True))
-                out_col_indices.extend(np.ones_like(nonzero_rows.numpy(force=True)) * gene_idx.numpy(force=True))
-
-                # logger.debug("added col")
-
-        out_coo = sp.coo_matrix((np.array(out_data), (np.array(out_row_indices), np.array(out_col_indices))),
-                                shape=(self.index_converter.total_n_cells, self.index_converter.total_n_genes))
-
-        out_csr = sp.csr_matrix(out_coo)
-        out_csr.eliminate_zeros()
+        torch.set_num_threads(original_torch_num_thread)
 
         logger.info(f"{timestamp()} fast-mckp2 estimation time after prep = {(time.time() - t_setup):.2f} sec")
         logger.info(f"{timestamp()} Total fast-mckp2 estimation time = {(time.time() - t0):.2f} sec")
