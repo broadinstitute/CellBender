@@ -91,49 +91,6 @@ class EstimationMethod(ABC):
         # coo.sum_duplicates()
         # return coo.tocsr()
 
-class SharedEstimationMethod(EstimationMethod, ABC):
-    def __init__(self, index_converter: "IndexConverter"):
-        super().__init__(index_converter)
-
-        self.memory_manager = None
-        self.is_memory_manager_started = False
-
-    def _start_memory_manager(self):
-        if not self.is_memory_manager_started:
-            self.memory_manager = SharedMemoryManager()
-
-            self.memory_manager.start()
-
-            self.is_memory_manager_started = True
-
-    def _stop_memory_manager(self):
-        self.memory_manager.shutdown()
-
-        self.is_memory_manager_started = False
-
-    def _share(
-        self,
-        array: np.ndarray,
-    ) -> tuple[np.ndarray, shared_memory.SharedMemory]:
-
-        self._start_memory_manager()
-
-        array_sm = self.memory_manager.SharedMemory(array.nbytes)
-        array_shared = np.ndarray(array.shape, array.dtype, buffer=array_sm.buf)
-        array_shared[:] = array[:]
-
-        return array_shared, array_sm
-
-    def _optionally_share(self,
-                          array: np.ndarray,
-                          shared: bool = True
-        ) -> tuple[np.ndarray, shared_memory.SharedMemory | None]:
-
-        if shared:
-            return self._share(array)
-        else:
-            return array, None
-
 class SingleSample(EstimationMethod):
     """A single sample from the noise count posterior"""
 
@@ -808,7 +765,7 @@ def unique_with_indices(x, sort = False, return_counts = False):
         return u, first_idx, inv
 
 @torch.no_grad()
-def _estimate_fast_mckp2(
+def _estimate_fast_mckp(
     process_index,
     gene_chunks,
     use_multiple_processes,
@@ -826,7 +783,7 @@ def _estimate_fast_mckp2(
     n_threads,
     t_start,
 ):
-    print(f"{timestamp()} fast-mckp2 process {process_index} time to start = {(time.time() - t_start):.2f} sec")
+    print(f"{timestamp()} fast-mckp process {process_index} time to start = {(time.time() - t_start):.2f} sec")
 
     t0 = time.time()
 
@@ -849,7 +806,7 @@ def _estimate_fast_mckp2(
         gene_c = c_sorted[start:end]
         gene_data = data_sorted[start:end]
 
-        gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast2.densify_without_zero_rows2(gene_data, gene_n, gene_c)
+        gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast.densify_without_zero_rows2(gene_data, gene_n, gene_c)
 
         map_argmax = torch.argmax(gene_nonzero, dim=1)
 
@@ -984,14 +941,14 @@ def _estimate_fast_mckp2(
             shape=(total_n_cells, total_n_genes),
         )
 
-    print(f"{timestamp()} fast-mckp2 process {process_index} time = {(time.time() - t0):.2f} sec")
+    print(f"{timestamp()} fast-mckp process {process_index} time = {(time.time() - t0):.2f} sec")
 
     if use_multiple_processes:
         out_stack_queue.join()
 
     return out_csr
 
-class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
+class MultipleChoiceKnapsackFast(EstimationMethod):
     @staticmethod
     @torch.no_grad()
     def densify_without_zero_rows(
@@ -1133,7 +1090,7 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
 
         torch.cuda.empty_cache()
 
-        logger.info(f"{timestamp()} fast-mckp2 setup time = {(t_setup - t0):.2f} sec")
+        logger.info(f"{timestamp()} fast-mckp setup time = {(t_setup - t0):.2f} sec")
 
         if use_multiple_processes:
             gene_chunks = torch.arange(unique_genes.shape[0], device=device).tensor_split(n_processes)
@@ -1153,7 +1110,7 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
             t_start = time.time()
 
             process_context = torchmp.start_processes(
-                _estimate_fast_mckp2,
+                _estimate_fast_mckp,
                 args=(
                     gene_chunks,
                     use_multiple_processes,
@@ -1202,12 +1159,12 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
 
             out_csr = sum(out_csr_list)
 
-            logger.info(f"{timestamp()} fast-mckp2 collection time = {(time.time() - t_collect):.2f} sec")
+            logger.info(f"{timestamp()} fast-mckp collection time = {(time.time() - t_collect):.2f} sec")
 
         else:
             t_start = time.time()
 
-            out_csr = _estimate_fast_mckp2(
+            out_csr = _estimate_fast_mckp(
                 0,
                 torch.unsqueeze(torch.arange(unique_genes.shape[0]), dim=0),
                 use_multiple_processes,
@@ -1230,507 +1187,8 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
 
         torch.cuda.empty_cache()
 
-        logger.info(f"{timestamp()} fast-mckp2 estimation time after prep = {(time.time() - t_setup):.2f} sec")
-        logger.info(f"{timestamp()} Total fast-mckp2 estimation time = {(time.time() - t0):.2f} sec")
-
-        return out_csr
-
-class MultipleChoiceKnapsackFast(SharedEstimationMethod):
-    @staticmethod
-    def densify_without_zero_rows(coo: sp.coo_array | cusp.coo_matrix) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
-        # TODO: Claude made this, I'm not sure how or if it works.
-
-        xp = cp.get_array_module(coo.row)
-
-        nonzero_rows_ = xp.unique(coo.row)
-
-        rows_ = xp.searchsorted(nonzero_rows_, coo.row)
-
-        dense = xp.zeros((len(nonzero_rows_), coo.shape[1]), dtype=coo.dtype)
-        dense[rows_, coo.col] = coo.data
-
-        return dense, nonzero_rows_
-
-    @staticmethod
-    def _estimate_shared(
-        unique_genes,
-        start_idx,
-        counts,
-        n_sorted,
-        c_sorted,
-        data_sorted,
-        noise_targets_per_gene,
-        n_cells,
-        n_genes,
-        n_c,
-        data_dtype,
-        index_dtype,
-        i,
-        n_processes,
-        nnz_genes,
-        return_array=None,
-    ):
-
-        chunk_size = int(nnz_genes / n_processes)
-        chunk_start = chunk_size * i
-        chunk_end = chunk_start + chunk_size - 1 if i != n_processes - 1 else nnz_genes
-
-        # out_data, out_row_indices, out_col_indices = MultipleChoiceKnapsackFast._estimate(
-        ret = MultipleChoiceKnapsackFast._estimate(
-            np.ndarray(unique_genes[0], dtype=unique_genes[1], buffer=unique_genes[2].buf)[chunk_start:chunk_end],
-            np.ndarray(start_idx[0], dtype=start_idx[1], buffer=start_idx[2].buf)[chunk_start:chunk_end],
-            np.ndarray(counts[0], dtype=counts[1], buffer=counts[2].buf)[chunk_start:chunk_end],
-            np.ndarray(n_sorted[0], dtype=n_sorted[1], buffer=n_sorted[2].buf),
-            np.ndarray(c_sorted[0], dtype=c_sorted[1], buffer=c_sorted[2].buf),
-            np.ndarray(data_sorted[0], dtype=data_sorted[1], buffer=data_sorted[2].buf),
-            np.ndarray(
-                noise_targets_per_gene[0], dtype=noise_targets_per_gene[1], buffer=noise_targets_per_gene[2].buf
-            ),
-            n_cells,
-            n_genes,
-            n_c,
-            data_dtype,
-            index_dtype,
-            use_gpu=False,
-            return_csr=return_array is None,
-        )
-
-        if return_array is not None:
-            return_array = np.ndarray(return_array[0], dtype=return_array[1], buffer=return_array[2].buf)
-
-            return_array[i, 0, :] = np.resize(ret[0], return_array.shape[2])
-            return_array[i, 1, :] = np.resize(ret[1], return_array.shape[2])
-            return_array[i, 2, :] = np.resize(ret[2], return_array.shape[2])
-
-            return None
-        else:
-            return ret
-
-    @staticmethod
-    def _estimate(
-        unique_genes,
-        start_idx,
-        counts,
-        n_sorted,
-        c_sorted,
-        data_sorted,
-        noise_targets_per_gene,
-        n_cells,
-        n_genes,
-        n_c,
-        data_dtype,
-        index_dtype,
-        use_gpu,
-        return_csr=True,
-    ):
-        # TODO: preallocate ndarrays
-        out_data = []
-        out_row_indices = []
-        out_col_indices = []
-
-        xp = cp.get_array_module(unique_genes)
-
-        for gene_idx, start, count in zip(unique_genes, start_idx, counts):
-            # logger.info(f"Processing gene index {gene_idx} out of {n_genes}")
-
-            # TODO: match rounding with original if possible
-            # TODO: fix other small inconsistencies
-            #noise_target = int(noise_targets_per_gene[gene_idx])
-            noise_target = xp.floor(noise_targets_per_gene[gene_idx])
-
-            end = start + count
-
-            gene_n = n_sorted[start:end]
-            gene_c = c_sorted[start:end]
-            gene_data = data_sorted[start:end]
-
-            # TODO: map coords without constructing the matrix objects
-            if use_gpu:
-                gene_coo = cusp.coo_matrix((gene_data, (gene_n, gene_c)),
-                                           shape=(gene_n.max() + 1, gene_c.max() + 1),
-                                           dtype=data_dtype)
-
-                gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast.densify_without_zero_rows(gene_coo)
-
-                map_argmax = xp.argmax(gene_nonzero, axis=1, dtype=index_dtype)
-            else:
-                gene_coo = sp.coo_array((gene_data, (gene_n, gene_c)),
-                                        shape=(gene_n.max() + 1, gene_c.max() + 1),
-                                        dtype=data_dtype)
-
-                gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast.densify_without_zero_rows(gene_coo)
-
-                map_argmax = xp.argmax(gene_nonzero, axis=1).astype(index_dtype)
-
-            additional_noise_counts = noise_target - xp.sum(map_argmax, dtype=data_dtype)
-
-            step_direction = xp.sign(additional_noise_counts)
-
-            if step_direction == 0:
-                # Target == MAP
-                gene_noise_counts = map_argmax
-            elif step_direction > 0:
-                # Target > MAP
-
-                # print("step+")
-
-                max_c_idx = gene_nonzero.shape[1] - 1
-
-                while True:
-                    delta_argmax = map_argmax + 1
-
-                    overflowed_rows_mask = delta_argmax > max_c_idx
-
-                    delta_argmax = xp.minimum(delta_argmax, max_c_idx)
-
-                    delta_rewards = gene_nonzero[xp.arange(gene_nonzero.shape[0]), delta_argmax]
-
-                    delta_rewards[overflowed_rows_mask] = -xp.inf
-
-                    if use_gpu:
-                        #TODO: maybe switch to xp.partition
-                        topk_reward_values, topk_reward_indices = torch.topk(
-                            torch.as_tensor(delta_rewards, device='cuda'),
-                            k=int(xp.minimum(additional_noise_counts, delta_rewards.shape[0])),
-                            largest=True,
-                            sorted=False,
-                        )
-                        topk_reward_values = cp.asarray(topk_reward_values)
-                        topk_reward_indices = cp.asarray(topk_reward_indices)
-                    else:
-                        topk_reward_values, topk_reward_indices = torch.topk(
-                            torch.from_numpy(delta_rewards),
-                            k=int(np.minimum(additional_noise_counts, delta_rewards.shape[0])),
-                            largest=True,
-                            sorted=False,
-                        )
-                        topk_reward_values = topk_reward_values.numpy()
-                        topk_reward_indices = topk_reward_indices.numpy()
-
-                    if xp.any((topk_reward_values == 0.0) | (topk_reward_values == -xp.inf)):
-                        # print("not enough extra possible counts")
-                        topk_reward_indices = topk_reward_indices[
-                            ~((topk_reward_values == 0.0) | (topk_reward_values == -xp.inf))
-                        ]
-
-                        map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
-
-                        gene_noise_counts = map_argmax
-
-                        break
-
-                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
-
-                    if map_argmax.sum() == noise_target:  # probly inconsistent rounding
-                        gene_noise_counts = map_argmax
-                        # print("break")
-
-                        break
-                    else:
-                        if xp.all(delta_argmax == max_c_idx):
-                            # target not achievable with all noise counts maxed
-                            # print("impossible break")
-                            gene_noise_counts = map_argmax
-
-                            break
-                        else:
-                            additional_noise_counts = noise_target - xp.sum(map_argmax)
-                            # print("loop")
-
-            elif step_direction < 0:
-                # Target < MAP
-                # print("step-")
-
-                while True:
-                    delta_argmax = map_argmax - 1
-
-                    underflowed_rows_mask = delta_argmax < 0
-
-                    delta_argmax = xp.maximum(delta_argmax, 0)
-
-                    delta_rewards = gene_nonzero[xp.arange(gene_nonzero.shape[0]), delta_argmax]
-
-                    delta_rewards[underflowed_rows_mask] = -xp.inf
-
-                    if use_gpu:
-                        topk_reward_values, topk_reward_indices = torch.topk(
-                            torch.as_tensor(delta_rewards, device='cuda'),
-                            k=int(xp.minimum(-additional_noise_counts, delta_rewards.shape[0])),
-                            largest=True,
-                            sorted=False,
-                        )
-
-                        # TODO: check for invalid topk_reward_values as above
-
-                        #topk_reward_values = cp.asarray(topk_reward_values)
-                        topk_reward_indices = cp.asarray(topk_reward_indices)
-                    else:
-                        topk_reward_values, topk_reward_indices = torch.topk(
-                            torch.from_numpy(delta_rewards),
-                            k=int(np.minimum(-additional_noise_counts, delta_rewards.shape[0])),
-                            largest=True,
-                            sorted=False,
-                        )
-
-                        # TODO: check for invalid topk_reward_values as above
-
-                        #topk_reward_values = topk_reward_values.numpy()
-                        topk_reward_indices = topk_reward_indices.numpy()
-
-                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
-
-                    if map_argmax.sum() == noise_target:  # probly inconsistent rounding
-                        gene_noise_counts = map_argmax
-                        # print("break")
-
-                        break
-                    else:
-                        if xp.all(delta_argmax == 0):
-                            # target not achievable with all noise counts at min
-                            # print("impossible break")
-                            gene_noise_counts = map_argmax
-
-                            break
-                        else:
-                            additional_noise_counts = noise_target - xp.sum(map_argmax)
-                            # print("loop")
-
-            if xp.count_nonzero(gene_noise_counts) != 0:
-                out_data.extend(gene_noise_counts.get() if use_gpu else gene_noise_counts)
-                out_row_indices.extend(nonzero_rows.get() if use_gpu else nonzero_rows)
-                out_col_indices.extend([gene_idx.get() if use_gpu else gene_idx] * len(nonzero_rows))
-
-                # logger.debug("added col")
-
-        # TODO: verify that genes are in the correct order
-
-        if return_csr:
-            out_coo = sp.coo_matrix((out_data, (out_row_indices, out_col_indices)), shape=(n_cells, n_genes))
-
-            out_csr = sp.csr_matrix(out_coo)
-            out_csr.eliminate_zeros()
-
-            return out_csr
-        else:
-            return (
-                np.array(out_data, dtype=np.int32),
-                np.array(out_row_indices, dtype=np.int32),
-                np.array(out_col_indices, dtype=np.int32),
-            )
-
-    def estimate_noise(
-        self,
-        noise_log_prob_coo: sp.coo_matrix,
-        noise_offsets: Optional[Dict[int, int]],
-        noise_targets_per_gene: np.ndarray | None = None,
-        verbose: bool = False,
-        n_chunks: Optional[int] = None,
-        use_multiple_processes: bool = False,
-        **kwargs,
-    ) -> sp.csr_matrix:
-
-        # TODO: handle noise_offsets
-
-        t0 = time.time()
-
-        setup_gpu = True
-        use_gpu = False
-
-        if use_gpu:
-            assert setup_gpu
-            assert not use_multiple_processes #TODO: try to make this work, but it will probably be even slower
-
-        data_dtype = np.float32
-        index_dtype = np.int32 # TODO: check the effect of changing index dtypes
-
-        if setup_gpu:
-            # Do an example CuPy computation to measure CUDA context initialization time.
-            # Actually, init may happen in get_ng_indices upon calling cp.get_array_module, not sure.
-            t_cuda_init_start = time.time()
-
-            x_gpu = cp.array([1, 2, 3])
-            l2_gpu = cp.linalg.norm(x_gpu)
-            print(l2_gpu)
-
-            t_cuda_init_end = time.time()
-
-            logger.info(f"{timestamp()} cuda init time = {(t_cuda_init_end - t_cuda_init_start):.2f} sec")
-
-            data = cp.asarray(noise_log_prob_coo.data, dtype=data_dtype)
-
-            data = data - (np.floor(data.min()) - 1)
-
-            n_cells = self.index_converter.total_n_cells
-            n_genes = self.index_converter.total_n_genes
-            n_c = noise_log_prob_coo.shape[1]
-
-            n, g = self.index_converter.get_ng_indices(m_inds=cp.asarray(noise_log_prob_coo.row))
-            n = n.astype(index_dtype)
-            g = g.astype(index_dtype)
-            c = cp.asarray(noise_log_prob_coo.col, dtype=index_dtype)
-
-            order = cp.argsort(g).astype(index_dtype)  # does not support kind="mergesort", should be stable by default
-            g_sorted = g[order]
-            n_sorted = n[order]
-            c_sorted = c[order]
-            data_sorted = data[order]
-
-            unique_genes, start_idx, counts = cp.unique(g_sorted, return_index=True, return_counts=True)
-
-            start_idx = start_idx.astype(index_dtype)
-            counts = counts.astype(index_dtype)
-
-            noise_targets_per_gene = cp.asarray(noise_targets_per_gene, dtype=data_dtype)
-        else:
-            data = noise_log_prob_coo.data
-
-            data = data - (np.floor(data.min()) - 1)
-
-            n_cells = self.index_converter.total_n_cells
-            n_genes = self.index_converter.total_n_genes
-            n_c = noise_log_prob_coo.shape[1]
-
-            n, g = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
-            n = n.astype(index_dtype)
-            g = g.astype(index_dtype)
-            c = noise_log_prob_coo.col.astype(index_dtype)
-
-            # not sure if we need the mergesort for stability
-            order = np.argsort(g, kind="mergesort").astype(index_dtype)
-            g_sorted = g[order]
-            n_sorted, n_sorted_sm = self._optionally_share(n[order], use_multiple_processes)
-            c_sorted, c_sorted_sm = self._optionally_share(c[order], use_multiple_processes)
-            data_sorted, data_sorted_sm = self._optionally_share(data[order], use_multiple_processes)
-
-            unique_genes, start_idx, counts = np.unique(g_sorted, return_index=True, return_counts=True)
-
-            unique_genes, unique_genes_sm = self._optionally_share(unique_genes, use_multiple_processes)
-            start_idx, start_idx_sm = self._optionally_share(start_idx.astype(index_dtype), use_multiple_processes)
-            counts, counts_sm = self._optionally_share(counts.astype(index_dtype), use_multiple_processes)
-
-            noise_targets_per_gene, noise_targets_per_gene_sm = self._optionally_share(
-                noise_targets_per_gene.astype(data_dtype), use_multiple_processes
-            )
-
-        # Yes, it is actually faster to load and unload everything off the GPU and copy it all into shared memory.
-        if setup_gpu and not use_gpu:
-            n_sorted = n_sorted.get()
-            c_sorted = c_sorted.get()
-            data_sorted = data_sorted.get()
-
-            unique_genes = unique_genes.get()
-            start_idx = start_idx.get()
-            counts = counts.get()
-
-            noise_targets_per_gene = noise_targets_per_gene.get()
-
-            if use_multiple_processes:
-                n_sorted, n_sorted_sm = self._share(n_sorted)
-                c_sorted, c_sorted_sm = self._share(c_sorted)
-                data_sorted, data_sorted_sm = self._share(data_sorted)
-
-                unique_genes, unique_genes_sm = self._share(unique_genes)
-                start_idx, start_idx_sm = self._share(start_idx)
-                counts, counts_sm = self._share(counts)
-
-                noise_targets_per_gene, noise_targets_per_gene_sm = self._share(noise_targets_per_gene)
-
-        t_setup = time.time()
-
-        logger.info(f"{timestamp()} fast-mckp setup time = {(t_setup - t0):.2f} sec")
-
-        if use_multiple_processes:
-            #TODO: now memory usage is lower and 6 processes are faster, need to remeasure
-
-            # number of p-core threads (12) is fastest, uses ~10GB of peak memory, similar to noise target compute usage
-            # number of p-cores (6) is slightly slower, uses ~14GB of peak memory
-            # number of p-core + e-core threads (20 == mp.cpu_count()) is a couple seconds slower, uses ~17GB of peak mem
-            # this info is hard to get programmatically without obscure hacks, and there is no library support
-            # effects recent Intel and Apple CPUs
-
-            # n_processes = mp.cpu_count()
-            n_processes = 6
-
-            # TODO: preallocating return arrays didn't increase speed and doesn't work right
-            """
-            nonzero_upper_bound = 20000000
-
-            process_nonzero_upper_bound = int(nonzero_upper_bound / n_processes)
-
-            return_array, return_array_sm = self._optionally_share(
-                np.zeros(shape=(n_processes, 3, process_nonzero_upper_bound), dtype=np.int32)
-            )
-            """
-            futures = []
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=n_processes, mp_context=mp.get_context("spawn")
-            ) as executor:
-                for i in range(n_processes):
-                    kwargs = {
-                        "unique_genes": (unique_genes.shape, unique_genes.dtype, unique_genes_sm),
-                        "start_idx": (start_idx.shape, start_idx.dtype, start_idx_sm),
-                        "counts": (counts.shape, counts.dtype, counts_sm),
-                        "n_sorted": (n_sorted.shape, n_sorted.dtype, n_sorted_sm),
-                        "c_sorted": (c_sorted.shape, c_sorted.dtype, c_sorted_sm),
-                        "data_sorted": (data_sorted.shape, data_sorted.dtype, data_sorted_sm),
-                        "noise_targets_per_gene": (
-                            noise_targets_per_gene.shape,
-                            noise_targets_per_gene.dtype,
-                            noise_targets_per_gene_sm,
-                        ),
-                        "n_cells": n_cells,
-                        "n_genes": n_genes,
-                        "n_c": n_c,
-                        "data_dtype": data_dtype,
-                        "index_dtype": index_dtype,
-                        "i": i,
-                        "n_processes": n_processes,
-                        "nnz_genes": unique_genes.size,
-                        #"return_array": (return_array.shape, return_array.dtype, return_array_sm),
-                        "return_array": None,
-                    }
-                    future = executor.submit(MultipleChoiceKnapsackFast._estimate_shared, **kwargs)
-                    futures.append(future)
-
-                done, not_done = concurrent.futures.wait(
-                    futures,
-                    return_when=concurrent.futures.ALL_COMPLETED,
-                )
-                csr_matrices = [f.result() for f in futures]
-
-            """
-            result = return_array.transpose(1, 0, 2).reshape(3, n_processes * process_nonzero_upper_bound)
-
-            out_csr = sp.csr_matrix((result[0], (result[1], result[2])), shape=(n_cells, n_genes)).copy()
-            out_csr.eliminate_zeros()
-            """
-
-            self._stop_memory_manager()
-
-            out_csr = sum(csr_matrices)
-        else:
-            mckp_results = MultipleChoiceKnapsackFast._estimate(
-                unique_genes,
-                start_idx,
-                counts,
-                n_sorted,
-                c_sorted,
-                data_sorted,
-                noise_targets_per_gene,
-                n_cells,
-                n_genes,
-                n_c,
-                data_dtype,
-                index_dtype,
-                use_gpu,
-            )
-
-            out_csr = mckp_results
-
         logger.info(f"{timestamp()} fast-mckp estimation time after prep = {(time.time() - t_setup):.2f} sec")
         logger.info(f"{timestamp()} Total fast-mckp estimation time = {(time.time() - t0):.2f} sec")
-
-        # sp.save_npz("mckp_csr_v2.npz", out_csr)
 
         return out_csr
 
