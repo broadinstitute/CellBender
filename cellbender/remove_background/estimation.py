@@ -16,10 +16,8 @@ if TYPE_CHECKING:
     from cellbender.remove_background.posterior import IndexConverter
 
 import numpy as np
-import cupy as cp
 import pandas as pd
 import scipy.sparse as sp
-import cupyx.scipy.sparse as cusp
 import torch
 from torch.distributions.categorical import Categorical
 
@@ -806,7 +804,7 @@ def _estimate_fast_mckp(
         gene_c = c_sorted[start:end]
         gene_data = data_sorted[start:end]
 
-        gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast.densify_without_zero_rows2(gene_data, gene_n, gene_c)
+        gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast.densify_without_zero_rows(gene_data, gene_n, gene_c)
 
         map_argmax = torch.argmax(gene_nonzero, dim=1)
 
@@ -837,7 +835,6 @@ def _estimate_fast_mckp(
 
                 delta_rewards[overflowed_rows_mask] = -torch.inf
 
-                # TODO: maybe switch to xp.partition
                 topk_reward_values, topk_reward_indices = torch.topk(
                     delta_rewards,
                     k=int(torch.minimum(additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
@@ -952,26 +949,6 @@ class MultipleChoiceKnapsackFast(EstimationMethod):
     @staticmethod
     @torch.no_grad()
     def densify_without_zero_rows(
-        coo: sp.coo_array | cusp.coo_matrix,
-        dtype: torch.dtype,
-        device: str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # TODO: Claude made this, I'm not sure how or if it works.
-
-        coo_row = torch.from_numpy(coo.row).to(device)
-
-        nonzero_rows_ = torch.unique(coo_row)
-
-        rows_ = torch.searchsorted(nonzero_rows_, coo_row)
-
-        dense = torch.zeros((len(nonzero_rows_), coo.shape[1]), dtype=dtype)
-        dense[rows_, torch.from_numpy(coo.col).to(device)] = torch.from_numpy(coo.data).to(device)
-
-        return dense, nonzero_rows_
-
-    @staticmethod
-    @torch.no_grad()
-    def densify_without_zero_rows2(
         data,
         row,
         col,
