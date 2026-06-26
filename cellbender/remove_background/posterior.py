@@ -1574,10 +1574,7 @@ class IndexConverter:
         else:
             raise ValueError("IndexConverter.get_m_indices received cell_inds of unkown object type")
 
-    def get_ng_indices(
-        self,
-        m_inds: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def get_ng_indices(self, m_inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Given a list of 'm' index values, return two arrays: cell index values
         and gene index values, suitable for a sparse matrix.
         """
@@ -1586,7 +1583,6 @@ class IndexConverter:
                 f"Requested m_inds out of range: "
                 f"{m_inds[(m_inds < 0) | (m_inds >= self.total_n_cells * self.total_n_genes)]}"
             )
-
         return np.divmod(m_inds, self.total_n_genes)
 
 

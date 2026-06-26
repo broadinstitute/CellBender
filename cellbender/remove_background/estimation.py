@@ -4,9 +4,6 @@ import concurrent.futures
 import logging
 import multiprocessing as mp
 import sys
-from multiprocessing import shared_memory
-from multiprocessing.managers import SharedMemoryManager
-import torch.multiprocessing as torchmp
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -19,6 +16,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import torch
+import torch.multiprocessing as torchmp
 from torch.distributions.categorical import Categorical
 
 from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
@@ -88,6 +86,7 @@ class EstimationMethod(ABC):
         #                     shape=self.index_converter.matrix_shape, dtype=dtype)
         # coo.sum_duplicates()
         # return coo.tocsr()
+
 
 class SingleSample(EstimationMethod):
     """A single sample from the noise count posterior"""
