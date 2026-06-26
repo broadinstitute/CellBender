@@ -119,6 +119,35 @@ class SingleSample(EstimationMethod):
 class Mean(EstimationMethod):
     """Posterior mean"""
 
+    def estimate_noise(
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
+    ) -> sp.csr_matrix:
+        """Given the full probabilistic posterior, compute noise counts by
+        taking the mean of each probability distribution.
+
+        Args:
+            noise_log_prob_coo: The noise log prob data structure: log prob
+                values in a (m, c) COO matrix
+            noise_offsets: Noise count offset values keyed by 'm'.
+
+        Returns:
+            noise_count_csr: Estimated noise count matrix.
+        """
+        # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
+
+        def _torch_mean(x):
+            c = torch.arange(x.shape[1], dtype=float).to(x.device)
+            return torch.matmul(x.exp(), c.t())
+
+        result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo, fun=_torch_mean, device=device)
+        return self._estimation_array_to_csr(
+            data=result["result"], m=result["m"], noise_offsets=noise_offsets, dtype=np.float32
+        )
+
+
+class MeanFast(EstimationMethod):
+    """Posterior mean"""
+
     @torch.no_grad()
     def estimate_noise(
         self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs

@@ -27,8 +27,8 @@ from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
-from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, MultipleChoiceKnapsackFast, \
-    SingleSample, ThresholdCDF
+from cellbender.remove_background.estimation import MAP, Mean, MeanFast, MultipleChoiceKnapsack, \
+    MultipleChoiceKnapsackFast, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.posterior import (
@@ -264,8 +264,10 @@ def compute_output_denoised_counts_reports_metrics(
         estimator = ThresholdCDF
     elif args.estimator == "mckp" or args.estimator == "fast-mckp":
         if args.estimator == "mckp":
+            target_estimator = Mean
             estimator = MultipleChoiceKnapsack
-        else: #args.estimator == "fast-mckp":
+        else:  # args.estimator == "fast-mckp":
+            target_estimator = MeanFast
             estimator = MultipleChoiceKnapsackFast
 
         # Prep specific for MCKP: target estimation.
@@ -278,7 +280,7 @@ def compute_output_denoised_counts_reports_metrics(
         noise_target_fun_per_cell = compute_mean_target_removal_as_function(
             noise_count_posterior_coo=posterior._noise_count_posterior_coo,
             noise_offsets=posterior._noise_count_posterior_coo_offsets,
-            index_converter=posterior.index_converter,
+            target_estimator=target_estimator(index_converter=posterior.index_converter),
             raw_count_csr_for_cells=cell_counts,
             n_cells=len(cell_inds),
             device="cuda" if args.use_cuda else "cpu",  # TODO check this
