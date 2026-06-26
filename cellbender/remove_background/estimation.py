@@ -986,6 +986,9 @@ def _estimate_fast_mckp2(
 
     print(f"{timestamp()} fast-mckp2 process {process_index} time = {(time.time() - t0):.2f} sec")
 
+    if use_multiple_processes:
+        out_stack_queue.join()
+
     return out_csr
 
 class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
@@ -1130,7 +1133,7 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
         if use_multiple_processes:
             gene_chunks = torch.arange(unique_genes.shape[0], device=device).tensor_split(n_processes)
 
-            out_stack_queue = torchmp.Queue()
+            out_stack_queue = torchmp.JoinableQueue()
 
             # Sharing CUDA tensors requires spawn or forkserver.
             # Only spawn works on Windows and Mac, but is slow.
@@ -1183,6 +1186,9 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
                 )
 
                 del out_stack
+
+            for i in range(n_processes):
+                out_stack_queue.task_done()
 
             process_context.join()
 
