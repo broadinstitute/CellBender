@@ -1064,6 +1064,9 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
         if not use_multiple_processes:
             torch.set_num_threads(n_threads_per_process_single)
 
+        # Release unused memory so the usage reported by nvidia-smi doesn't appear to be higher than it actually is.
+        torch.cuda.empty_cache()
+
         # TODO: test RAM and VRAM usage
 
         # p-core/e-core counts are hard to get programmatically without obscure hacks.
@@ -1127,6 +1130,8 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
         noise_targets_per_gene = noise_targets_per_gene.to(device)
 
         t_setup = time.time()
+
+        torch.cuda.empty_cache()
 
         logger.info(f"{timestamp()} fast-mckp2 setup time = {(t_setup - t0):.2f} sec")
 
@@ -1222,6 +1227,8 @@ class MultipleChoiceKnapsackFast2(SharedEstimationMethod):
             )
 
         torch.set_num_threads(original_torch_num_thread)
+
+        torch.cuda.empty_cache()
 
         logger.info(f"{timestamp()} fast-mckp2 estimation time after prep = {(time.time() - t_setup):.2f} sec")
         logger.info(f"{timestamp()} Total fast-mckp2 estimation time = {(time.time() - t0):.2f} sec")
