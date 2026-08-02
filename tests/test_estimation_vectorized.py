@@ -27,13 +27,18 @@ from conftest import sparse_matrix_equal
 # Reuse the fixtures from the existing test module verbatim.
 from test_estimation import log_prob_coo_base, mckp_log_prob_coo  # noqa: F401
 
-from cellbender.remove_background.estimation import MultipleChoiceKnapsack
+from cellbender.remove_background.estimation import (
+    MAP,
+    MultipleChoiceKnapsack,
+    apply_function_dense_chunks,
+)
 from cellbender.remove_background.estimation_vectorized import (
     MultipleChoiceKnapsackVectorized,
     chunk_estimate_noise_vectorized,
     stable_topk_positions_per_group,
 )
 from cellbender.remove_background.posterior import IndexConverter
+from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
 
 MCKP_CASES = (
     [1, np.zeros(8), np.array([0, 1, 2, 0, 0, 0, 0, 1]), None],
@@ -395,15 +400,22 @@ def test_adversarial_float32_tie_break_at_rounding_boundary():
     assert np.allclose(d32.astype(np.float64), d64, rtol=eps * 4, atol=0.0)
 
 
-def test_column_compaction_quirk_is_replicated():
-    """Adversarial: force ``chunked_iterator``'s c-axis compaction to shift the MAP.
+def test_noncontiguous_c_axis_agrees_and_map_is_a_true_noise_count():
+    """Adversarial: a posterior where no entry occupies c=0.
 
-    ``chunked_iterator`` compacts the column axis with ``np.unique`` before
-    ``MAP.torch_argmax`` runs, and ``apply_function_dense_chunks`` throws the
-    ``unique_col_values`` away. So when no entry occupies c=0, ``map_dict['result']``
-    is off by one from the true noise count, the ``c == map`` NaN sentinel lands on
-    the WRONG row, and the original's global ``.diff()`` leaks a cross-droplet
-    delta. The vectorized version must leak the identical one.
+    RENAMED from ``test_column_compaction_quirk_is_replicated``. It used to assert
+    that the vectorized kernel replicated a CONFIRMED UPSTREAM BUG: ``chunked_iterator``
+    compacted the column axis with ``np.unique`` before ``MAP.torch_argmax`` ran, and
+    ``apply_function_dense_chunks`` threw the ``unique_col_values`` away, so with no
+    entry at c=0 ``map_dict['result']`` was off by one from the true noise count, the
+    ``c == map`` NaN sentinel landed on the WRONG row, and the global ``.diff()``
+    leaked a cross-droplet delta -- which the vectorized version had to leak too.
+
+    That bug is fixed (see the NOTE in ``estimation.chunked_iterator``), so the
+    premise is gone. The input is still a valuable adversarial case, so the test is
+    kept with its assertions strengthened: the two implementations must still agree
+    exactly, AND the shared MAP prefix must now report the TRUE noise count, which
+    is what makes the ``c == map`` sentinel land on the intended row.
     """
     n_cells, n_genes, n_c = 5, 4, 7
     rng = np.random.default_rng(4242)
@@ -411,7 +423,8 @@ def test_column_compaction_quirk_is_replicated():
     for n in range(n_cells):
         for gene in range(n_genes):
             m = n * n_genes + gene
-            # never occupy c = 0 -> np.unique(col) starts at 1 -> compaction shift
+            # never occupy c = 0 -> the occupied columns are not 0..K-1, which is
+            # exactly the condition the old c-axis compaction got wrong
             start = 1
             width = int(rng.integers(3, n_c - start + 1))
             logits = rng.normal(size=width)
@@ -426,6 +439,17 @@ def test_column_compaction_quirk_is_replicated():
     assert coo.col.min() == 1, "test setup must exclude column 0"
     converter = IndexConverter(total_n_cells=n_cells, total_n_genes=n_genes)
     old_est = MultipleChoiceKnapsack(index_converter=converter)
+
+    # The shared MAP prefix must report TRUE noise counts, i.e. never 0 here, since
+    # nothing occupies c=0. Under the old compaction every m whose argmax fell on its
+    # own first occupied column reported 0. This is what the fix changed.
+    dense = log_prob_sparse_to_dense(coo)
+    map_dict = apply_function_dense_chunks(noise_log_prob_coo=coo, fun=MAP.torch_argmax, device="cpu")
+    np.testing.assert_array_equal(map_dict["result"], dense.argmax(axis=1))
+    assert map_dict["result"].min() >= 1, (
+        f"MAP reported a noise count of 0 for a posterior with no entry at c=0: {map_dict['result']}"
+    )
+
     for targets in (np.zeros(n_genes), np.ones(n_genes) * 6, np.ones(n_genes) * 20):
         old = old_est._chunk_estimate_noise(
             noise_log_prob_coo=coo, noise_offsets={}, noise_targets_per_gene=targets

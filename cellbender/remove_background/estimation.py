@@ -719,29 +719,110 @@ def chunked_iterator(
     Returns:
         A generator that yields compact CSR sparse matrices until the whole dataset
         has been yielded. "Compact" in the sense that if they are made dense, there
-        will be no all-zero rows.
-            Tuple[chunk csr, actual row values in the full matrix]
+        will be no all-zero rows. The 'c' (column / noise count) axis is NOT
+        compacted: column indices in each chunk are the true noise count values,
+        and the chunk width is always ``coo.shape[1]``.
+            Tuple[chunk coo, actual row values in the full matrix,
+                  actual column values in the full matrix]
 
+    NOTE (bug fix, see ``_subset_coo`` and the module history): this function used
+    to compact the 'c' axis as well, via
+    ``np.unique(coo.col[logic], return_inverse=True)``. Its only caller,
+    ``apply_function_dense_chunks``, discards the returned ``unique_col_values``
+    and never inverts that mapping, so every estimator that decodes a column
+    position as a noise count (``MAP`` argmax, ``Mean``'s ``arange`` dot product,
+    ``ThresholdCDF``, ``SingleSample``) silently returned the wrong noise count
+    whenever a chunk's occupied columns were not exactly ``0..K-1``. Densifying to
+    the full ``coo.shape[1]`` width costs no extra memory, because ``batch_size``
+    below is already computed against that full width.
     """
     n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4  # torch float32 is 4 bytes
     batch_size = max(1, int(np.floor(n_elements_in_batch / coo.shape[1])))
 
-    # COO rows are not necessarily contiguous or in order
-    unique_m_values = np.unique(coo.row)
-    n_chunks = max(1, len(unique_m_values) // batch_size)
-    row_m_value_chunks = np.array_split(unique_m_values, n_chunks)
-    coo_row_series = pd.Series(coo.row)
+    # COO rows are not necessarily contiguous or in order.
+    # ONE np.unique over coo.row, with the inverse, supplies everything downstream:
+    # the m-values, how many there are, and each chunk's compact row index. The
+    # previous implementation paid for np.unique(coo.row) here, another
+    # np.unique(coo.row[logic], return_inverse=True) per chunk, a third
+    # np.unique in apply_function_dense_chunks, plus a pandas .isin() over all
+    # nonzeros per chunk -- O(n_chunks * nnz) where O(nnz) suffices.
+    unique_m_values, inverse = np.unique(coo.row, return_inverse=True)
+    inverse = inverse.ravel()  # numpy >= 2 may return an inverse shaped like coo.row
 
-    for row_m_values in row_m_value_chunks:
-        logic = coo_row_series.isin(set(row_m_values))
-        # Map these row values to a compact set of unique integers
-        unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
-        unique_col_values, cols = np.unique(coo.col[logic], return_inverse=True)
-        chunk_coo = sp.coo_matrix(
-            (coo.data[logic], (rows, cols)),
-            shape=(len(unique_row_values), len(unique_col_values)),
+    n_chunks = max(1, len(unique_m_values) // batch_size)
+    # np.array_split hands out CONTIGUOUS slices of the sorted unique values, so a
+    # chunk is a contiguous range of unique-value indices and chunk k's compact row
+    # index is just ``inverse - (index of chunk k's first unique value)``.
+    unique_index_chunks = np.array_split(np.arange(len(unique_m_values)), n_chunks)
+
+    # The true noise count values spanned by every chunk (the axis is not compacted).
+    all_col_values = np.arange(coo.shape[1])
+
+    if len(unique_m_values) == 0:
+        # Degenerate empty COO: the previous implementation's .isin() over an empty
+        # set produced an all-False mask and yielded a single empty chunk. Preserved.
+        yield (
+            sp.coo_matrix(
+                (
+                    np.zeros(0, dtype=coo.data.dtype),
+                    (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)),
+                ),
+                shape=(0, coo.shape[1]),
+            ),
+            np.zeros(0, dtype=coo.row.dtype),
+            all_col_values,
         )
-        yield (chunk_coo, unique_row_values, unique_col_values)
+        return
+
+    # First unique-value index owned by each chunk. (np.array_split can only emit
+    # empty pieces when n_chunks > len(unique_m_values), which cannot happen here
+    # since batch_size >= 1 implies n_chunks <= len(unique_m_values); the filter is
+    # defensive, and unique_index_chunks is filtered the same way to stay aligned.)
+    unique_index_chunks = [s for s in unique_index_chunks if s.size > 0]
+    chunk_first_unique_idx = np.array([s[0] for s in unique_index_chunks], dtype=np.int64)
+    n_real_chunks = chunk_first_unique_idx.size
+
+    if n_real_chunks == 1:
+        # Fast path: no partitioning work at all.
+        chunk_slices = [slice(0, inverse.size)]
+        order = None
+    else:
+        # Assign every nonzero to its owning chunk in one vectorized pass. Because
+        # ``inverse`` is already the index into ``unique_m_values``, this is a
+        # threshold assignment on the unique-index, not a search over m-values.
+        chunk_idx_of_entry = np.searchsorted(chunk_first_unique_idx, inverse, side="right").astype(np.int64) - 1
+        # A STABLE argsort groups entries by chunk while preserving the original
+        # within-chunk COO entry order, which is what the boolean mask used to do.
+        order = np.argsort(chunk_idx_of_entry, kind="stable")
+        counts = np.bincount(chunk_idx_of_entry, minlength=n_real_chunks)
+        del chunk_idx_of_entry  # nnz-sized; not needed past this point
+        edges = np.zeros(n_real_chunks + 1, dtype=np.int64)
+        np.cumsum(counts, out=edges[1:])
+        chunk_slices = [slice(int(edges[k]), int(edges[k + 1])) for k in range(n_real_chunks)]
+
+    for k in range(n_real_chunks):
+        uniq_slice = unique_index_chunks[k]
+        lo_unique = int(uniq_slice[0])
+        unique_row_values = unique_m_values[uniq_slice]
+
+        if order is None:
+            sel_data = coo.data
+            sel_inverse = inverse
+            sel_col = coo.col
+        else:
+            idx = order[chunk_slices[k]]
+            sel_data = coo.data[idx]
+            sel_inverse = inverse[idx]
+            sel_col = coo.col[idx]
+
+        # Compact row index within this chunk, without any per-chunk np.unique.
+        rows = sel_inverse - lo_unique
+
+        chunk_coo = sp.coo_matrix(
+            (sel_data, (rows, sel_col)),
+            shape=(len(unique_row_values), coo.shape[1]),
+        )
+        yield (chunk_coo, unique_row_values, all_col_values)
 
 
 def apply_function_dense_chunks(
@@ -768,14 +849,16 @@ def apply_function_dense_chunks(
             'm': np.ndarray of indices
             'result': the values computed by the function
 
+    NOTE (performance): this used to preallocate its output using
+    ``len(np.unique(noise_log_prob_coo.row))`` -- a full O(nnz log nnz) sort over
+    every nonzero, on top of the two ``chunked_iterator`` already paid for. The
+    chunks partition exactly those unique rows, so accumulating and concatenating
+    gives the identical result without the extra pass.
     """
-    array_length = len(np.unique(noise_log_prob_coo.row))
+    m_parts = []
+    out_parts = []
 
-    m = np.zeros(array_length, dtype=np.uint64)
-    out = np.zeros(array_length)
-    a = 0
-
-    for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
+    for coo, row, _col in chunked_iterator(coo=noise_log_prob_coo):
         dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
         if torch.numel(dense_tensor) == 0:
             # github issue 207
@@ -783,13 +866,31 @@ def apply_function_dense_chunks(
         s = fun(dense_tensor, **kwargs)
         if s.ndim == 0:
             # avoid "TypeError: len() of a 0-d tensor"
-            len_s = 1
+            s_np = np.atleast_1d(s.detach().cpu().numpy())
         else:
-            len_s = len(s)
-        m[a : (a + len_s)] = row
-        out[a : (a + len_s)] = s.detach().cpu().numpy()
-        a = a + len_s
+            s_np = s.detach().cpu().numpy()
+        if s_np.shape[0] != row.shape[0]:
+            # Guard, not new behaviour: the preallocated-output version this
+            # replaced raised an opaque "could not broadcast input array" here.
+            # Reachable because sparse_utils.todense_fill() ends in .squeeze(), so a
+            # chunk of width 1 with >1 rows densifies to 1-D and `fun` reduces it to
+            # a single value. Fail loudly rather than return mismatched m/result.
+            raise ValueError(
+                f"{getattr(fun, '__name__', fun)} produced {s_np.shape[0]} value(s) for a chunk of "
+                f"{row.shape[0]} row(s) (dense chunk shape {tuple(dense_tensor.shape)}). "
+                "This function requires one value per row of the dense chunk."
+            )
+        m_parts.append(np.asarray(row, dtype=np.uint64))
+        out_parts.append(s_np)
 
+    if not m_parts:
+        # Nothing was processed: only reachable for an all-empty COO, where the
+        # previous implementation also returned zero-length arrays.
+        n = len(np.unique(noise_log_prob_coo.row))
+        return {"m": np.zeros(n, dtype=np.uint64), "result": np.zeros(n)}
+
+    m = np.concatenate(m_parts).astype(np.uint64, copy=False)
+    out = np.concatenate(out_parts).astype(np.float64, copy=False)
     return {"m": m, "result": out}
 
 

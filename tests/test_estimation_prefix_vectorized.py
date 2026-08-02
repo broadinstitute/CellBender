@@ -1,13 +1,32 @@
 """Correctness tests for the vectorized shared-prefix helpers.
 
-Every test here asserts *identity* with the pristine ``estimation.py`` helper it
-replaces, not mere equivalence: same chunk contents in the same order, same
-arrays, same final CSR.
+Every test here asserts *identity* with the ``estimation.py`` helper it replaces,
+not mere equivalence: same chunk contents in the same order, same arrays, same
+final CSR.
+
+NOTE on the reference implementation below. These tests originally compared
+``estimation_prefix_vectorized`` against a pristine, unoptimized ``estimation.py``,
+which made ``estimation.py`` itself the oracle. That is no longer true: the same
+``np.unique``/``isin`` hoisting has since been applied to
+``estimation.chunked_iterator`` too (it is reached by hardcoded ``Mean`` and
+``MAP`` call sites in ``posterior.py`` regardless of ``--estimator``). Comparing
+two copies of the same algorithm would prove nothing, so
+``_chunked_iterator_reference`` below is a literal transcription of the
+pre-hoisting structure -- per-chunk ``pandas.isin`` plus per-chunk
+``np.unique(..., return_inverse=True)`` on the rows -- and BOTH production
+implementations are checked against it.
+
+It deliberately does NOT reproduce the old c-axis compaction: that was a
+confirmed correctness bug (the caller discards ``unique_col_values`` and then
+reads a compacted column position as a noise count), fixed in both production
+implementations. See the NOTE in ``estimation.chunked_iterator``.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.sparse as sp
+import torch
 from conftest import sparse_matrix_equal
 from test_estimation import log_prob_coo_base, mckp_log_prob_coo  # noqa: F401
 from test_estimation_vectorized import MCKP_CASES, MCKP_IDS, _random_posterior
@@ -15,6 +34,51 @@ from test_estimation_vectorized import MCKP_CASES, MCKP_IDS, _random_posterior
 from cellbender.remove_background import estimation as E
 from cellbender.remove_background import estimation_prefix_vectorized as PV
 from cellbender.remove_background.posterior import IndexConverter
+from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
+
+
+def _chunked_iterator_reference(coo: sp.coo_matrix, max_dense_batch_size_GB: float = 1.0):
+    """Unoptimized oracle for ``chunked_iterator``: the pre-hoisting structure.
+
+    Bug 1 (c-axis compaction) fixed; Bug 3 (redundant ``np.unique`` / per-chunk
+    ``isin``) deliberately NOT applied, so this is an independent reference for
+    "the hoisting is a pure performance change".
+    """
+    n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4
+    batch_size = max(1, int(np.floor(n_elements_in_batch / coo.shape[1])))
+
+    unique_m_values = np.unique(coo.row)
+    n_chunks = max(1, len(unique_m_values) // batch_size)
+    row_m_value_chunks = np.array_split(unique_m_values, n_chunks)
+    coo_row_series = pd.Series(coo.row)
+
+    for row_m_values in row_m_value_chunks:
+        logic = coo_row_series.isin(set(row_m_values))
+        unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
+        chunk_coo = sp.coo_matrix(
+            (coo.data[logic], (rows, coo.col[logic])),
+            shape=(len(unique_row_values), coo.shape[1]),
+        )
+        yield (chunk_coo, unique_row_values, np.arange(coo.shape[1]))
+
+
+def _apply_function_dense_chunks_reference(noise_log_prob_coo, fun, device="cpu", **kwargs):
+    """Unoptimized oracle for ``apply_function_dense_chunks``: preallocated output
+    sized by its own third ``np.unique(coo.row)``, filled chunk by chunk."""
+    array_length = len(np.unique(noise_log_prob_coo.row))
+    m = np.zeros(array_length, dtype=np.uint64)
+    out = np.zeros(array_length)
+    a = 0
+    for coo, row, _col in _chunked_iterator_reference(coo=noise_log_prob_coo):
+        dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
+        if torch.numel(dense_tensor) == 0:
+            continue
+        s = fun(dense_tensor, **kwargs)
+        len_s = 1 if s.ndim == 0 else len(s)
+        m[a : (a + len_s)] = row
+        out[a : (a + len_s)] = s.detach().cpu().numpy()
+        a = a + len_s
+    return {"m": m, "result": out}
 
 
 def _coo_triples_equal(a: sp.coo_matrix, b: sp.coo_matrix) -> bool:
@@ -36,14 +100,27 @@ def _coo_triples_equal(a: sp.coo_matrix, b: sp.coo_matrix) -> bool:
     "batch_gb", (1.0, 1e-5, 1e-6), ids=["one_chunk", "several_chunks", "many_chunks"]
 )
 def test_chunked_iterator_identical(batch_gb, dtype):
-    """Chunk-for-chunk, triple-for-triple identity, including within-chunk order."""
+    """Chunk-for-chunk, triple-for-triple identity, including within-chunk order.
+
+    Both production implementations are additionally checked against the
+    unoptimized ``_chunked_iterator_reference``: since both now share the same
+    hoisting, comparing them only to each other would no longer discriminate.
+    """
     rng = np.random.default_rng(11)
     _conv, coo, _offs = _random_posterior(
         rng, n_cells=40, n_genes=25, n_counts_max=12, p_entry=0.5, log_prob_decimals=16, dtype=dtype
     )
+    ref = list(_chunked_iterator_reference(coo=coo, max_dense_batch_size_GB=batch_gb))
     old = list(E.chunked_iterator(coo=coo, max_dense_batch_size_GB=batch_gb))
     new = list(PV.chunked_iterator_vectorized(coo=coo, max_dense_batch_size_GB=batch_gb))
     assert len(old) == len(new), f"{len(old)} vs {len(new)} chunks"
+    assert len(ref) == len(old), f"reference gave {len(ref)} chunks, estimation.py gave {len(old)}"
+    for i, ((cr, rr, clr), (co, ro, clo)) in enumerate(zip(ref, old)):
+        assert _coo_triples_equal(cr, co), f"chunk {i}: estimation.py differs from unoptimized reference"
+        assert np.array_equal(rr, ro) and np.array_equal(clr, clo), f"chunk {i}: reference row/col values differ"
+    for i, ((cr, rr, clr), (cv, rv, clv)) in enumerate(zip(ref, new)):
+        assert _coo_triples_equal(cr, cv), f"chunk {i}: vectorized differs from unoptimized reference"
+        assert np.array_equal(rr, rv) and np.array_equal(clr, clv), f"chunk {i}: reference row/col values differ"
 
     # Verify the scenario is what its id claims, derived from the same formula the
     # implementation uses -- rather than assuming a given GB budget splits this
@@ -76,24 +153,105 @@ def test_chunked_iterator_unsorted_coo_identical():
     coo = sp.coo_matrix((coo.data[perm], (coo.row[perm], coo.col[perm])), shape=coo.shape)
     saw_multichunk = False
     for gb in (1.0, 1e-6):
+        ref = list(_chunked_iterator_reference(coo=coo, max_dense_batch_size_GB=gb))
         old = list(E.chunked_iterator(coo=coo, max_dense_batch_size_GB=gb))
         new = list(PV.chunked_iterator_vectorized(coo=coo, max_dense_batch_size_GB=gb))
-        assert len(old) == len(new)
+        assert len(ref) == len(old) == len(new)
         saw_multichunk |= len(old) > 1
-        for (ca, ra, cla), (cb, rb, clb) in zip(old, new):
+        for (c0, r0, cl0), (ca, ra, cla), (cb, rb, clb) in zip(ref, old, new):
             assert np.array_equal(ra, rb) and np.array_equal(cla, clb)
             assert _coo_triples_equal(ca, cb)
+            # ...and both match the unoptimized reference, which selects chunk
+            # members with a boolean mask rather than a stable argsort.
+            assert np.array_equal(r0, ra) and np.array_equal(cl0, cla)
+            assert _coo_triples_equal(c0, ca)
     assert saw_multichunk, "shuffled-order test never exercised the multi-chunk path"
 
 
-def test_chunked_iterator_empty_coo():
-    """Degenerate empty COO: both must yield one empty chunk and not raise."""
-    coo = sp.coo_matrix((np.zeros(0), (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64))), shape=(10, 5))
+@pytest.mark.parametrize("shape", [(10, 5), (0, 5), (3, 1)], ids=["10x5", "0x5", "3x1"])
+def test_chunked_iterator_empty_coo(shape):
+    """Degenerate empty COO: all three must yield one empty chunk and not raise.
+
+    The chunk is now ``(0, coo.shape[1])`` rather than ``(0, 0)``: the c axis is no
+    longer compacted, so the width is always the parent's (see Bug 1 note in
+    ``estimation.chunked_iterator``).
+    """
+    coo = sp.coo_matrix((np.zeros(0), (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64))), shape=shape)
+    ref = list(_chunked_iterator_reference(coo=coo))
     old = list(E.chunked_iterator(coo=coo))
     new = list(PV.chunked_iterator_vectorized(coo=coo))
-    assert len(old) == len(new) == 1
-    assert old[0][0].shape == new[0][0].shape
-    assert old[0][0].data.size == new[0][0].data.size == 0
+    assert len(ref) == len(old) == len(new) == 1
+    assert ref[0][0].shape == old[0][0].shape == new[0][0].shape == (0, shape[1])
+    assert ref[0][0].data.size == old[0][0].data.size == new[0][0].data.size == 0
+    for triple in (ref[0], old[0], new[0]):
+        np.testing.assert_array_equal(triple[2], np.arange(shape[1]))
+
+
+def test_chunked_iterator_does_not_compact_the_c_axis():
+    """Regression test for a CONFIRMED UPSTREAM BUG, not a design choice.
+
+    ``chunked_iterator`` used to compact the 'c' (noise count) axis with
+    ``np.unique(coo.col[logic], return_inverse=True)``, while its only caller
+    ``apply_function_dense_chunks`` discarded the returned ``unique_col_values``
+    and never inverted the mapping. Every estimator that decodes a column position
+    as a noise count therefore returned the wrong value whenever a chunk's
+    occupied columns were not exactly ``0..K-1``.
+
+    Here the occupied columns are ``{2, 5, 9}`` out of a width of 12, so a
+    compacting implementation would emit columns ``{0, 1, 2}`` and width 3.
+    """
+    rows = np.array([0, 0, 0, 4, 4, 7])
+    cols = np.array([2, 5, 9, 2, 9, 5])
+    data = np.array([-0.5, -1.5, -2.5, -0.25, -3.0, -1.0])
+    coo = sp.coo_matrix((data, (rows, cols)), shape=(8, 12))
+    assert set(np.unique(coo.col)) == {2, 5, 9}
+
+    for label, it in (
+        ("reference", _chunked_iterator_reference),
+        ("estimation", E.chunked_iterator),
+        ("vectorized", PV.chunked_iterator_vectorized),
+    ):
+        chunks = list(it(coo=coo))
+        assert len(chunks) == 1, label
+        chunk, row_vals, col_vals = chunks[0]
+        assert chunk.shape == (3, 12), f"{label}: width was compacted to {chunk.shape[1]}"
+        np.testing.assert_array_equal(np.unique(chunk.col), np.array([2, 5, 9]), err_msg=label)
+        np.testing.assert_array_equal(row_vals, np.array([0, 4, 7]), err_msg=label)
+        np.testing.assert_array_equal(col_vals, np.arange(12), err_msg=label)
+
+
+@pytest.mark.parametrize("start_col", [0, 1, 3], ids=["c_from_0", "c_from_1", "c_from_3"])
+def test_map_returns_true_noise_count_not_column_position(start_col):
+    """The user-visible consequence of the c-axis compaction bug, now fixed.
+
+    A posterior whose occupied noise counts start at ``start_col`` must yield a MAP
+    of the TRUE argmax noise count. The old compacting implementation returned the
+    argmax position within the compacted column space, i.e. it was short by
+    ``start_col``.
+    """
+    n_c = 10
+    width = 4
+    rows, cols, data = [], [], []
+    for m in range(6):
+        logits = np.full(width, -6.0)
+        logits[m % width] = 0.0  # true MAP at c = start_col + (m % width)
+        lp = logits - np.log(np.exp(logits).sum())
+        rows.append(np.full(width, m))
+        cols.append(np.arange(start_col, start_col + width))
+        data.append(lp)
+    coo = sp.coo_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))), shape=(6, n_c)
+    )
+    expected = np.array([start_col + (m % width) for m in range(6)], dtype=float)
+
+    for label, fn in (
+        ("reference", _apply_function_dense_chunks_reference),
+        ("estimation", E.apply_function_dense_chunks),
+        ("vectorized", PV.apply_function_dense_chunks_vectorized),
+    ):
+        got = fn(noise_log_prob_coo=coo, fun=E.MAP.torch_argmax, device="cpu")
+        np.testing.assert_array_equal(got["m"], np.arange(6), err_msg=label)
+        np.testing.assert_array_equal(got["result"], expected, err_msg=f"{label}: MAP is not the true noise count")
 
 
 # --------------------------------------------------------------------------
@@ -107,6 +265,9 @@ def test_apply_function_dense_chunks_identical(dtype):
     _conv, coo, _offs = _random_posterior(
         rng, n_cells=35, n_genes=22, n_counts_max=11, p_entry=0.55, log_prob_decimals=16, dtype=dtype
     )
+    ref = _apply_function_dense_chunks_reference(
+        noise_log_prob_coo=coo, fun=E.MAP.torch_argmax, device="cpu"
+    )
     a = E.apply_function_dense_chunks(noise_log_prob_coo=coo, fun=E.MAP.torch_argmax, device="cpu")
     b = PV.apply_function_dense_chunks_vectorized(
         noise_log_prob_coo=coo, fun=E.MAP.torch_argmax, device="cpu"
@@ -114,6 +275,12 @@ def test_apply_function_dense_chunks_identical(dtype):
     np.testing.assert_array_equal(a["m"], b["m"])
     np.testing.assert_array_equal(a["result"], b["result"])
     assert a["m"].dtype == b["m"].dtype
+    # Both must also match the unoptimized reference, which preallocates its output
+    # from its own third np.unique(coo.row) instead of concatenating chunk results.
+    np.testing.assert_array_equal(ref["m"], a["m"], err_msg="estimation.py vs unoptimized reference")
+    np.testing.assert_array_equal(ref["result"], a["result"], err_msg="estimation.py vs unoptimized reference")
+    assert ref["m"].dtype == a["m"].dtype
+    assert ref["result"].dtype == a["result"].dtype
 
 
 # --------------------------------------------------------------------------

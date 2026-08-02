@@ -32,9 +32,13 @@ Three separate inefficiencies, all fixed here:
    contiguous ranges of sorted m-values, assigning every nonzero to its owning
    chunk is a single ``np.searchsorted`` against the chunk start boundaries.
 
-3. ``np.unique(coo.col, return_inverse=True)`` does a full O(n log n) sort of
-   55M values whose domain is only ``0..n_counts_max-1`` (<= 20 in the default
-   posterior).  A ``bincount`` + lookup table is O(n).
+3. ``np.unique(coo.col, return_inverse=True)`` is gone entirely -- not optimized,
+   *deleted*.  Compacting the 'c' axis was a genuine correctness bug (the caller
+   throws the column mapping away and then reads a compacted column position as
+   if it were a true noise count); see the NOTE in ``estimation.chunked_iterator``.
+   Both implementations now densify to the full ``coo.shape[1]`` width, which the
+   memory budget was already sized for, so the fastest way to handle the 'c' axis
+   turned out to be not to touch it.
 
 4. ``[noise_offsets.get(i, 0) for i in m]`` is a Python-level dict lookup per
    m-value.  Replaced with sorted-key ``searchsorted`` (the same pattern as
@@ -43,18 +47,30 @@ Three separate inefficiencies, all fixed here:
    ``estimate_noise`` call and reused across chunks, since the dict never
    changes.
 
-``estimation.py`` itself is left untouched; these are additive.
+Relationship to ``estimation.py``
+---------------------------------
+These were originally purely additive, with ``estimation.py`` left pristine.
+That is no longer true: inefficiencies (1) and (2) and the 'c'-axis bug (3) have
+since been fixed in ``estimation.chunked_iterator`` /
+``estimation.apply_function_dense_chunks`` themselves, because two hardcoded
+call sites in ``posterior.py`` (``compute_mean_target_removal_as_function`` ->
+``Mean``, and ``PRmu._binary_search_for_posterior_regularization_factor`` ->
+``MAP``, up to ``max_iterations`` times) reach the originals regardless of which
+``--estimator`` the user picked, ``mckp-fast`` included.  The two copies are kept
+separate so that ``tests/test_estimation_prefix_vectorized.py`` can keep checking
+them against each other *and* against an independent naive reference; they must
+stay in lockstep.
 
 Order preservation
 ------------------
-The original selects chunk members with a boolean mask, so the original relative
-order of COO entries is preserved within each chunk.  We partition with
-``np.argsort(chunk_index, kind="stable")``, which reproduces that order exactly,
-so each yielded chunk is identical triple-for-triple -- not merely equivalent as
-a set.  (``apply_function_dense_chunks`` turns out not to depend on within-chunk
-order, because it keys results off the sorted ``unique_row_values``; but
-``chunked_iterator`` is a public-looking helper, and exact identity is testable,
-so we preserve it rather than rely on that.)
+The pre-optimization implementation selected chunk members with a boolean mask,
+so the original relative order of COO entries is preserved within each chunk.  We
+partition with ``np.argsort(chunk_index, kind="stable")``, which reproduces that
+order exactly, so each yielded chunk is identical triple-for-triple -- not merely
+equivalent as a set.  (``apply_function_dense_chunks`` turns out not to depend on
+within-chunk order, because it keys results off the sorted ``unique_row_values``;
+but ``chunked_iterator`` is a public-looking helper, and exact identity is
+testable, so we preserve it rather than rely on that.)
 """
 
 from typing import Callable, Dict, Generator, Optional, Tuple
@@ -82,29 +98,6 @@ __all__ = [
     "MultipleChoiceKnapsackFast",
 ]
 
-# Domain size below which we use bincount+LUT instead of np.unique for the
-# 'c' (noise count) axis. n_counts_max is 20 in the default posterior.
-_SMALL_INT_DOMAIN = 1 << 16
-
-
-def _unique_inverse_small_domain(v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """``np.unique(v, return_inverse=True)`` for small non-negative integers, in O(n).
-
-    Falls back to ``np.unique`` when the value domain is large or signed.
-    """
-    if v.size == 0:
-        return np.unique(v, return_inverse=True)
-    if not np.issubdtype(v.dtype, np.integer):
-        return np.unique(v, return_inverse=True)
-    vmax = int(v.max())
-    if int(v.min()) < 0 or vmax >= _SMALL_INT_DOMAIN:
-        return np.unique(v, return_inverse=True)
-    counts = np.bincount(v.ravel(), minlength=vmax + 1)
-    present = np.flatnonzero(counts)
-    lut = np.zeros(vmax + 1, dtype=np.int64)
-    lut[present] = np.arange(present.size, dtype=np.int64)
-    return present.astype(v.dtype, copy=False), lut[v]
-
 
 def chunked_iterator_vectorized(
     coo: sp.coo_matrix, max_dense_batch_size_GB: float = 1.0
@@ -114,6 +107,13 @@ def chunked_iterator_vectorized(
     Yields ``(chunk_coo, unique_row_values, unique_col_values)`` identically to
     the original, including within-chunk entry order and including the
     degenerate empty-COO case.
+
+    Like the original, the 'c' axis is NOT compacted: chunk column indices are
+    true noise counts and the chunk width is ``coo.shape[1]``. This module used to
+    replicate the original's c-axis compaction deliberately, for bit-exact parity
+    even where the original was buggy; that bug is now fixed in both places, so
+    there is nothing left to replicate. (The bincount+LUT helper that made the
+    compaction cheap is gone with it -- not compacting is cheaper still.)
     """
     # --- identical batch/chunk arithmetic to the original ---
     n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4  # torch float32 is 4 bytes
@@ -127,18 +127,32 @@ def chunked_iterator_vectorized(
     # Contiguous slices of the sorted uniques -- exactly what np.array_split gives.
     split_points = np.array_split(np.arange(len(unique_m_values)), n_chunks)
 
+    # The true noise count values spanned by every chunk (the axis is not compacted).
+    all_col_values = np.arange(coo.shape[1])
+
     if len(unique_m_values) == 0:
-        # Original: isin over an empty set -> all-False mask -> empty chunk_coo.
+        # Pre-optimization original: isin over an empty set -> all-False mask ->
+        # empty chunk_coo. Width is coo.shape[1] now that 'c' is not compacted.
         empty = np.zeros(0, dtype=coo.row.dtype)
         yield (
-            sp.coo_matrix((np.zeros(0, dtype=coo.data.dtype), (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64))), shape=(0, 0)),
+            sp.coo_matrix(
+                (
+                    np.zeros(0, dtype=coo.data.dtype),
+                    (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)),
+                ),
+                shape=(0, coo.shape[1]),
+            ),
             empty,
-            np.zeros(0, dtype=coo.col.dtype),
+            all_col_values,
         )
         return
 
-    # Boundaries: the first unique-value index owned by each chunk.
-    chunk_first_unique_idx = np.array([s[0] for s in split_points if s.size > 0], dtype=np.int64)
+    # Boundaries: the first unique-value index owned by each chunk. (np.array_split
+    # can only emit empty pieces when n_chunks > len(unique_m_values), impossible
+    # here since batch_size >= 1; the filter is defensive, and split_points is
+    # filtered the same way so the two stay index-aligned.)
+    split_points = [s for s in split_points if s.size > 0]
+    chunk_first_unique_idx = np.array([s[0] for s in split_points], dtype=np.int64)
     n_real_chunks = chunk_first_unique_idx.size
 
     if n_real_chunks == 1:
@@ -161,9 +175,7 @@ def chunked_iterator_vectorized(
         chunk_order_slices = [slice(int(edges[k]), int(edges[k + 1])) for k in range(n_real_chunks)]
 
     for k in range(n_real_chunks):
-        uniq_slice = split_points[k] if split_points[k].size else None
-        if uniq_slice is None:
-            continue
+        uniq_slice = split_points[k]
         lo_unique = int(uniq_slice[0])
         unique_row_values = unique_m_values[uniq_slice]
 
@@ -180,13 +192,12 @@ def chunked_iterator_vectorized(
 
         # Compact row index within this chunk, without any per-chunk np.unique.
         rows = sel_inverse - lo_unique
-        unique_col_values, cols = _unique_inverse_small_domain(sel_col)
 
         chunk_coo = sp.coo_matrix(
-            (sel_data, (rows, cols)),
-            shape=(len(unique_row_values), len(unique_col_values)),
+            (sel_data, (rows, sel_col)),
+            shape=(len(unique_row_values), coo.shape[1]),
         )
-        yield (chunk_coo, unique_row_values, unique_col_values)
+        yield (chunk_coo, unique_row_values, all_col_values)
 
 
 def apply_function_dense_chunks_vectorized(
@@ -194,13 +205,12 @@ def apply_function_dense_chunks_vectorized(
 ) -> Dict[str, np.ndarray]:
     """Drop-in replacement for ``estimation.apply_function_dense_chunks``.
 
-    Identical output; avoids the original's extra full ``np.unique(coo.row)``
-    (it reuses the count the iterator already computed) and uses
-    ``chunked_iterator_vectorized``.
+    Identical output. Avoids preallocating via a THIRD full ``np.unique(coo.row)``
+    by accumulating into lists and concatenating -- same result, one fewer
+    O(n log n) sort over all nnz. (``estimation.apply_function_dense_chunks`` now
+    does the same thing; this stays as the ``chunked_iterator_vectorized``-based
+    twin so the two can be checked against each other.)
     """
-    # The original computes array_length via a THIRD np.unique. We get it from
-    # the iterator's own unique pass instead, by accumulating into lists and
-    # concatenating -- same result, one fewer O(n log n) sort over all nnz.
     m_parts = []
     out_parts = []
     for coo, row, _col in chunked_iterator_vectorized(coo=noise_log_prob_coo):
@@ -214,6 +224,14 @@ def apply_function_dense_chunks_vectorized(
             s_np = np.atleast_1d(s.detach().cpu().numpy())
         else:
             s_np = s.detach().cpu().numpy()
+        if s_np.shape[0] != row.shape[0]:
+            # Same guard as estimation.apply_function_dense_chunks; see the comment
+            # there. Keeps the two in lockstep, including on the failure path.
+            raise ValueError(
+                f"{getattr(fun, '__name__', fun)} produced {s_np.shape[0]} value(s) for a chunk of "
+                f"{row.shape[0]} row(s) (dense chunk shape {tuple(dense_tensor.shape)}). "
+                "This function requires one value per row of the dense chunk."
+            )
         m_parts.append(np.asarray(row, dtype=np.uint64))
         out_parts.append(s_np)
 

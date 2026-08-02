@@ -45,12 +45,22 @@ Note on the shared MAP prefix
 -----------------------------
 The initial MAP estimate is computed by calling the *same*
 ``apply_function_dense_chunks`` / ``MAP.torch_argmax`` / ``_estimation_array_to_csr``
-helpers the original uses, unchanged.  That is deliberate: it keeps the two
-implementations bit-identical even where the original is arguably buggy
-(``chunked_iterator`` compacts the ``c`` axis with ``np.unique`` before the
-argmax, so ``map_dict["result"]`` is an index into the *compacted* column space
-rather than a true noise-count value ``c`` whenever a chunk's occupied columns
-are not ``0..K-1``).  Replicating instead of repairing is the point here.
+helpers the original uses, unchanged.  That keeps the two implementations
+bit-identical by construction, whatever those helpers do.
+
+Historical note: this used to come with the caveat that the shared prefix was
+*wrong* and that replicating rather than repairing was the point --
+``chunked_iterator`` compacted the ``c`` axis with ``np.unique`` before the
+argmax, so ``map_dict["result"]`` was an index into the *compacted* column space
+rather than a true noise count ``c`` whenever a chunk's occupied columns were not
+``0..K-1``.  That bug is now fixed in ``estimation.chunked_iterator`` (and in
+``estimation_prefix_vectorized``), so ``map_dict["result"]`` is a true noise
+count.  Quirks (1) and (2) above are genuine tie-breaking/ordering conventions of
+the pandas original and are still replicated deliberately; the ``c``-axis
+compaction was not, and is gone.  Note that a consequence of fixing it is that
+the ``c == map`` NaN sentinel and the global ``.diff()`` now line up on the
+intended rows, so MCKP output on posteriors whose occupied ``c`` values do not
+start at 0 differs from pre-fix output.
 """
 
 from typing import Dict, Optional
