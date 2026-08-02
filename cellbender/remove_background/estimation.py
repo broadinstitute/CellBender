@@ -857,7 +857,17 @@ def _parallel_pandas_apply(
 
 
 def _subset_coo(coo: sp.coo_matrix, logic: np.ndarray) -> sp.coo_matrix:
-    return sp.coo_matrix((coo.data[logic], (coo.row[logic], coo.col[logic])))
+    """Select a subset of a COO's nonzero entries, keeping the matrix shape.
+
+    The ``shape=`` argument is required, not cosmetic: without it scipy infers
+    the shape from ``max(row) + 1, max(col) + 1``, which (a) raises
+    "cannot infer dimensions from an empty ..." when ``logic`` selects nothing
+    -- e.g. a gene chunk with no posterior entries, which crashes
+    ``MultipleChoiceKnapsack.estimate_noise`` -- and (b) silently shrinks the
+    'c' axis for non-empty subsets, changing the dense width that
+    ``chunked_iterator`` densifies to. Passing the parent shape fixes both.
+    """
+    return sp.coo_matrix((coo.data[logic], (coo.row[logic], coo.col[logic])), shape=coo.shape)
 
 
 def timestamp() -> str:

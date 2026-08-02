@@ -226,18 +226,81 @@ def test_estimate_noise_end_to_end_random(seed, dtype):
 
 
 # --------------------------------------------------------------------------
-# Pre-existing bug, documented
+# Regression tests for confirmed upstream bugs, now fixed
 # --------------------------------------------------------------------------
 
 
-def test_documents_preexisting_subset_coo_empty_chunk_crash():
-    """PRE-EXISTING BUG in estimation._subset_coo, not introduced by this work.
+def test_subset_coo_empty_chunk_does_not_crash():
+    """Regression test for a CONFIRMED UPSTREAM BUG, now fixed.
 
-    It calls ``sp.coo_matrix`` with no ``shape``, so a gene chunk containing zero
-    posterior entries raises. Any real run whose gene chunking produces an empty
-    chunk (e.g. a trailing block of features with no analyzed counts) will crash
-    in ``MultipleChoiceKnapsack.estimate_noise``.
+    This test used to be ``test_documents_preexisting_subset_coo_empty_chunk_crash``
+    and asserted that ``_subset_coo`` RAISES on an empty selection: it called
+    ``sp.coo_matrix`` with no ``shape=``, so scipy tried to infer the dimensions
+    from ``max(row) + 1, max(col) + 1`` and raised "cannot infer dimensions from an
+    empty ...". Any real run whose gene chunking produced an empty chunk (e.g. a
+    trailing block of features with no analyzed counts) crashed in
+    ``MultipleChoiceKnapsack.estimate_noise``.
+
+    ``_subset_coo`` now passes ``shape=coo.shape``, so the empty case yields an
+    empty COO of the parent's shape. Documenting the crash has been replaced by
+    asserting it cannot come back.
     """
     coo = sp.coo_matrix((np.array([1.0]), (np.array([0]), np.array([0]))), shape=(5, 5))
-    with pytest.raises(ValueError, match="cannot infer dimensions"):
-        E._subset_coo(coo, np.array([False]))
+    out = E._subset_coo(coo, np.array([False]))
+    assert out.shape == (5, 5)
+    assert out.data.size == 0
+    # ...and the shape is preserved for non-empty selections too, rather than being
+    # inferred (and silently shrunk) from the selected entries.
+    coo2 = sp.coo_matrix((np.array([1.0, 2.0]), (np.array([1, 3]), np.array([0, 2]))), shape=(9, 7))
+    kept = E._subset_coo(coo2, np.array([True, False]))
+    assert kept.shape == (9, 7)
+    np.testing.assert_array_equal(kept.data, np.array([1.0]))
+    np.testing.assert_array_equal(kept.row, np.array([1]))
+    np.testing.assert_array_equal(kept.col, np.array([0]))
+
+
+@pytest.mark.parametrize("n_chunks", (1, 2, 3, 4, 6))
+def test_mckp_estimate_noise_survives_empty_gene_chunk(n_chunks):
+    """End-to-end companion to the above: gene chunking that yields an empty chunk.
+
+    Genes are only occupied in the low half of the index range, so with enough
+    chunks at least one chunk selects zero posterior entries -- the exact situation
+    that used to crash in ``_subset_coo``. Both the original and the
+    ``mckp-fast`` subclass must complete and agree.
+    """
+    n_cells, n_genes, n_c = 4, 12, 6
+    conv = IndexConverter(total_n_cells=n_cells, total_n_genes=n_genes)
+    rng = np.random.default_rng(77)
+    rows, cols, data = [], [], []
+    for n in range(n_cells):
+        for gene in range(n_genes // 2):  # upper half of genes: no entries at all
+            m = conv.get_m_indices(cell_inds=np.array([n]), gene_inds=np.array([gene]))[0]
+            logits = rng.normal(size=n_c)
+            lp = logits - np.log(np.exp(logits).sum())
+            rows.append(np.full(n_c, m))
+            cols.append(np.arange(n_c))
+            data.append(lp)
+    coo = sp.coo_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n_cells * n_genes, n_c),
+    )
+    _, occupied_genes = conv.get_ng_indices(m_inds=coo.row)
+    gene_logic = E.MultipleChoiceKnapsack(index_converter=conv)._gene_chunk_iterator(coo, n_chunks=n_chunks)
+    n_empty = sum(1 for logic in gene_logic if not np.any(logic))
+    if n_chunks > 2:
+        assert n_empty > 0, (
+            f"n_chunks={n_chunks} produced no empty gene chunk over genes "
+            f"{sorted(set(occupied_genes.tolist()))}; this test would not exercise the fix"
+        )
+
+    kwargs = dict(
+        noise_log_prob_coo=coo,
+        noise_offsets={},
+        noise_targets_per_gene=np.ones(n_genes) * 2.0,
+        verbose=False,
+        n_chunks=n_chunks,
+        use_multiple_processes=False,
+    )
+    old = E.MultipleChoiceKnapsack(index_converter=conv).estimate_noise(**kwargs)
+    new = PV.MultipleChoiceKnapsackFast(index_converter=conv).estimate_noise(**kwargs)
+    assert sparse_matrix_equal(old.tocsr(), new.tocsr())
