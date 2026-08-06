@@ -25,7 +25,7 @@ from cellbender.remove_background.checkpoint import attempt_load_checkpoint, cre
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
-from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
+from cellbender.remove_background.data.io import save_h5ad_from_h5, write_matrix_to_cellranger_h5
 from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
@@ -182,11 +182,14 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
         file_name = os.path.splitext(os.path.basename(file_base))[0]
         filtered_file = os.path.join(file_dir, file_name + "_filtered.h5")
 
-        if os.path.exists(full_file):
-            os.remove(full_file)
-
-        if os.path.exists(filtered_file):
-            os.remove(filtered_file)
+        for f in [
+            full_file,
+            filtered_file,
+            os.path.splitext(full_file)[0] + ".h5ad",
+            os.path.splitext(filtered_file)[0] + ".h5ad",
+        ]:
+            if os.path.exists(f):
+                os.remove(f)
 
         logger.info("Keyboard interrupt.  Terminated without saving.\n")
         sys.exit(1)
@@ -369,6 +372,11 @@ def compute_output_denoised_counts_reports_metrics(
             barcode_inds=posterior.dataset_obj.analyzed_barcode_inds[analyzed_barcode_logic],
         )
         success = success and write_succeeded
+
+        # Save h5ad copies of the output files.
+        if args.output_h5ad:
+            save_h5ad_from_h5(fpr_output_filename, analyzed_barcodes_only=False)
+            save_h5ad_from_h5(filtered_output_file, analyzed_barcodes_only=True)
 
         # Compile and save metrics.
         try:

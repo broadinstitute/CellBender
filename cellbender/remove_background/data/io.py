@@ -221,6 +221,44 @@ def write_matrix_to_cellranger_h5(
     return True
 
 
+def save_h5ad_from_h5(h5_file: str,
+                      analyzed_barcodes_only: bool) -> bool:
+    """Convert a CellBender output h5 file to h5ad format.
+
+    Load the h5 file using anndata_from_h5() and
+    resave as h5ad.
+
+    Args:
+        h5_file: Path to a CellBender output .h5 file.
+        analyzed_barcodes_only: True to include only barcodes
+        that were analyzed (for filtered output files). 
+        False to include all barcodes (for full output files).
+
+    Returns:
+        True if the h5ad file was written successfully, False otherwise.
+
+    """
+
+    # import placed here to avoid circular dependency (downstream imports from io).
+    from cellbender.remove_background.downstream import anndata_from_h5
+
+    h5ad_file = os.path.splitext(h5_file)[0] + '.h5ad'
+
+    try:
+        adata = anndata_from_h5(
+            h5_file,
+            analyzed_barcodes_only=analyzed_barcodes_only,
+        )
+        adata.write_h5ad(h5ad_file)
+        logger.info(f"Saved h5ad output as {h5ad_file}")
+        return True
+
+    except Exception:
+        logger.warning(f"Unable to save h5ad output as {h5ad_file}")
+        logger.warning(traceback.format_exc())
+        return False
+
+
 def write_posterior_coo_to_h5(
         output_file: str,
         posterior_coo: sp.coo_matrix,

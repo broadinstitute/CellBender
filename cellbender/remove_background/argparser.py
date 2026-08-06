@@ -50,6 +50,13 @@ def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubP
         help="Output file location (the path must exist, and the file name must have .h5 extension).",
     )
     subparser.add_argument(
+        "--no-h5ad",
+        dest="output_h5ad",
+        action="store_false",
+        default=True,
+        help="By default, output is saved in h5ad format. Use --no-h5ad to disable this.",
+    )
+    subparser.add_argument(
         "--cuda",
         dest="use_cuda",
         action="store_true",
