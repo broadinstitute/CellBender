@@ -21,7 +21,6 @@ from google.cloud import batch_v1
 
 PROJECT = "broad-dsde-methods"
 REGION = "us-central1"
-SERVICE_ACCOUNT = "cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com"
 DOCKER_IMAGE = "us.gcr.io/broad-dsde-methods/cellbender:latest"
 
 BENCHMARK_JOBS = [
@@ -152,16 +151,9 @@ def submit_job(
     location = batch_v1.AllocationPolicy.LocationPolicy()
     location.allowed_locations = ["regions/us-central1"]
 
-    # The Batch job VMs run as this SA so they can read/write the GCS bucket.
-    # Prerequisite: run once to allow the SA to act as itself:
-    #   gcloud iam service-accounts add-iam-policy-binding \
-    #     cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com \
-    #     --role=roles/iam.serviceAccountUser \
-    #     --member="serviceAccount:cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com"
     allocation_policy = batch_v1.AllocationPolicy()
     allocation_policy.instances = [instances]
     allocation_policy.location = location
-    allocation_policy.service_account.email = SERVICE_ACCOUNT
 
     job = batch_v1.Job()
     job.task_groups = [task_group]
