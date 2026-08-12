@@ -55,6 +55,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
+exclude = ["benchmarking/cellbender_benchmarking.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I"]

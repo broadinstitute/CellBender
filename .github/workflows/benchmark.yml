@@ -1,0 +1,108 @@
+name: Benchmark CellBender
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Branch, tag, or SHA to benchmark"
+        required: false
+        default: "main"
+      run_note:
+        description: "Optional label for the artifact (e.g. 'v0.3.3 release')"
+        required: false
+      machine_type:
+        description: "GCP machine type (default: n1-highmem-8 = 8 vCPU / 52 GB RAM). Also try: n1-highmem-16."
+        required: false
+        default: "n1-highmem-8"
+      gpu_type:
+        description: "GCP GPU type (default: nvidia-tesla-t4). Also try: nvidia-tesla-k80."
+        required: false
+        default: "nvidia-tesla-t4"
+      cpu_count:
+        description: "CPU count hint — used only when machine_type is cleared (leave blank to use machine_type)."
+        required: false
+      memory_gb:
+        description: "Memory in GB hint — used only when machine_type is cleared (leave blank to use machine_type)."
+        required: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write  # required for Workload Identity Federation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Resolve git SHA
+        id: sha
+        run: |
+          echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.BENCHMARK_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --quiet \
+            google-cloud-batch \
+            papermill \
+            ipykernel \
+            scanpy \
+            colorcet \
+            cellbender
+
+      - name: Submit benchmark jobs and wait for completion
+        # Submits 5 Google Batch GPU jobs in parallel, polls until all succeed,
+        # then writes benchmarking/outputs.json with {sample: gcs_output_dir}.
+        # The full git SHA is passed so the Batch job can clone the exact commit.
+        # cpu_count/memory_gb are only forwarded when machine_type is cleared.
+        run: |
+          EXTRA_HW_ARGS=""
+          if [[ -z "${{ inputs.machine_type }}" ]]; then
+            [[ -n "${{ inputs.cpu_count }}" ]] && EXTRA_HW_ARGS="$EXTRA_HW_ARGS --cpu-count ${{ inputs.cpu_count }}"
+            [[ -n "${{ inputs.memory_gb }}" ]] && EXTRA_HW_ARGS="$EXTRA_HW_ARGS --memory-gb ${{ inputs.memory_gb }}"
+          fi
+          python benchmarking/submit_benchmarks.py \
+            --git-hash "${{ steps.sha.outputs.full }}" \
+            --run-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --machine-type "${{ inputs.machine_type }}" \
+            --gpu-type "${{ inputs.gpu_type }}" \
+            $EXTRA_HW_ARGS \
+            --outputs-file benchmarking/outputs.json
+
+      - name: Execute benchmarking notebook
+        # Papermill injects git_commit and outputs_json into the parameters cell,
+        # which triggers GCS downloads and runs all analysis cells.
+        run: |
+          python benchmarking/run_notebook.py \
+            --git-commit "${{ steps.sha.outputs.short }}" \
+            --outputs-file benchmarking/outputs.json \
+            --input-notebook benchmarking/cellbender_benchmarking.ipynb \
+            --output-notebook benchmarking/cellbender_benchmarking_executed.ipynb
+
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-${{ steps.sha.outputs.short }}${{ inputs.run_note != '' && format('-{0}', inputs.run_note) || '' }}
+          path: benchmarking/cellbender_benchmarking_executed.ipynb
+          retention-days: 90

@@ -271,13 +271,13 @@ def generate_summary_plots(
         plt.figure(figsize=(10, 4))
         plt.subplot(1, 2, 1)
         plt.semilogx(adata.var[f"n_{input_layer_key}_cells"], adata.var["fraction_remaining_cells"], "k.", ms=1)
-        plt.ylim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])  # type: ignore [call-overload]
         plt.xlabel("Number of counts in raw data")
         plt.ylabel("Fraction of counts remaining")
         plt.title("Genes: removal of counts\nfrom (inferred) cell-containing droplets")
         plt.subplot(1, 2, 2)
         plt.semilogx(adata.var[f"n_{input_layer_key}_cells"], adata.var["fraction_remaining_cells_truth"], "k.", ms=1)
-        plt.ylim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])  # type: ignore [call-overload]
         plt.xlabel("Number of counts in raw data")
         plt.ylabel("Truth: fraction of counts remaining")
         plt.title("Genes: truth")
@@ -292,7 +292,7 @@ def generate_summary_plots(
             "k.",
             ms=1,
         )
-        plt.ylim([-1.05, 1.05])
+        plt.ylim([-1.05, 1.05])  # type: ignore [call-overload]
         plt.xlabel("Number of counts in raw data")
         plt.ylabel("Residual fraction of counts remaining")
         plt.title("Genes: residual")
@@ -1827,8 +1827,8 @@ def cell_roc_count_roc(
     plt.plot(fpr, tpr, "o")
     plt.ylabel("fraction of true cells called")
     plt.xlabel("fraction of called cells that are really empty")
-    plt.ylim([-0.05, 1.05])
-    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])  # type: ignore [call-overload]
+    plt.xlim([-0.05, 1.05])  # type: ignore [call-overload]
     plt.title("Cell identification")
     plt.show()
 
@@ -1958,8 +1958,8 @@ def plot_roc_points(
     plt.plot([1 - spec_mean, 1 - spec_mean], [sens_mean - sens_stdv, sens_mean + sens_stdv], **kwargs)
     plt.ylabel("sensitivity = TP / (TP + FN)\ntrue positive rate")
     plt.xlabel("1 - specificity = 1 - TN / (TN + FP)\nfalse positive rate")
-    plt.ylim([-0.05, 1.05])
-    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])  # type: ignore [call-overload]
+    plt.xlim([-0.05, 1.05])  # type: ignore [call-overload]
     plt.title(title)
 
     if show:
@@ -2024,7 +2024,7 @@ def plot_summary(loss: Dict[str, Dict[str, Any]], umi_counts: np.ndarray, p: np.
         plt.gca().twinx()
         plt.plot(p[count_order], ".:", color="red", alpha=0.3, rasterized=True)
         plt.ylabel("Cell probability", color="red")
-        plt.ylim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])  # type: ignore [call-overload]
         plt.title("Determination of which barcodes contain cells")
     else:
         plt.title("The subset of barcodes used for training")

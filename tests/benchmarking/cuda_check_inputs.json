@@ -1,4 +1,0 @@
-{
-  "check_pytorch_cuda_status.run_check_pytorch_cuda_status.docker_image": "us.gcr.io/broad-dsde-methods/cellbender:20230427"
-}
-
