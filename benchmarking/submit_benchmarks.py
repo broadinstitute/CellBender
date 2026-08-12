@@ -20,7 +20,7 @@ import time
 from google.cloud import batch_v1
 
 PROJECT = "broad-dsde-methods"
-REGION = "us-east1"
+REGION = "us-central1"
 SERVICE_ACCOUNT = "cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com"
 DOCKER_IMAGE = "us.gcr.io/broad-dsde-methods/cellbender:latest"
 
@@ -150,12 +150,7 @@ def submit_job(
     instances.policy.accelerators = [batch_v1.AllocationPolicy.Accelerator(type_=gpu_type, count=1)]
 
     location = batch_v1.AllocationPolicy.LocationPolicy()
-    location.allowed_locations = [
-        "zones/us-east1-d",
-        "zones/us-east1-c",
-        "zones/us-central1-a",
-        "zones/us-central1-c",
-    ]
+    location.allowed_locations = ["regions/us-central1"]
 
     # The Batch job VMs run as this SA so they can read/write the GCS bucket.
     # Prerequisite: run once to allow the SA to act as itself:
