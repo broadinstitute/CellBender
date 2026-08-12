@@ -24,6 +24,22 @@ REGION = "us-central1"
 SERVICE_ACCOUNT = "cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com"
 DOCKER_IMAGE = "us.gcr.io/broad-dsde-methods/cellbender:latest"
 
+# Memory (GB) per vCPU for each N1/N2 machine family.
+_MEM_GB_PER_VCPU: dict[str, float] = {
+    "highmem": 6.5,
+    "standard": 3.75,
+    "highcpu": 0.9,
+}
+
+
+def _machine_resources(machine_type: str) -> tuple[int, int] | None:
+    """Return (vcpus, memory_gb) parsed from an N1/N2 machine type string, or None."""
+    m = re.match(r"n\d-(highmem|standard|highcpu)-(\d+)", machine_type)
+    if not m:
+        return None
+    vcpus = int(m.group(2))
+    return vcpus, int(vcpus * _MEM_GB_PER_VCPU[m.group(1)])
+
 BENCHMARK_JOBS = [
     {
         "sample": "pbmc8k",
@@ -109,7 +125,7 @@ def build_job_script(
 
 
 def make_job_id(run_id: str, sample: str) -> str:
-    raw = f"bm-{run_id}-{sample}"
+    raw = f"cellbender-bench-{run_id}-{sample}"
     sanitized = re.sub(r"[^a-z0-9\-]", "-", raw.lower())
     sanitized = re.sub(r"-+", "-", sanitized).strip("-")
     return sanitized[:63]
@@ -131,13 +147,10 @@ def submit_job(
     task_spec = batch_v1.TaskSpec()
     task_spec.runnables = [runnable]
 
-    # When no machine type is given, set CPU/memory hints and let Batch choose
-    # a compatible N1 instance for the requested GPU.
-    if not machine_type and (cpu_count or memory_gb):
-        if cpu_count:
-            task_spec.compute_resource.cpu_milli = cpu_count * 1000
-        if memory_gb:
-            task_spec.compute_resource.memory_mib = memory_gb * 1024
+    if cpu_count:
+        task_spec.compute_resource.cpu_milli = cpu_count * 1000
+    if memory_gb:
+        task_spec.compute_resource.memory_mib = memory_gb * 1024
 
     task_group = batch_v1.TaskGroup()
     task_group.task_count = 1
@@ -216,13 +229,13 @@ def main() -> None:
 
     hw = parser.add_argument_group(
         "hardware",
-        "Machine type takes precedence; cpu-count/memory-gb are used only when "
-        "machine-type is omitted, as resource hints for Batch to auto-select a machine.",
+        "CPU and memory are auto-derived from the machine type for N1/N2 families. "
+        "Override with --cpu-count / --memory-gb if needed.",
     )
     hw.add_argument(
         "--machine-type",
         default="n1-highmem-8",
-        help="GCP machine type (default: n1-highmem-8 = 8 vCPU / 52 GB). Examples: n1-highmem-16, n1-standard-8.",
+        help="GCP machine type (default: n1-highmem-8). Examples: n1-highmem-16, n1-standard-8.",
     )
     hw.add_argument(
         "--gpu-type",
@@ -233,13 +246,13 @@ def main() -> None:
         "--cpu-count",
         type=int,
         default=None,
-        help="CPU count hint (used only when --machine-type is not set).",
+        help="vCPUs per task. Auto-derived from --machine-type when not set.",
     )
     hw.add_argument(
         "--memory-gb",
         type=int,
         default=None,
-        help="Memory in GB hint (used only when --machine-type is not set).",
+        help="Memory in GB per task. Auto-derived from --machine-type when not set.",
     )
 
     args = parser.parse_args()
@@ -249,14 +262,28 @@ def main() -> None:
     # same as absent.
     machine_type: str | None = args.machine_type or None
 
+    cpu_count: int | None = args.cpu_count
+    memory_gb: int | None = args.memory_gb
+
+    if machine_type and (cpu_count is None or memory_gb is None):
+        parsed = _machine_resources(machine_type)
+        if parsed:
+            derived_cpu, derived_mem = parsed
+            cpu_count = cpu_count if cpu_count is not None else derived_cpu
+            memory_gb = memory_gb if memory_gb is not None else derived_mem
+        else:
+            print(
+                f"Warning: cannot auto-derive CPU/memory for {machine_type!r}. "
+                "Pass --cpu-count and --memory-gb explicitly.",
+                flush=True,
+            )
+
     client = batch_v1.BatchServiceClient()
 
     output_dirs: dict[str, str] = {}
     job_names: list[str] = []
 
-    hw_desc = f"machine={machine_type or 'auto'}, gpu={args.gpu_type}"
-    if not machine_type and (args.cpu_count or args.memory_gb):
-        hw_desc += f", cpu={args.cpu_count}, memory={args.memory_gb}GB"
+    hw_desc = f"machine={machine_type or 'auto'}, gpu={args.gpu_type}, cpu={cpu_count}, memory={memory_gb}GB"
     print(f"Hardware: {hw_desc}", flush=True)
 
     for job_def in BENCHMARK_JOBS:
@@ -281,8 +308,8 @@ def main() -> None:
             script,
             machine_type=machine_type,
             gpu_type=args.gpu_type,
-            cpu_count=args.cpu_count,
-            memory_gb=args.memory_gb,
+            cpu_count=cpu_count,
+            memory_gb=memory_gb,
         )
         job_names.append(job.name)
         print(f"  -> {job.name}", flush=True)
