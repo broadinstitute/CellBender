@@ -21,6 +21,7 @@ from google.cloud import batch_v1
 
 PROJECT = "broad-dsde-methods"
 REGION = "us-central1"
+SERVICE_ACCOUNT = "cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com"
 DOCKER_IMAGE = "us.gcr.io/broad-dsde-methods/cellbender:latest"
 
 BENCHMARK_JOBS = [
@@ -154,6 +155,7 @@ def submit_job(
     allocation_policy = batch_v1.AllocationPolicy()
     allocation_policy.instances = [instances]
     allocation_policy.location = location
+    allocation_policy.service_account.email = SERVICE_ACCOUNT
 
     job = batch_v1.Job()
     job.task_groups = [task_group]
