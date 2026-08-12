@@ -41,6 +41,7 @@ def _machine_resources(machine_type: str) -> tuple[int, int] | None:
     vcpus = int(m.group(2))
     return vcpus, int(vcpus * _MEM_GB_PER_VCPU[m.group(1)])
 
+
 BENCHMARK_JOBS = [
     {
         "sample": "pbmc8k",
