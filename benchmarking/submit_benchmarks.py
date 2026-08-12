@@ -17,6 +17,7 @@ import re
 import sys
 import time
 
+from google.api_core.exceptions import NotFound
 from google.cloud import batch_v1
 
 PROJECT = "broad-dsde-methods"
@@ -189,14 +190,17 @@ def poll_until_done(
     job_names: list[str],
     poll_interval: int,
 ) -> dict[str, str]:
-    terminal = {"SUCCEEDED", "FAILED", "DELETION_IN_PROGRESS"}
+    terminal = {"SUCCEEDED", "FAILED", "DELETION_IN_PROGRESS", "DELETED"}
     final: dict[str, str] = {}
 
     while len(final) < len(job_names):
         for name in job_names:
             if name in final:
                 continue
-            state = client.get_job(name=name).status.state.name
+            try:
+                state = client.get_job(name=name).status.state.name
+            except NotFound:
+                state = "DELETED"
             if state in terminal:
                 final[name] = state
                 print(f"[done] {name.split('/')[-1]}: {state}", flush=True)
