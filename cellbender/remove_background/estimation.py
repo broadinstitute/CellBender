@@ -374,7 +374,7 @@ def _mckp_chunk_estimate_noise(
     df_out = (
         df[["m", "g", "delta", "topk"]]
         .groupby("g", group_keys=False)
-        .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"))
+        .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"), include_groups=False)
     )
     logger.debug(f"{timestamp()} Computing nsmallest done")
 
@@ -670,7 +670,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
         df_out = (
             df[["m", "g", "delta", "topk"]]
             .groupby("g", group_keys=False)
-            .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"))
+            .apply(lambda x: x.nsmallest(x["topk"].iat[0], columns="delta"), include_groups=False)
         )
         logger.debug(f"{timestamp()} Computing nsmallest done")
 
