@@ -321,17 +321,21 @@ def main() -> None:
     print(f"\nPolling {len(job_names)} jobs every {args.poll_interval}s ...\n", flush=True)
     final_states = poll_until_done(client, job_names, args.poll_interval)
 
+    print("\nFinal job states:", flush=True)
+    for name, state in final_states.items():
+        print(f"  {name.split('/')[-1]}: {state}", flush=True)
+
     failed = [n for n, s in final_states.items() if s != "SUCCEEDED"]
     if failed:
-        print("\nFailed jobs:", file=sys.stderr)
         for name in failed:
-            print(f"  {name}: {final_states[name]}", file=sys.stderr)
+            short = name.split("/")[-1]
+            print(f"::error::Batch job {short} ended with state: {final_states[name]}", flush=True)
         sys.exit(1)
 
     with open(args.outputs_file, "w") as f:
         json.dump(output_dirs, f, indent=2)
 
-    print(f"\nAll jobs succeeded. Output paths written to {args.outputs_file}.")
+    print(f"\nAll jobs succeeded. Output paths written to {args.outputs_file}.", flush=True)
 
 
 if __name__ == "__main__":
