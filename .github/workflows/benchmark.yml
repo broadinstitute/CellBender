@@ -68,8 +68,10 @@ jobs:
             google-cloud-batch \
             papermill \
             ipykernel \
-            scanpy \
+            scanpy[leiden] \
             colorcet \
+            seaborn \
+            scikit-misc \
             cellbender
 
       - name: Submit benchmark jobs and wait for completion
@@ -92,19 +94,28 @@ jobs:
             --outputs-file benchmarking/outputs.json
 
       - name: Execute benchmarking notebook
-        # Papermill injects git_commit and outputs_json into the parameters cell,
-        # which triggers GCS downloads and runs all analysis cells.
+        # Papermill injects git_commit, outputs_json, and figure_dir into the
+        # parameters cell. Figures saved via savefig() land in benchmarking/figures/.
         run: |
           python benchmarking/run_notebook.py \
             --git-commit "${{ steps.sha.outputs.short }}" \
             --outputs-file benchmarking/outputs.json \
             --input-notebook benchmarking/cellbender_benchmarking.ipynb \
-            --output-notebook benchmarking/cellbender_benchmarking_executed.ipynb
+            --output-notebook benchmarking/cellbender_benchmarking_executed.ipynb \
+            --figure-dir benchmarking/figures
 
-      - name: Upload benchmark artifact
+      - name: Upload benchmark notebook
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: benchmark-${{ steps.sha.outputs.short }}${{ inputs.run_note != '' && format('-{0}', inputs.run_note) || '' }}
           path: benchmarking/cellbender_benchmarking_executed.ipynb
+          retention-days: 90
+
+      - name: Upload benchmark figures
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-figures-${{ steps.sha.outputs.short }}${{ inputs.run_note != '' && format('-{0}', inputs.run_note) || '' }}
+          path: benchmarking/figures/
           retention-days: 90

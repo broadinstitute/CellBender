@@ -13,6 +13,11 @@ def main() -> None:
     parser.add_argument("--outputs-file", required=True, help="JSON file from submit_benchmarks.py")
     parser.add_argument("--input-notebook", required=True)
     parser.add_argument("--output-notebook", required=True)
+    parser.add_argument(
+        "--figure-dir",
+        default="/tmp/cellbender_benchmark_figures",
+        help="Directory where savefig() calls write PDFs (default: /tmp/cellbender_benchmark_figures)",
+    )
     args = parser.parse_args()
 
     with open(args.outputs_file) as f:
@@ -24,6 +29,7 @@ def main() -> None:
         parameters={
             "git_commit": args.git_commit,
             "outputs_json": json.dumps(outputs),
+            "figure_dir": args.figure_dir,
         },
         kernel_name="python3",
     )
