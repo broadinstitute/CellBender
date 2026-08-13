@@ -191,7 +191,6 @@ def load_anndata_from_input(input_file: str) -> anndata.AnnData:
         X=d.pop("matrix"),
         obs={"barcode": barcodes.astype(str)},
         var={"gene_name": gene_names.astype(str)},
-        dtype=int,
     )
     adata.obs.set_index("barcode", inplace=True)
     adata.var.set_index("gene_name", inplace=True)
