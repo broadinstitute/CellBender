@@ -88,6 +88,7 @@ def build_job_script(
 ) -> str:
     lines = [
         "set -e",
+        'export CLOUDSDK_PYTHON="$(which python3)"',
         f"gcloud storage cp {input_gcs} /tmp/input.h5",
     ]
 
