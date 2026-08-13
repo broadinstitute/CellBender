@@ -89,11 +89,11 @@ def build_job_script(
     lines = [
         "set -e",
         'export CLOUDSDK_PYTHON="$(which python3)"',
-        f"gcloud storage cp {input_gcs} /tmp/input.h5",
+        f"gsutil cp {input_gcs} /tmp/input.h5",
     ]
 
     if truth_gcs:
-        lines.append(f"gcloud storage cp {truth_gcs} /tmp/truth.h5")
+        lines.append(f"gsutil cp {truth_gcs} /tmp/truth.h5")
 
     # dev_git_hash__ mechanism: uninstall pre-installed CellBender, clone the
     # target commit, and reinstall from source so runtime code matches the SHA
@@ -124,7 +124,7 @@ def build_job_script(
         cmd_parts.append("    --truth /tmp/truth.h5")
 
     lines.append(" \\\n".join(cmd_parts))
-    lines.append(f"gcloud storage cp /tmp/{sample}_out* {output_gcs_dir}/")
+    lines.append(f"gsutil -m cp /tmp/{sample}_out* {output_gcs_dir}/")
 
     return "\n".join(lines)
 
