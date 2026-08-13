@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, Union, cast
@@ -26,7 +27,8 @@ from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
-from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, SingleSample, ThresholdCDF
+from cellbender.remove_background.estimation import MAP, Mean, MeanFast, MultipleChoiceKnapsack, \
+    MultipleChoiceKnapsackFast, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.posterior import (
@@ -248,6 +250,8 @@ def compute_output_denoised_counts_reports_metrics(
     # Choose output count matrix estimation method.
     from cellbender.remove_background.estimation import EstimationMethod
 
+    t0 = time.time()
+
     estimator: type[EstimationMethod]
     noise_target_fun = None
     if args.estimator == "map":
@@ -258,8 +262,13 @@ def compute_output_denoised_counts_reports_metrics(
         estimator = SingleSample
     elif args.estimator == "cdf":
         estimator = ThresholdCDF
-    elif args.estimator == "mckp":
-        estimator = MultipleChoiceKnapsack
+    elif args.estimator == "mckp" or args.estimator == "fast-mckp":
+        if args.estimator == "mckp":
+            target_estimator = Mean
+            estimator = MultipleChoiceKnapsack
+        else:  # args.estimator == "fast-mckp":
+            target_estimator = MeanFast
+            estimator = MultipleChoiceKnapsackFast
 
         # Prep specific for MCKP: target estimation.
         logger.info("Computing target noise counts per gene for MCKP estimator")
@@ -271,7 +280,7 @@ def compute_output_denoised_counts_reports_metrics(
         noise_target_fun_per_cell = compute_mean_target_removal_as_function(
             noise_count_posterior_coo=posterior._noise_count_posterior_coo,
             noise_offsets=posterior._noise_count_posterior_coo_offsets,
-            index_converter=posterior.index_converter,
+            target_estimator=target_estimator(index_converter=posterior.index_converter),
             raw_count_csr_for_cells=cell_counts,
             n_cells=len(cell_inds),
             device="cuda" if args.use_cuda else "cpu",  # TODO check this
@@ -281,7 +290,7 @@ def compute_output_denoised_counts_reports_metrics(
         def noise_target_fun(x):
             return noise_target_fun_per_cell(x) * len(cell_inds)
     else:
-        raise ValueError('Input --estimator must be one of ["map", "mean", "sample", "cdf", "mckp"]')
+        raise ValueError('Input --estimator must be one of ["map", "mean", "sample", "cdf", "mckp", "fast-mckp"]')
 
     # Save denoised count matrix outputs (for each FPR if applicable).
     success = True
@@ -321,6 +330,8 @@ def compute_output_denoised_counts_reports_metrics(
             device="cuda" if args.use_cuda else "cpu",
             use_multiple_processes=args.use_multiprocessing_estimation,
         )
+
+        logger.info(f"Total target estimation + denoise time = {(time.time() - t0):.2f} sec")
 
         # Restore eliminated features in cells.
         logger.debug("Restoring eliminated features in cells")

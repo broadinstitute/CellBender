@@ -3,6 +3,7 @@
 import concurrent.futures
 import logging
 import multiprocessing as mp
+import sys
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -15,6 +16,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import torch
+import torch.multiprocessing as torchmp
 from torch.distributions.categorical import Categorical
 
 from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
@@ -142,6 +144,70 @@ class Mean(EstimationMethod):
             data=result["result"], m=result["m"], noise_offsets=noise_offsets, dtype=np.float32
         )
 
+
+class MeanFast(EstimationMethod):
+    """Posterior mean"""
+
+    @torch.no_grad()
+    def estimate_noise(
+        self, noise_log_prob_coo: sp.coo_matrix, noise_offsets: Optional[Dict[int, int]], device: str = "cpu", **kwargs
+    ) -> sp.csr_matrix:
+        """Given the full probabilistic posterior, compute noise counts by
+        taking the mean of each probability distribution.
+
+        Args:
+            noise_log_prob_coo: The noise log prob data structure: log prob
+                values in a (m, c) COO matrix
+            noise_offsets: Noise count offset values keyed by 'm'.
+
+        Returns:
+            noise_count_csr: Estimated noise count matrix.
+        """
+
+        # TODO: noise_log_prob_coo.has_canonical_form is false to begin with, which freaks me out.
+        #       noise_log_prob_coo.sum_duplicates() fixes it, but takes a few seconds.
+        #       This should probably be called before saving the posterior, but why are there duplicates to begin with?
+
+        t0 = time.time()
+
+        c = torch.from_numpy(noise_log_prob_coo.col).to(device)
+
+        data = torch.from_numpy(noise_log_prob_coo.data).to(device, copy=True)
+        torch.exp(data, out=data)
+
+        # Indices are grouped by m.
+        # group_indices is an array of length m that indexes into _ = torch.unique(m) such that _[group_indices] == m.
+        _, group_indices, group_sizes = torch.unique(
+            torch.from_numpy(noise_log_prob_coo.row).to(device), return_inverse=True, return_counts=True
+        )
+
+        # Gets the mean for each group.
+        # len(group_means) == group_indices.max() + 1 == len(torch.unique(m))
+        # Divides by group_sizes since the csr constructor sums data with duplicate coords.
+        group_means = torch.bincount(group_indices, weights=data * c) / group_sizes
+
+        # Since group_means is ordered the same as torch.unique(m), we can invert it.
+        data_out = group_means[group_indices]
+
+        noise_count_csr = sp.csr_matrix(
+            (data_out.numpy(force=True), self.index_converter.get_ng_indices(noise_log_prob_coo.row)),
+            shape=self.index_converter.matrix_shape,
+            dtype=np.float32,
+        )
+
+        if noise_offsets is not None:
+            noise_offsets_n, noise_offsets_g = (
+                self.index_converter.get_ng_indices(m_inds=np.fromiter(noise_offsets.keys(), dtype=np.int64))
+            )
+
+            noise_count_csr[noise_offsets_n, noise_offsets_g] += np.fromiter(noise_offsets.values(), dtype=np.int64)
+
+        noise_count_csr.eliminate_zeros()
+        noise_count_csr.sum_duplicates()
+
+        logger.info(f"Mean.estimate_noise(): time = {(time.time() - t0):.2f} sec")
+
+        return noise_count_csr
 
 class MAP(EstimationMethod):
     """The canonical maximum a posteriori"""
@@ -701,6 +767,435 @@ class MultipleChoiceKnapsack(EstimationMethod):
         # The MAP already has the noise offsets, so they are not added to steps_csr.
         return map_csr + steps_csr
 
+@torch.no_grad()
+def unique_with_indices(x, sort = False, return_counts = False):
+    # TODO: scatter_reduce_ is in beta and can be nondeterministic on GPU, not sure if that matters here
+    # TODO: try torch.use_deterministic_algorithms(True)
+    # TODO: might not matter because we aren't using floats
+    # TODO: other implementations here https://github.com/pytorch/pytorch/issues/36748, but the ones I tried were slow.
+    # TODO: I have no idea how this works and I used my last free copilot credits to get this.
+    idx = torch.arange(x.numel(), device=x.device)
+
+    if return_counts:
+        u, inv, counts = torch.unique(x, sorted=sort, return_inverse=True, return_counts=True)
+    else:
+        u, inv = torch.unique(x, sorted=sort, return_inverse=True)
+        counts = None
+
+    first_idx = torch.full((u.numel(),), x.numel(), dtype=idx.dtype, device=x.device)
+    first_idx.scatter_reduce_(0, inv, idx, reduce="amin", include_self=True)
+
+    if return_counts:
+        return u, first_idx, inv, counts
+    else:
+        return u, first_idx, inv
+
+@torch.no_grad()
+def _estimate_fast_mckp(
+    process_index,
+    gene_chunks,
+    use_multiple_processes,
+    out_stack_queue,
+    unique_genes,
+    start_idx, 
+    counts,
+    n_sorted,
+    c_sorted,
+    data_sorted,
+    noise_targets_per_gene,
+    total_n_cells,
+    total_n_genes,
+    data_dtype,
+    n_threads,
+    t_start,
+):
+    print(f"{timestamp()} fast-mckp process {process_index} time to start = {(time.time() - t_start):.2f} sec")
+
+    t0 = time.time()
+
+    torch.set_num_threads(n_threads)
+
+    out_data = torch.zeros(0, dtype=torch.int64, device=data_sorted.device)
+    out_row_indices = torch.zeros(0, dtype=torch.int64, device=data_sorted.device)
+    out_col_indices = torch.zeros(0, dtype=torch.int64, device=data_sorted.device)
+
+    for i in gene_chunks[process_index]:
+        # print(f"i: {i}")
+
+        gene_idx = unique_genes[i]
+        start = start_idx[i]
+        count = counts[i]
+
+        end = start + count
+
+        gene_n = n_sorted[start:end]
+        gene_c = c_sorted[start:end]
+        gene_data = data_sorted[start:end]
+
+        gene_nonzero, nonzero_rows = MultipleChoiceKnapsackFast.densify_without_zero_rows(gene_data, gene_n, gene_c)
+
+        map_argmax = torch.argmax(gene_nonzero, dim=1)
+
+        noise_target = torch.floor(noise_targets_per_gene[gene_idx])
+
+        additional_noise_counts = noise_target - torch.sum(map_argmax, dtype=data_dtype)
+
+        step_direction = torch.sign(additional_noise_counts)
+
+        if step_direction == 0:
+            # Target == MAP
+            gene_noise_counts = map_argmax
+        elif step_direction > 0:
+            # Target > MAP
+
+            # print("step+")
+
+            max_c_idx = torch.tensor(gene_nonzero.shape[1] - 1)
+
+            while True:
+                delta_argmax = map_argmax + 1
+
+                overflowed_rows_mask = delta_argmax > max_c_idx
+
+                delta_argmax = torch.minimum(delta_argmax, max_c_idx)
+
+                delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
+
+                delta_rewards[overflowed_rows_mask] = -torch.inf
+
+                topk_reward_values, topk_reward_indices = torch.topk(
+                    delta_rewards,
+                    k=int(torch.minimum(additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
+                    largest=True,
+                    sorted=False,
+                )
+
+                if torch.any((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf)):
+                    # print("not enough extra possible counts")
+                    topk_reward_indices = topk_reward_indices[
+                        ~((topk_reward_values == 0.0) | (topk_reward_values == -torch.inf))
+                    ]
+
+                    map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                    gene_noise_counts = map_argmax
+
+                    break
+
+                map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                if map_argmax.sum() == noise_target:  # probly inconsistent rounding
+                    gene_noise_counts = map_argmax
+                    # print("break")
+
+                    break
+                else:
+                    if torch.all(delta_argmax == max_c_idx):
+                        # target not achievable with all noise counts maxed
+                        # print("impossible break")
+                        gene_noise_counts = map_argmax
+
+                        break
+                    else:
+                        additional_noise_counts = noise_target - torch.sum(map_argmax)
+                        # print("loop")
+
+        elif step_direction < 0:
+            # Target < MAP
+            # print("step-")
+
+            while True:
+                delta_argmax = map_argmax - 1
+
+                underflowed_rows_mask = delta_argmax < 0
+
+                delta_argmax = torch.maximum(delta_argmax, torch.tensor(0))
+
+                delta_rewards = gene_nonzero[torch.arange(gene_nonzero.shape[0]), delta_argmax]
+
+                delta_rewards[underflowed_rows_mask] = -torch.inf
+
+                topk_reward_values, topk_reward_indices = torch.topk(
+                    delta_rewards,
+                    k=int(torch.minimum(-additional_noise_counts, torch.tensor(delta_rewards.shape[0]))),
+                    largest=True,
+                    sorted=False,
+                )
+
+                # TODO: check for invalid topk_reward_values as above
+
+                map_argmax[topk_reward_indices] = delta_argmax[topk_reward_indices]
+
+                if map_argmax.sum() == noise_target:  # probly inconsistent rounding
+                    gene_noise_counts = map_argmax
+                    # print("break")
+
+                    break
+                else:
+                    if torch.all(delta_argmax == 0):
+                        # target not achievable with all noise counts at min
+                        # print("impossible break")
+                        gene_noise_counts = map_argmax
+
+                        break
+                    else:
+                        additional_noise_counts = noise_target - torch.sum(map_argmax)
+                        # print("loop")
+
+        nonzero_mask = gene_noise_counts != 0
+
+        if torch.sum(nonzero_mask) != 0:
+            nz_noise_counts = gene_noise_counts[nonzero_mask]
+
+            out_data = torch.cat((out_data, nz_noise_counts), dim=0)
+            out_row_indices = torch.cat((out_row_indices, nonzero_rows[nonzero_mask]), dim=0)
+            out_col_indices = torch.cat((out_col_indices, torch.ones_like(nz_noise_counts) * gene_idx), dim=0)
+
+            # logger.debug("added col")
+
+    if use_multiple_processes:
+        out_stack_queue.put(
+            torch.stack((out_data, out_row_indices, out_col_indices))
+        )
+
+        out_csr = None
+    else:
+        out_csr = sp.csr_matrix(
+            (out_data.numpy(force=True),
+             (out_row_indices.numpy(force=True), out_col_indices.numpy(force=True))),
+            shape=(total_n_cells, total_n_genes),
+        )
+
+    print(f"{timestamp()} fast-mckp process {process_index} time = {(time.time() - t0):.2f} sec")
+
+    if use_multiple_processes:
+        out_stack_queue.join()
+
+    return out_csr
+
+class MultipleChoiceKnapsackFast(EstimationMethod):
+    @staticmethod
+    @torch.no_grad()
+    def densify_without_zero_rows(
+        data,
+        row,
+        col,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # TODO: Claude made this, I'm not sure how or if it works.
+
+        nonzero_rows_ = torch.unique(row)
+
+        rows_ = torch.searchsorted(nonzero_rows_, row)
+
+        dense = torch.zeros((nonzero_rows_.shape[0], torch.max(col) + 1), dtype=data.dtype, device=data.device)
+        dense[rows_, col] = data
+
+        return dense, nonzero_rows_
+
+    @torch.no_grad()
+    def estimate_noise(
+        self,
+        noise_log_prob_coo: sp.coo_matrix,
+        noise_offsets: Optional[Dict[int, int]],
+        noise_targets_per_gene: np.ndarray | None = None,
+        verbose: bool = False,
+        n_chunks: Optional[int] = None,
+        use_multiple_processes: bool = False,
+        **kwargs,
+    ) -> sp.csr_matrix:
+
+        # TODO: handle noise_offsets
+
+        t0 = time.time()
+
+        setup_gpu = True
+        use_gpu = False
+
+        n_processes = 6
+        n_threads_per_process_single = 6
+        n_threads_per_process_multiple = 1
+
+        data_dtype = torch.float32
+        index_dtype = np.int32
+
+        device = "cuda" if setup_gpu else "cpu"
+
+        # restored later
+        original_torch_num_thread = torch.get_num_threads()
+
+        if not use_multiple_processes:
+            torch.set_num_threads(n_threads_per_process_single)
+
+        # Release unused memory so the usage reported by nvidia-smi doesn't appear to be higher than it actually is.
+        torch.cuda.empty_cache()
+
+        # TODO: test RAM and VRAM usage
+
+        # p-core/e-core counts are hard to get programmatically without obscure hacks.
+        # This effects recent Intel and Apple CPUs, and there is no library support.
+        # Looks like number of physical p-cores is best.
+
+        # wtih setup_gpu = False, use_gpu = False, use_multiple_processes = False
+        # 1
+        #   setup:  4.8
+        #   run:    11.69
+        #   total:  16.49
+        # 6 (p-core count)
+        #   setup:  3.52
+        #   run:    10.03
+        #   total:  13.55
+        # 12 (p-core thread count)
+        #   setup:  3.58
+        #   run:    11.81
+        #   total:  15.39
+        # 14 (default)
+        #   setup:  3.61
+        #   run:    11.75
+        #   total:  15.36
+        # 20 (p-core + e-core thread count)
+        #   setup:  6.81
+        #   run:    22.53
+        #   total:  29.34
+
+        n, g = self.index_converter.get_ng_indices(m_inds=noise_log_prob_coo.row)
+        n = torch.from_numpy(n).to(device)
+        g = torch.from_numpy(g).to(device)
+
+        c = torch.from_numpy(noise_log_prob_coo.col).to(device)
+
+        data = torch.from_numpy(noise_log_prob_coo.data).to(device, copy=True)
+
+        # Exponentiating works, but reduces floating-point precision.
+        # TODO: I forget, why does this not work for negative data now that I'm not using BISSA?
+        data = data - (torch.floor(data.min()) - 1)
+
+        order = torch.argsort(g)
+        g_sorted = g[order]
+        n_sorted = n[order]
+        c_sorted = c[order]
+        data_sorted = data[order]
+
+        unique_genes, start_idx, _, counts = unique_with_indices(g_sorted, return_counts=True)
+
+        noise_targets_per_gene = torch.from_numpy(noise_targets_per_gene).to(device)
+
+        device = "cuda" if use_gpu else "cpu"
+
+        n_sorted = n_sorted.to(device)
+        c_sorted = c_sorted.to(device)
+        data_sorted = data_sorted.to(device)
+
+        unique_genes = unique_genes.to(device)
+        start_idx = start_idx.to(device)
+        counts = counts.to(device)
+
+        noise_targets_per_gene = noise_targets_per_gene.to(device)
+
+        t_setup = time.time()
+
+        torch.cuda.empty_cache()
+
+        logger.info(f"{timestamp()} fast-mckp setup time = {(t_setup - t0):.2f} sec")
+
+        if use_multiple_processes:
+            gene_chunks = torch.arange(unique_genes.shape[0], device=device).tensor_split(n_processes)
+
+            out_stack_queue = torchmp.JoinableQueue()
+
+            # Sharing CUDA tensors requires spawn or forkserver.
+            # Only spawn works on Windows and Mac, but is slow.
+            # see https://docs.python.org/3/library/sys.html#sys.platform
+            # see https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
+            # see https://docs.pytorch.org/docs/2.12/multiprocessing.html#sharing-cuda-tensors
+            # TODO: Check compatibility for other platforms.
+            start_method = "spawn"
+            if sys.platform == "linux":
+                start_method = "forkserver"
+
+            t_start = time.time()
+
+            process_context = torchmp.start_processes(
+                _estimate_fast_mckp,
+                args=(
+                    gene_chunks,
+                    use_multiple_processes,
+                    out_stack_queue,
+                    unique_genes,
+                    start_idx,
+                    counts,
+                    n_sorted,
+                    c_sorted,
+                    data_sorted,
+                    noise_targets_per_gene,
+                    self.index_converter.total_n_cells,
+                    self.index_converter.total_n_genes,
+                    data_dtype,
+                    n_threads_per_process_multiple,
+                    t_start,
+                ),
+                nprocs=n_processes,
+                join=False,
+                daemon=True,
+                start_method=start_method
+                # TODO: start_method = "fork" on linux (might not work with CUDA (might need forkserver))
+            )
+
+            t_collect = time.time()
+
+            out_csr_list = []
+
+            for i in range(n_processes):
+                out_stack = out_stack_queue.get().numpy(force=True)
+
+                out_csr_list.append(
+                    sp.csr_matrix((out_stack[0], (out_stack[1], out_stack[2])),
+                                        shape=(self.index_converter.total_n_cells, self.index_converter.total_n_genes),)
+                )
+
+                del out_stack
+
+            for i in range(n_processes):
+                out_stack_queue.task_done()
+
+            process_context.join()
+
+            #TODO: Warning on process close when using CUDA. This might be a pain to fix, see
+            # https://docs.pytorch.org/docs/2.12/multiprocessing.html#multiprocessing-cuda-sharing-details
+
+            out_csr = sum(out_csr_list)
+
+            logger.info(f"{timestamp()} fast-mckp collection time = {(time.time() - t_collect):.2f} sec")
+
+        else:
+            t_start = time.time()
+
+            out_csr = _estimate_fast_mckp(
+                0,
+                torch.unsqueeze(torch.arange(unique_genes.shape[0]), dim=0),
+                use_multiple_processes,
+                None,
+                unique_genes,
+                start_idx,
+                counts,
+                n_sorted,
+                c_sorted,
+                data_sorted,
+                noise_targets_per_gene,
+                self.index_converter.total_n_cells,
+                self.index_converter.total_n_genes,
+                data_dtype,
+                n_threads_per_process_single,
+                t_start,
+            )
+
+        torch.set_num_threads(original_torch_num_thread)
+
+        torch.cuda.empty_cache()
+
+        logger.info(f"{timestamp()} fast-mckp estimation time after prep = {(time.time() - t_setup):.2f} sec")
+        logger.info(f"{timestamp()} Total fast-mckp estimation time = {(time.time() - t0):.2f} sec")
+
+        return out_csr
 
 def chunked_iterator(
     coo: sp.coo_matrix, max_dense_batch_size_GB: float = 1.0

@@ -1589,7 +1589,7 @@ class IndexConverter:
 def compute_mean_target_removal_as_function(
     noise_count_posterior_coo: sp.coo_matrix,
     noise_offsets: Optional[Dict[int, int]],
-    index_converter: IndexConverter,
+    target_estimator: EstimationMethod,
     raw_count_csr_for_cells: sp.csr_matrix,
     n_cells: int,
     device: str,
@@ -1605,7 +1605,8 @@ def compute_mean_target_removal_as_function(
     Args:
         noise_count_posterior_coo: Noise count posterior log prob COO
         noise_offsets: Offset noise counts per 'm' index
-        index_converter: IndexConverter object from 'm' to (n, g) and back
+        target_estimator: EstimationMethod object which calculates means
+            i.e. either Mean or MeanFast
         raw_count_csr_for_cells: The input count matrix for only the cells
             included in the posterior
         n_cells: Number of cells included in the posterior, same number as in
@@ -1621,8 +1622,7 @@ def compute_mean_target_removal_as_function(
     # TODO: s1.h5 with FPR 0.99 only removes 50% of signal
 
     # Compute the expected noise using mean summarization.
-    estimator = Mean(index_converter=index_converter)
-    mean_noise_csr = estimator.estimate_noise(
+    mean_noise_csr = target_estimator.estimate_noise(
         noise_log_prob_coo=noise_count_posterior_coo,
         noise_offsets=noise_offsets,
         device=device,
