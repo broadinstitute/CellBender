@@ -25,7 +25,7 @@ REGION = "us-central1"
 NETWORK = "projects/broad-dsde-methods/global/networks/default"
 SUBNETWORK = "projects/broad-dsde-methods/regions/us-central1/subnetworks/default-61a36d581c62b777"
 SERVICE_ACCOUNT = "cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com"
-DOCKER_IMAGE = "us.gcr.io/broad-dsde-methods/cellbender:latest"
+DOCKER_IMAGE = "us.gcr.io/broad-dsde-methods/cellbender:main"
 
 # Memory (GB) per vCPU for each N1/N2 machine family.
 _MEM_GB_PER_VCPU: dict[str, float] = {
