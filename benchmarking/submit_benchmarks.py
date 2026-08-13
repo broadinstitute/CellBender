@@ -22,6 +22,8 @@ from google.cloud import batch_v1
 
 PROJECT = "broad-dsde-methods"
 REGION = "us-central1"
+NETWORK = "projects/broad-dsde-methods/global/networks/default"
+SUBNETWORK = "projects/broad-dsde-methods/regions/us-central1/subnetworks/default-61a36d581c62b777"
 SERVICE_ACCOUNT = "cellbender-benchmarking@broad-dsde-methods.iam.gserviceaccount.com"
 DOCKER_IMAGE = "us.gcr.io/broad-dsde-methods/cellbender:latest"
 
@@ -167,9 +169,16 @@ def submit_job(
     location = batch_v1.AllocationPolicy.LocationPolicy()
     location.allowed_locations = ["regions/us-central1"]
 
+    network_interface = batch_v1.AllocationPolicy.NetworkInterface()
+    network_interface.network = NETWORK
+    network_interface.subnetwork = SUBNETWORK
+    network_policy = batch_v1.AllocationPolicy.NetworkPolicy()
+    network_policy.network_interfaces = [network_interface]
+
     allocation_policy = batch_v1.AllocationPolicy()
     allocation_policy.instances = [instances]
     allocation_policy.location = location
+    allocation_policy.network = network_policy
     allocation_policy.service_account.email = SERVICE_ACCOUNT
 
     job = batch_v1.Job()
