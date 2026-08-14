@@ -17,6 +17,8 @@ from cellbender.remove_background.estimation import (
     SingleSample,
     ThresholdCDF,
     _estimation_array_to_csr,
+    apply_function_dense_chunks,
+    chunked_iterator,
     pandas_grouped_apply,
 )
 from cellbender.remove_background.posterior import IndexConverter, dense_to_sparse_op_torch, log_prob_sparse_to_dense
@@ -408,3 +410,54 @@ def test_estimation_array_to_csr():
     truth_csr = coo.tocsr()
 
     assert sparse_matrix_equal(output_csr, truth_csr)
+
+
+@pytest.fixture(scope="module")
+def log_prob_coo_with_unoccupied_columns() -> Dict[str, Union[sp.coo_matrix, np.ndarray]]:
+    """A posterior whose occupied noise-count columns do not start at zero.
+
+    Every row puts its mass on c in {1, 2, 3}, with the mode at c = 2. Column 0
+    is unoccupied throughout, so a chunker that compacts the column axis shifts
+    every answer down by one.
+    """
+    n_rows = 4
+    counts = np.array([1, 2, 3])
+    probs = np.array([0.2, 0.7, 0.1])
+    rows = np.repeat(np.arange(n_rows), counts.size)
+    cols = np.tile(counts, n_rows)
+    data = np.tile(np.log(probs), n_rows)
+    return {
+        "coo": sp.coo_matrix((data, (rows, cols)), shape=(n_rows, 5)),
+        "map": np.full(n_rows, 2),  # the mode sits at c = 2
+        "mean": np.full(n_rows, float((counts * probs).sum())),
+    }
+
+
+def test_chunked_iterator_preserves_the_noise_count_axis(log_prob_coo_with_unoccupied_columns):
+    """The column index of a yielded chunk must still mean "noise count"."""
+    coo = log_prob_coo_with_unoccupied_columns["coo"]
+    for chunk, _rows in chunked_iterator(coo=coo):
+        assert chunk.shape[1] == coo.shape[1], (
+            "chunk column axis was compacted, so its indices no longer are noise counts"
+        )
+        dense = log_prob_sparse_to_dense(chunk.tocoo())
+        # the mode must stay at the real noise count, not at a compacted position
+        np.testing.assert_array_equal(dense.argmax(axis=1), log_prob_coo_with_unoccupied_columns["map"])
+
+
+def test_map_is_a_real_noise_count_when_low_counts_are_unoccupied(log_prob_coo_with_unoccupied_columns):
+    result = apply_function_dense_chunks(
+        noise_log_prob_coo=log_prob_coo_with_unoccupied_columns["coo"], fun=MAP.torch_argmax
+    )
+    np.testing.assert_array_equal(result["result"], log_prob_coo_with_unoccupied_columns["map"])
+
+
+def test_mean_is_a_real_noise_count_when_low_counts_are_unoccupied(log_prob_coo_with_unoccupied_columns):
+    def _torch_mean(x):
+        c = torch.arange(x.shape[1], dtype=x.dtype).to(x.device)
+        return torch.matmul(x.exp(), c.t())
+
+    result = apply_function_dense_chunks(
+        noise_log_prob_coo=log_prob_coo_with_unoccupied_columns["coo"], fun=_torch_mean
+    )
+    np.testing.assert_allclose(result["result"], log_prob_coo_with_unoccupied_columns["mean"], rtol=1e-6)
