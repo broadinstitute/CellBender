@@ -1,7 +1,7 @@
 .PHONY: install lint format typecheck test docs FORCE
 
 install: FORCE
-	pip install -e .[dev,docs]
+	pip install -e .[dev,docs,report]
 
 uninstall: FORCE
 	pip uninstall cellbender

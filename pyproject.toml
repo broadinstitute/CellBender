@@ -41,6 +41,7 @@ find = {namespaces = false}
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 optional-dependencies.dev = {file = ["requirements-dev.txt"]}
+optional-dependencies.report = {file = ["requirements-report.txt"]}
 optional-dependencies.docs = {file = ["requirements-rtd.txt"]}
 
 [tool.setuptools.package-data]

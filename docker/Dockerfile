@@ -16,7 +16,7 @@ RUN apt-get update && apt-get upgrade -y \
  && apt-get update && apt-get install -y --no-install-recommends google-cloud-cli \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
- && pip install git+https://github.com/broadinstitute/CellBender@${VERSION} \
+ && pip install "cellbender[report] @ git+https://github.com/broadinstitute/CellBender@${VERSION}" \
  && rm -rf ~/.cache/pip
 
 ENTRYPOINT ["/bin/bash"]
