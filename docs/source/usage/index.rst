@@ -196,10 +196,11 @@ Considerations for setting parameters:
 * ``--cuda``: Include this flag.  The code is meant to be run on a GPU.
 * ``--mps``: Use this instead of ``--cuda`` on an Apple Silicon Mac, to run on the
   integrated GPU via Metal Performance Shaders.  Requires macOS 12.3 or later.
-  ``--cuda`` and ``--mps`` are mutually exclusive.  Note that Metal supports
-  float32 only, so posterior estimation runs at lower precision than it does on
-  CUDA or CPU.  On torch versions before 2.14, a few sampling operations have no
-  Metal kernel and CellBender transparently runs those on the CPU.
+  ``--cuda`` and ``--mps`` are mutually exclusive.  Note that Metal has no
+  double precision, so posterior estimation runs in float32 rather than float64,
+  at lower precision than it does on CUDA or CPU.  On torch versions before
+  2.14, a few sampling operations have no Metal kernel and CellBender
+  transparently runs those on the CPU.
 * ``--learning-rate``: The default value of 1e-4 is typically fine, but this value can be
   adjusted if problems arise during quality-control checks of the learning curve (as above).
 * ``--fpr``: A value of 0.01 is the default, and represents a fairly conservative

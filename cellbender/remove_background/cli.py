@@ -113,8 +113,9 @@ class CLI(AbstractCLI):
                 )
                 sys.stdout.flush()  # Write immediately
             sys.stdout.write(
-                "Note: MPS supports float32 only, so posterior estimation runs at "
-                "reduced precision compared to CUDA or CPU.\n\n"
+                "Note: MPS has no double precision, so posterior estimation runs in "
+                "float32 rather than float64, at reduced precision compared to CUDA "
+                "or CPU.\n\n"
             )
             sys.stdout.flush()  # Write immediately
 
