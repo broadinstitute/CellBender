@@ -133,8 +133,8 @@ jobs:
             scanpy[leiden] \
             colorcet \
             seaborn \
-            scikit-misc \
-            cellbender
+            scikit-misc
+          pip install --quiet .
 
       - name: Download outputs.json
         uses: actions/download-artifact@v4
