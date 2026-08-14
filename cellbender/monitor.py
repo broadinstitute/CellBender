@@ -37,9 +37,12 @@ def get_hardware_usage(use_cuda: bool) -> str:
     else:
         gpu_string = ""
 
+    # psutil.cpu_count() returns None when it cannot determine a count, which
+    # would make this raise TypeError in the middle of a debug log line.
+    n_cpus = psutil.cpu_count() or 1
     cpu_string = (
         f"Avg CPU load over past minute: "
-        f"{psutil.getloadavg()[0] / psutil.cpu_count() * 100:.1f} %\n"
+        f"{psutil.getloadavg()[0] / n_cpus * 100:.1f} %\n"
         f"RAM in use: {bytes2human(mem.used)} ({mem.percent} %)"
     )
 
