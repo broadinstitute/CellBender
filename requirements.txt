@@ -3,9 +3,9 @@ scipy
 tables
 pandas
 pyro-ppl>=1.8.4
-torch
+torch>=2.0
 matplotlib
-anndata>=0.9
+anndata>=0.10
 ipython
 ipykernel
 nbconvert

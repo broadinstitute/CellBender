@@ -5,7 +5,6 @@ import logging
 import os
 import shutil
 import subprocess
-import warnings
 from typing import Any, Dict
 
 import matplotlib.pyplot as plt
@@ -30,10 +29,6 @@ TIMEOUT = 1200  # twenty minutes should always be way more than enough
 # counteract an error when I run locally
 # https://stackoverflow.com/questions/53014306/error-15-initializing-libiomp5-dylib-but-found-libiomp5-dylib-already-initial
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
-
-
-# ignore a specific dtype FutureWarning, I think from anndata
-warnings.filterwarnings("ignore", message="The dtype argument is deprecated and will be removed in late 2024.")
 
 
 def run_notebook_str(file):
