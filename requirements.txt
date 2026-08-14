@@ -6,9 +6,5 @@ pyro-ppl>=1.8.4
 torch
 matplotlib
 anndata>=0.9
-ipython
-ipykernel
-nbconvert
-lxml_html_clean
 psutil
 dill>0.3.1

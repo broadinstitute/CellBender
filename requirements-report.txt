@@ -1,0 +1,6 @@
+# Dependencies needed only to generate the HTML report.
+# Installed via: pip install cellbender[report]
+ipython
+ipykernel
+nbconvert
+lxml_html_clean

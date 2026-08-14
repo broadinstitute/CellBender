@@ -35,8 +35,8 @@ from cellbender.remove_background.posterior import (
     compute_mean_target_removal_as_function,
     load_or_compute_posterior_and_save,
 )
-from cellbender.remove_background.report import plot_summary, run_notebook_make_html
 from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
+from cellbender.remove_background.summary import plot_summary, run_notebook_make_html
 from cellbender.remove_background.train import run_training
 from cellbender.remove_background.vae.decoder import Decoder
 from cellbender.remove_background.vae.encoder import CompositeEncoder, EncodeNonZLatents, EncodeZ
