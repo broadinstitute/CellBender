@@ -20,6 +20,7 @@ import scipy.sparse as sp
 import torch
 
 import cellbender.remove_background.consts as consts
+from cellbender.device import float_dtype
 from cellbender.monitor import get_hardware_usage
 from cellbender.remove_background.checkpoint import load_checkpoint, load_from_checkpoint, make_tarball, unpack_tarball
 from cellbender.remove_background.data.dataprep import DataLoader
@@ -212,8 +213,10 @@ class Posterior:
             encoder["z"].eval()
             encoder["other"].eval()
             vi_model.decoder.eval()
-        self.use_cuda = torch.cuda.is_available() if vi_model is None else vi_model.use_cuda
-        self.device = "cuda" if self.use_cuda else "cpu"
+        if vi_model is not None:
+            self.device = vi_model.device
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.analyzed_gene_inds = None if (dataset_obj is None) else dataset_obj.analyzed_gene_inds
         if dataset_obj is not None and dataset_obj.data is not None:
             self.count_matrix_shape: tuple | None = dataset_obj.data["matrix"].shape
@@ -485,7 +488,7 @@ class Posterior:
             batch_size=self.posterior_batch_size,
             fraction_empties=0.0,
             shuffle=False,
-            use_cuda=self.use_cuda,
+            device=self.device,
         )
 
         bcs = []  # barcode index
@@ -515,7 +518,7 @@ class Posterior:
 
             if self.debug:
                 logger.debug(f"Posterior minibatch starting with droplet {ind}")
-                logger.debug("\n" + get_hardware_usage(use_cuda=self.use_cuda))
+                logger.debug("\n" + get_hardware_usage(device=self.device))
 
             # Compute noise count probabilities.
             noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
@@ -869,7 +872,7 @@ class Posterior:
             return None
 
         data_loader = self.dataset_obj.get_dataloader(
-            use_cuda=self.use_cuda, analyzed_bcs_only=True, batch_size=500, shuffle=False
+            device=self.device, analyzed_bcs_only=True, batch_size=500, shuffle=False
         )
 
         n_analyzed = data_loader.dataset.shape[0]
@@ -1117,7 +1120,8 @@ class PRq(PosteriorRegularization):
         for i in range(n_chunks):
             # B index here represents a batch: the re-defined m-index
             log_pdf_noise_counts_BC = torch.tensor(
-                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)])
+                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)]),
+                dtype=float_dtype(device),
             ).to(device)
             noise_count_BC = (
                 torch.arange(log_pdf_noise_counts_BC.shape[1])
@@ -1210,7 +1214,7 @@ class PRq(PosteriorRegularization):
             noise_count_posterior_coo=noise_count_posterior_coo,
             alpha=alpha,
         )
-        log_target_M = torch.tensor(list(log_target_dict.values())).to(device)
+        log_target_M = torch.tensor(list(log_target_dict.values()), dtype=float_dtype(device)).to(device)
 
         reg_noise_count_posterior_coo = PRq._chunked_compute_regularized_posterior(
             noise_count_posterior_coo=noise_count_posterior_coo,
@@ -1341,7 +1345,8 @@ class PRmu(PosteriorRegularization):
         for i in range(n_chunks):
             # B index here represents a batch: the re-defined m-index
             log_pdf_noise_counts_BC = torch.tensor(
-                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)])
+                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)]),
+                dtype=float_dtype(device),
             ).to(device)
             noise_count_BC = (
                 torch.arange(log_pdf_noise_counts_BC.shape[1])
@@ -1645,7 +1650,7 @@ def compute_mean_target_removal_as_function(
             target = target + fpr * approx_signal_csr.sum()
 
         # Return target scaled to be per-cell.
-        return torch.tensor(target / n_cells).to(device)
+        return torch.tensor(target / n_cells, dtype=float_dtype(device)).to(device)
 
     return _target_fun
 

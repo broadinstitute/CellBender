@@ -3,7 +3,7 @@ scipy
 tables
 pandas
 pyro-ppl>=1.8.4
-torch
+torch>=2.13
 matplotlib
 anndata>=0.9
 ipython

@@ -11,10 +11,11 @@ import pyro
 import pyro.optim as optim
 import pytest
 import torch
-from conftest import USE_CUDA
+from conftest import DEVICES
 from torch.distributions import constraints
 
 import cellbender
+from cellbender.device import seed_all
 from cellbender.remove_background.checkpoint import (
     create_workflow_hashcode,
     load_checkpoint,
@@ -32,29 +33,32 @@ from cellbender.remove_background.run import run_inference
 from cellbender.remove_background.vae.decoder import Decoder
 from cellbender.remove_background.vae.encoder import EncodeZ
 
+DEFAULT_DEVICE = DEVICES[0]
+
 
 class RandomState:
-    def __init__(self, use_cuda=False):
+    def __init__(self, device="cpu"):
         self.python = random.randint(0, 100000)
         self.numpy = np.random.randint(0, 100000, size=1).item()
         self.torch = torch.randint(low=0, high=100000, size=[1], device="cpu").item()
-        self.use_cuda = use_cuda
-        if self.use_cuda:
-            self.cuda = torch.randint(low=0, high=100000, size=[1], device="cuda").item()
+        self.device = device
+        self.device_draw = (
+            None if device == "cpu" else torch.randint(low=0, high=100000, size=[1], device=device).item()
+        )
 
     def __repr__(self):
-        if self.use_cuda:
-            return f"python {self.python}; numpy {self.numpy}; torch {self.torch}; torch_cuda {self.cuda}"
-        else:
-            return f"python {self.python}; numpy {self.numpy}; torch {self.torch}"
+        base = f"python {self.python}; numpy {self.numpy}; torch {self.torch}"
+        if self.device_draw is None:
+            return base
+        return f"{base}; torch_{self.device} {self.device_draw}"
 
 
 def test_create_workflow_hashcode():
     """Ensure workflow hashcodes are behaving as expected"""
 
-    tmp_args1 = argparse.Namespace(epochs=100, expected_cells=1000, use_cuda=True)
-    tmp_args2 = argparse.Namespace(epochs=200, expected_cells=1000, use_cuda=True)
-    tmp_args3 = argparse.Namespace(epochs=100, expected_cells=500, use_cuda=True)
+    tmp_args1 = argparse.Namespace(epochs=100, expected_cells=1000, device="cuda")
+    tmp_args2 = argparse.Namespace(epochs=200, expected_cells=1000, device="cuda")
+    tmp_args3 = argparse.Namespace(epochs=100, expected_cells=500, device="cuda")
     hashcode1 = create_workflow_hashcode(module_path=os.path.dirname(cellbender.__file__), args=tmp_args1)
     hashcode2 = create_workflow_hashcode(module_path=os.path.dirname(cellbender.__file__), args=tmp_args2)
     hashcode3 = create_workflow_hashcode(module_path=os.path.dirname(cellbender.__file__), args=tmp_args3)
@@ -66,26 +70,24 @@ def test_create_workflow_hashcode():
     assert hashcode1 == hashcode2
 
 
-def create_random_state_blank_slate(seed, use_cuda=USE_CUDA):
+def create_random_state_blank_slate(seed, device=DEFAULT_DEVICE):
     """Establish a base random state
     https://pytorch.org/docs/stable/notes/randomness.html
     """
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
     pyro.util.set_rng_seed(seed)
-    if use_cuda:
-        torch.cuda.manual_seed_all(seed)
+    seed_all(seed, device)
 
 
-def perturb_random_state(n, use_cuda=USE_CUDA):
+def perturb_random_state(n, device=DEFAULT_DEVICE):
     """Perturb the base random state by drawing random numbers"""
     for _ in range(n):
         random.randint(0, 10)
         np.random.randint(0, 10, 1)
         torch.randn((1,), device="cpu")
-        if use_cuda:
-            torch.randn((1,), device="cuda")
+        if device != "cpu":
+            torch.randn((1,), device=device)
 
 
 @pytest.fixture(scope="function", params=[0, 1, 1234], ids=lambda x: f"seed{x}")
@@ -148,26 +150,22 @@ def test_that_randomstate_plus_perturb_gives_perturbedrandomstate(perturbed_rand
     assert str(prs0) == str(this_prs0)
 
 
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
-def test_save_and_load_random_state(tmpdir_factory, perturbed_random_state_dict, cuda):
+@pytest.mark.parametrize("device", DEVICES)
+def test_save_and_load_random_state(tmpdir_factory, perturbed_random_state_dict, device):
     """Test whether random states are being preserved correctly.
     perturbed_random_state_dict is important since it initializes the state."""
 
     # save the random states
     filebase = tmpdir_factory.mktemp("random_states").join("tmp_checkpoint")
-    save_random_state(filebase=filebase)
+    save_random_state(filebase=filebase, device=device)
 
     # see "what would have happened had we continued"
-    counterfactual = RandomState(use_cuda=cuda)
-    incorrect = RandomState(use_cuda=cuda)  # a second draw
+    counterfactual = RandomState(device=device)
+    incorrect = RandomState(device=device)  # a second draw
 
     # load the random states and check random number generators
-    load_random_state(filebase=filebase)
-    actual = RandomState(use_cuda=cuda)
+    load_random_state(filebase=filebase, device=device)
+    actual = RandomState(device=device)
 
     # check equality
     assert str(counterfactual) == str(actual)
@@ -186,10 +184,11 @@ class PyroModel(torch.nn.Module):
         self.encoder = EncodeZ(input_dim=dim, hidden_dims=[hidden_layer], output_dim=z_dim)
         self.decoder = Decoder(input_dim=z_dim, hidden_dims=[hidden_layer], output_dim=dim)
         self.z_dim = z_dim
-        self.use_cuda = torch.cuda.is_available()
         self.normal = pyro.distributions.Normal
         self.loss = []
-        # self.to(device='cuda' if self.use_cuda else 'cpu')  # CUDA not tested
+        # this standalone pyro model stays on CPU: accelerators are not tested here,
+        # but save_checkpoint reads .device so it has to be declared
+        self.device = "cpu"
 
     def model(self, x: torch.FloatTensor):
         pyro.module("decoder", self.decoder, update_module_params=True)
@@ -350,13 +349,9 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
             assert disagreement == 0, "Guide traces disagree with and without checkpoint restart"
 
 
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("scheduler", [False, True], ids=lambda b: "OneCycleLR" if b else "Adam")
-def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
+def test_save_and_load_cellbender_checkpoint(tmpdir_factory, device, scheduler):
     """Check and see if restarting from a checkpoint picks up in the same place
     we left off.  Use our model and dataloader.
     """
@@ -392,7 +387,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     args.z_dim = 10
     args.z_hidden_dims = [50]
     args.model = "ambient"
-    args.use_cuda = cuda
+    args.device = device
     args.use_jit = False
     args.learning_rate = 1e-3
     args.training_fraction = 0.9

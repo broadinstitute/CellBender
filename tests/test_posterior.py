@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 import torch
-from conftest import sparse_matrix_equal
+from conftest import DEVICES, sparse_matrix_equal
 
 from cellbender.remove_background.estimation import Mean
 from cellbender.remove_background.posterior import (
@@ -19,9 +19,6 @@ from cellbender.remove_background.posterior import (
     torch_binary_search,
 )
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch, log_prob_sparse_to_dense
-
-USE_CUDA = torch.cuda.is_available()
-
 
 # NOTE: issues caught
 # - have a test that actually creates a posterior
@@ -70,12 +67,8 @@ def log_prob_coo(request, log_prob_coo_base) -> Dict[str, Union[sp.coo_matrix, n
 
 @pytest.mark.parametrize("alpha", [0, 1, 2], ids=lambda a: f"alpha{a}")
 @pytest.mark.parametrize("n_chunks", [1, 2], ids=lambda n: f"{n}chunks")
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
-def test_PRq(log_prob_coo, alpha, n_chunks, cuda):
+@pytest.mark.parametrize("device", DEVICES)
+def test_PRq(log_prob_coo, alpha, n_chunks, device):
 
     target_tolerance = 0.001
 
@@ -118,7 +111,7 @@ def test_PRq(log_prob_coo, alpha, n_chunks, cuda):
         noise_count_posterior_coo=log_prob_coo["coo"],
         noise_offsets=log_prob_coo["offsets"],
         alpha=alpha,
-        device="cuda" if cuda else "cpu",
+        device=device,
         target_tolerance=target_tolerance,
         n_chunks=n_chunks,
     )
@@ -141,12 +134,8 @@ def test_PRq(log_prob_coo, alpha, n_chunks, cuda):
 @pytest.mark.parametrize("n_chunks", [1, 2], ids=lambda n: f"{n}chunks")
 # @pytest.mark.parametrize('per_gene', [False, True], ids=lambda n: 'per_gene' if n else 'overall')
 @pytest.mark.parametrize("per_gene", [False], ids=lambda n: "per_gene" if n else "overall")
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
-def test_PRmu(log_prob_coo, fpr, per_gene, n_chunks, cuda):
+@pytest.mark.parametrize("device", DEVICES)
+def test_PRmu(log_prob_coo, fpr, per_gene, n_chunks, device):
 
     target_tolerance = 0.5
 
@@ -168,7 +157,7 @@ def test_PRmu(log_prob_coo, fpr, per_gene, n_chunks, cuda):
     mean_noise_csr = estimator.estimate_noise(
         noise_log_prob_coo=log_prob_coo["coo"],
         noise_offsets=log_prob_coo["offsets"],
-        device="cuda" if cuda else "cpu",
+        device=device,
     )
     print(f"Mean estimator removes {mean_noise_csr.sum()} counts total")
 
@@ -180,7 +169,7 @@ def test_PRmu(log_prob_coo, fpr, per_gene, n_chunks, cuda):
         raw_count_csr_for_cells=count_matrix,
         n_cells=n_cells,
         index_converter=index_converter,
-        device="cuda" if cuda else "cpu",
+        device=device,
         per_gene=per_gene,
     )
     targets = target_fun(fpr)
@@ -195,7 +184,7 @@ def test_PRmu(log_prob_coo, fpr, per_gene, n_chunks, cuda):
         raw_count_matrix=count_matrix,
         fpr=fpr,
         per_gene=per_gene,
-        device="cuda" if cuda else "cpu",
+        device=device,
         target_tolerance=target_tolerance,
         n_chunks=n_chunks,
     )
@@ -316,17 +305,12 @@ def test_torch_binary_search():
 
 @pytest.mark.parametrize("fpr", [0.0, 0.1, 0.5, 0.75, 1], ids=lambda a: f"fpr{a}")
 @pytest.mark.parametrize("per_gene", [False], ids=lambda n: "per_gene" if n else "overall")
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
-def test_compute_mean_target_removal_as_function(log_prob_coo, fpr, per_gene, cuda):
+@pytest.mark.parametrize("device", DEVICES)
+def test_compute_mean_target_removal_as_function(log_prob_coo, fpr, per_gene, device):
     """The target removal computation, very important for the MCKP output"""
 
     noise_count_posterior_coo = log_prob_coo["coo"]
     noise_offsets = log_prob_coo["offsets"]
-    device = "cuda" if cuda else "cpu"
 
     print("log prob posterior coo")
     print(noise_count_posterior_coo)

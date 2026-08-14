@@ -8,6 +8,11 @@ import sys
 import torch
 
 from cellbender.base_cli import AbstractCLI, get_version
+from cellbender.device import (
+    FIRST_TORCH_VERSION_WITH_NATIVE_MPS_SAMPLING,
+    MPS_FALLBACK_ENV_VAR,
+    resolve_device,
+)
 from cellbender.remove_background.posterior import Posterior
 from cellbender.remove_background.run import run_remove_background
 
@@ -75,11 +80,12 @@ class CLI(AbstractCLI):
         assert args.training_fraction > 0, "training-fraction must be > 0"
         assert args.training_fraction <= 1.0, "training-fraction must be <= 1"
 
-        # If cuda is requested, make sure it is available.
-        if args.use_cuda:
-            assert torch.cuda.is_available(), "Trying to use CUDA, but CUDA is not available."
-        else:
-            # Warn the user in case the CUDA flag was forgotten by mistake.
+        # Determine the backend to run on, checking that it is available.
+        args.device = resolve_device(use_cuda=args.use_cuda, use_mps=args.use_mps)
+
+        if args.device == "cpu":
+            # Warn the user in case the device flag was forgotten by mistake.
+            # CUDA takes priority over MPS when both are present.
             if torch.cuda.is_available():
                 sys.stdout.write(
                     "Warning: CUDA is available, but will not be "
@@ -87,6 +93,30 @@ class CLI(AbstractCLI):
                     "significant speed-ups.\n\n"
                 )
                 sys.stdout.flush()  # Write immediately
+            elif torch.backends.mps.is_available():
+                sys.stdout.write(
+                    "Warning: an Apple Silicon GPU (MPS) is available, but "
+                    "will not be used.  Use the flag --mps for "
+                    "significant speed-ups.\n\n"
+                )
+                sys.stdout.flush()  # Write immediately
+
+        if args.device == "mps":
+            if getattr(args, "mps_fallback_enabled", False):
+                sys.stdout.write(
+                    f"Note: torch {torch.__version__} has no Metal kernel for some "
+                    f"sampling operations, so {MPS_FALLBACK_ENV_VAR}=1 has been set "
+                    f"and those operations will run on the CPU. This is still faster "
+                    f"than running everything on the CPU. Upgrading to torch "
+                    f"{'.'.join(str(n) for n in FIRST_TORCH_VERSION_WITH_NATIVE_MPS_SAMPLING)} "
+                    f"or later removes the need for the fallback.\n\n"
+                )
+                sys.stdout.flush()  # Write immediately
+            sys.stdout.write(
+                "Note: MPS supports float32 only, so posterior estimation runs at "
+                "reduced precision compared to CUDA or CPU.\n\n"
+            )
+            sys.stdout.flush()  # Write immediately
 
         # Make sure n_threads makes sense.
         if args.n_threads is not None:

@@ -8,10 +8,14 @@ import pytest
 import scipy.sparse as sp
 import torch
 
+from cellbender.device import available_devices
 from cellbender.remove_background.data.extras.simulate import generate_sample_dirichlet_dataset
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 
-USE_CUDA = torch.cuda.is_available()
+# Every backend usable on this machine. On CI this is just ['cpu'], on an NVIDIA
+# box ['cuda', 'cpu'], and on Apple Silicon ['mps', 'cpu']. Device-sensitive
+# tests parametrize over this so each machine exercises what it actually has.
+DEVICES = available_devices()
 
 
 def sparse_matrix_equal(mat1, mat2):

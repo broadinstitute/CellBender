@@ -452,7 +452,7 @@ class SingleCellRNACountsDataset:
         return trimmed_matrix
 
     def get_dataloader(self,
-                       use_cuda: bool = True,
+                       device: str = 'cpu',
                        batch_size: int = 200,
                        shuffle: bool = False,
                        analyzed_bcs_only: bool = True,
@@ -461,7 +461,7 @@ class SingleCellRNACountsDataset:
         """Return a dataloader for the count matrix.
 
         Args:
-            use_cuda: Whether to load data into GPU memory.
+            device: Backend to load data onto, one of 'cpu', 'cuda', 'mps'.
             batch_size: Size of minibatch of data yielded by dataloader.
             shuffle: Whether dataloader should shuffle the data.
             analyzed_bcs_only: Only include the barcodes that have been
@@ -488,7 +488,7 @@ class SingleCellRNACountsDataset:
             fraction_empties=0.,
             shuffle=shuffle,
             sort_by=sort_by,
-            use_cuda=use_cuda,
+            device=device,
         )
         return data_loader
 

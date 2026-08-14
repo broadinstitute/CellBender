@@ -17,6 +17,7 @@ import scipy.sparse as sp
 import torch
 from torch.distributions.categorical import Categorical
 
+from cellbender.device import float_dtype
 from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
 
 logger = logging.getLogger("cellbender")
@@ -100,7 +101,7 @@ class SingleSample(EstimationMethod):
             noise_log_prob_coo: The noise log prob data structure: log prob
                 values in a (m, c) COO matrix
             noise_offsets: Noise count offset values keyed by 'm'.
-            device: ['cpu', 'cuda'] - whether to perform the pytorch sampling
+            device: ['cpu', 'cuda', 'mps'] - whether to perform the pytorch sampling
                 operation on CPU or GPU. It's pretty fast on CPU already.
 
         Returns:
@@ -134,7 +135,7 @@ class Mean(EstimationMethod):
         # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
         def _torch_mean(x):
-            c = torch.arange(x.shape[1], dtype=float).to(x.device)
+            c = torch.arange(x.shape[1], dtype=x.dtype).to(x.device)
             return torch.matmul(x.exp(), c.t())
 
         result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo, fun=_torch_mean, device=device)
@@ -160,7 +161,7 @@ class MAP(EstimationMethod):
             noise_log_prob_coo: The noise log prob data structure: log prob
                 values in a (m, c) COO matrix
             noise_offsets: Noise count offset values keyed by 'm'.
-            device: ['cpu', 'cuda'] - whether to perform the pytorch argmax
+            device: ['cpu', 'cuda', 'mps'] - whether to perform the pytorch argmax
                 operation on CPU or GPU. It's pretty fast on CPU already.
 
         Returns:
@@ -759,7 +760,7 @@ def apply_function_dense_chunks(
             indexed by 'm' as rows
         fun: Pytorch function that operates on a dense tensor and produces
             one value per row
-        device: ['cpu', 'cuda'] - whether to perform the pytorch sampling
+        device: ['cpu', 'cuda', 'mps'] - whether to perform the pytorch sampling
             operation on CPU or GPU. It's pretty fast on CPU already.
         **kwargs: Passed to fun
 
@@ -776,7 +777,9 @@ def apply_function_dense_chunks(
     a = 0
 
     for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
-        dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
+        # The densified log probs are float64, which MPS cannot represent, so
+        # narrow to the widest float the backend supports before transferring.
+        dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo), dtype=float_dtype(device)).to(device)
         if torch.numel(dense_tensor) == 0:
             # github issue 207
             continue
