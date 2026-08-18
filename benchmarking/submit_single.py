@@ -17,7 +17,6 @@ import re
 import time
 
 from google.cloud import batch_v1
-
 from submit_benchmarks import (
     PROJECT,
     REGION,
@@ -135,8 +134,7 @@ def main() -> None:
     print(f"\nJob submitted: {job.name}", flush=True)
     print(f"Output GCS dir: {output_gcs_dir}", flush=True)
     print(
-        f"\nLogs: https://console.cloud.google.com/batch/jobs"
-        f"?project={PROJECT}&region={REGION}",
+        f"\nLogs: https://console.cloud.google.com/batch/jobs?project={PROJECT}&region={REGION}",
         flush=True,
     )
 
