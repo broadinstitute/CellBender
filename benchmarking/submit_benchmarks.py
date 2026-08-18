@@ -78,26 +78,21 @@ BENCHMARK_JOBS = [
 ]
 
 
-def build_job_script(
+def _build_preamble_lines(
     git_hash: str,
     input_gcs: str,
-    sample: str,
-    output_gcs_dir: str,
-    fpr: str | None,
-    truth_gcs: str | None,
-) -> str:
+    truth_gcs: str | None = None,
+) -> list[str]:
+    """Shell lines shared by all job scripts: download inputs, install from source, verify CUDA."""
     lines = [
         "set -e",
         'export CLOUDSDK_PYTHON="$(which python3)"',
         f"gsutil cp {input_gcs} /tmp/input.h5",
     ]
-
     if truth_gcs:
         lines.append(f"gsutil cp {truth_gcs} /tmp/truth.h5")
-
-    # dev_git_hash__ mechanism: uninstall pre-installed CellBender, clone the
-    # target commit, and reinstall from source so runtime code matches the SHA
-    # being benchmarked.
+    # Uninstall pre-installed CellBender, clone the target commit, and reinstall
+    # from source so runtime code matches the SHA being tested.
     lines += [
         "pip uninstall -y cellbender",
         "git clone -q https://github.com/broadinstitute/CellBender.git /tmp/CellBender",
@@ -109,6 +104,18 @@ def build_job_script(
         "cd /tmp",
         "python3 -c \"import torch; assert torch.cuda.is_available(), 'CUDA unavailable — GPU driver not configured'\"",
     ]
+    return lines
+
+
+def build_job_script(
+    git_hash: str,
+    input_gcs: str,
+    sample: str,
+    output_gcs_dir: str,
+    fpr: str | None,
+    truth_gcs: str | None,
+) -> str:
+    lines = _build_preamble_lines(git_hash, input_gcs, truth_gcs)
 
     cmd_parts = [
         "cellbender remove-background",

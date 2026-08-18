@@ -1,0 +1,90 @@
+name: Dev Batch Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Branch, tag, or SHA to run"
+        required: true
+        default: "main"
+      input_file:
+        description: "GCS path to input .h5 file (e.g. gs://bucket/path/to/input.h5)"
+        required: true
+      extra_args:
+        description: "Extra cellbender args (e.g. --total-droplets-included 25000 --epochs 150)"
+        required: false
+        default: ""
+      output_bucket:
+        description: "GCS output prefix (default: gs://broad-dsde-methods-sfleming/cellbender_test/github_dev_runs)"
+        required: false
+        default: "gs://broad-dsde-methods-sfleming/cellbender_test/github_dev_runs"
+      machine_type:
+        description: "GCP machine type (default: n1-highmem-8). Also try: n1-highmem-16."
+        required: false
+        default: "n1-highmem-8"
+      gpu_type:
+        description: "GCP GPU type (default: nvidia-tesla-t4). Also try: nvidia-tesla-k80."
+        required: false
+        default: "nvidia-tesla-t4"
+      cpu_count:
+        description: "CPU count — used only when machine_type is cleared (leave blank to use machine_type)."
+        required: false
+      memory_gb:
+        description: "Memory in GB — used only when machine_type is cleared (leave blank to use machine_type)."
+        required: false
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write  # required for Workload Identity Federation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Resolve git SHA
+        id: sha
+        run: |
+          echo "full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.BENCHMARK_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: ".github/workflows/run_dev_batch.yml"
+
+      - name: Install Python dependencies
+        run: pip install --quiet google-cloud-batch
+
+      - name: Submit batch job
+        run: |
+          EXTRA_HW_ARGS=""
+          if [[ -z "${{ inputs.machine_type }}" ]]; then
+            [[ -n "${{ inputs.cpu_count }}" ]] && EXTRA_HW_ARGS="$EXTRA_HW_ARGS --cpu-count ${{ inputs.cpu_count }}"
+            [[ -n "${{ inputs.memory_gb }}" ]] && EXTRA_HW_ARGS="$EXTRA_HW_ARGS --memory-gb ${{ inputs.memory_gb }}"
+          fi
+          python benchmarking/submit_single.py \
+            --git-hash "${{ steps.sha.outputs.full }}" \
+            --run-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --input-file "${{ inputs.input_file }}" \
+            --extra-args "${{ inputs.extra_args }}" \
+            --output-bucket "${{ inputs.output_bucket }}" \
+            --machine-type "${{ inputs.machine_type }}" \
+            --gpu-type "${{ inputs.gpu_type }}" \
+            $EXTRA_HW_ARGS
