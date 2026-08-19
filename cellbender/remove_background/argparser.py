@@ -336,11 +336,14 @@ def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubP
         "--estimator",
         type=str,
         default="mckp",
-        choices=["map", "mean", "cdf", "sample", "mckp"],
+        choices=["map", "mean", "cdf", "sample", "mckp", "mckp-fast"],
         dest="estimator",
         help="Output denoised count estimation method. (For "
         "experts: not required for normal usage, see "
-        "documentation).",
+        "documentation). 'mckp-fast' is an opt-in numpy/scipy "
+        "(no pandas) reimplementation of 'mckp', validated to be "
+        "bit-exact but not yet the default -- see estimation_prefix_"
+        "vectorized.py for validation details.",
     )
     subparser.add_argument(
         "--estimator-multiple-cpu",

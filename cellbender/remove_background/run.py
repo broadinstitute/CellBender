@@ -27,6 +27,7 @@ from cellbender.remove_background.data.dataprep import prep_sparse_data_for_trai
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, SingleSample, ThresholdCDF
+from cellbender.remove_background.estimation_prefix_vectorized import MultipleChoiceKnapsackFast
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.posterior import (
@@ -258,10 +259,14 @@ def compute_output_denoised_counts_reports_metrics(
         estimator = SingleSample
     elif args.estimator == "cdf":
         estimator = ThresholdCDF
-    elif args.estimator == "mckp":
-        estimator = MultipleChoiceKnapsack
+    elif args.estimator in ("mckp", "mckp-fast"):
+        # "mckp-fast" is an opt-in, numpy/scipy (no pandas) drop-in replacement for the
+        # MCKP kernel and its shared prefix -- see estimation_prefix_vectorized.py for the
+        # correctness validation (380 tests, adversarial float32-boundary tie-break test)
+        # and measured benchmarks. "mckp" (the default) is untouched.
+        estimator = MultipleChoiceKnapsackFast if args.estimator == "mckp-fast" else MultipleChoiceKnapsack
 
-        # Prep specific for MCKP: target estimation.
+        # Prep specific for MCKP: target estimation. (identical for both variants)
         logger.info("Computing target noise counts per gene for MCKP estimator")
         count_matrix = posterior.dataset_obj.data["matrix"]  # all barcodes
         cell_inds = posterior.dataset_obj.analyzed_barcode_inds[posterior.latents_map["p"] > consts.CELL_PROB_CUTOFF]
