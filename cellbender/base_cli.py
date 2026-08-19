@@ -12,6 +12,8 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _importlib_version
 from typing import Dict
 
+from cellbender.device import maybe_enable_mps_fallback
+
 # New tools should be added to this list.
 TOOL_NAME_LIST = ["remove-background"]
 
@@ -99,12 +101,18 @@ def main():
 
     """
 
+    # This has to happen before generate_cli_dictionary(), which imports the tool
+    # CLI modules, which import torch. Enabling the MPS CPU fallback after torch
+    # has been imported has no effect.
+    mps_fallback_enabled = maybe_enable_mps_fallback(sys.argv)
+
     parser = get_populated_argparser()
     cli_dict = generate_cli_dictionary()
 
     # Parse arguments.
     if len(sys.argv) > 1:
         args = parser.parse_args(sys.argv[1:])
+        args.mps_fallback_enabled = mps_fallback_enabled
 
         # Validate arguments.
         args = cli_dict[args.tool].validate_args(args)

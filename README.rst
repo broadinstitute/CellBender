@@ -131,6 +131,10 @@ Ensure that your installation is appropriate for your hardware (i.e. that
 the relevant CUDA drivers get installed and that ``torch.cuda.is_available()``
 returns ``True`` if you have a GPU available.
 
+On an Apple Silicon Mac there are no drivers to install, and
+``torch.backends.mps.is_available()`` should return ``True``. Pass ``--mps``
+instead of ``--cuda`` to run on the integrated GPU.
+
 This installs CellBender with dev dependencies (in editable ``-e`` mode):
 
 

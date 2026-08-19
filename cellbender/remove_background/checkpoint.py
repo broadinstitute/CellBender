@@ -20,6 +20,7 @@ import dill
 import numpy as np
 import torch
 
+from cellbender.device import get_device_rng_state, set_device_rng_state
 from cellbender.remove_background import consts
 from cellbender.remove_background.data.dataprep import DataLoader
 
@@ -30,18 +31,37 @@ try:
     import pyro
 except ImportError:
     USE_PYRO = False
-USE_CUDA = torch.cuda.is_available()
 
 
-def save_random_state(filebase: str) -> List[str]:
+def _device_of(force_device: Optional[str]) -> str:
+    """Normalize a device string such as 'cuda:0' to a bare backend name.
+
+    Falls back to whichever accelerator is present when nothing is specified.
+    """
+    if force_device is not None:
+        return force_device.split(":")[0]
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def save_random_state(filebase: str, device: Optional[str] = None) -> List[str]:
     """Write states of various random number generators to files.
 
     NOTE: the pyro.util.get_rng_state() is a compilation of python, numpy, and
         torch random states.  Here, we save the three explicitly ourselves.
         This is useful for potential future usages outside of pyro.
+
+    Args:
+        filebase: Path prefix shared by the state files.
+        device: Backend whose RNG state should also be saved. Defaults to
+            whichever accelerator is available.
     """
     # https://stackoverflow.com/questions/32808686/storing-a-random-state/32809283
 
+    device = _device_of(device)
     file_dict = {}
 
     # Random state information
@@ -59,9 +79,9 @@ def save_random_state(filebase: str) -> List[str]:
                 filebase + "_random.torch": torch_random_state,
             }
         )
-    if USE_CUDA:
-        cuda_random_state = torch.cuda.get_rng_state_all()
-        file_dict.update({filebase + "_random.cuda": cuda_random_state})
+    device_random_state = get_device_rng_state(device)
+    if device_random_state is not None:
+        file_dict.update({filebase + f"_random.{device}": device_random_state})
 
     # Save it
     for file, state in file_dict.items():
@@ -71,8 +91,16 @@ def save_random_state(filebase: str) -> List[str]:
     return list(file_dict.keys())
 
 
-def load_random_state(filebase: str):
-    """Load random states from files and update generators with them."""
+def load_random_state(filebase: str, device: Optional[str] = None):
+    """Load random states from files and update generators with them.
+
+    Args:
+        filebase: Path prefix shared by the state files.
+        device: Backend whose RNG state should also be restored. Defaults to
+            whichever accelerator is available.
+    """
+
+    device = _device_of(device)
 
     if USE_PYRO:
         with open(filebase + "_random.pyro", "rb") as f:
@@ -92,10 +120,13 @@ def load_random_state(filebase: str):
             torch_random_state = pickle.load(f)
         torch.set_rng_state(torch_random_state)
 
-    if USE_CUDA:
-        with open(filebase + "_random.cuda", "rb") as f:
-            cuda_random_state = pickle.load(f)
-        torch.cuda.set_rng_state_all(cuda_random_state)
+    # A checkpoint written on a machine without an accelerator has no device RNG
+    # state to restore, so tolerate its absence rather than failing the resume.
+    device_state_file = filebase + f"_random.{device}"
+    if os.path.exists(device_state_file):
+        with open(device_state_file, "rb") as f:
+            device_random_state = pickle.load(f)
+        set_device_rng_state(device, device_random_state)
 
 
 def save_checkpoint(
@@ -118,7 +149,7 @@ def save_checkpoint(
             basename = os.path.basename(filebase)
             filebase = os.path.join(tmp_dir, basename)
 
-            file_list = save_random_state(filebase=filebase)
+            file_list = save_random_state(filebase=filebase, device=model_obj.device)
 
             torch.save(model_obj, filebase + "_model.torch", pickle_module=dill)
             torch.save(scheduler, filebase + "_optim.torch", pickle_module=dill)
@@ -270,8 +301,8 @@ def load_from_checkpoint(
 
         # Update states of random number generators across the board.
         if "random_state" in to_load:
-            load_random_state(filebase=filebase)
-            logger.debug("Loaded random state globally for python, numpy, pytorch, and cuda")
+            load_random_state(filebase=filebase, device=force_device)
+            logger.debug("Loaded random state globally for python, numpy, pytorch, and the accelerator")
 
         # Copy the posterior file outside the temp dir so it can be loaded later.
         if "posterior" in to_load:

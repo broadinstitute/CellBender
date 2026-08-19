@@ -5,7 +5,7 @@ import pyro.infer.trace_elbo
 import pytest
 import scipy.sparse as sp
 import torch
-from conftest import USE_CUDA
+from conftest import DEVICES
 from pyro.infer.svi import SVI
 
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
@@ -13,19 +13,14 @@ from cellbender.remove_background.run import get_optimizer
 from cellbender.remove_background.train import train_epoch
 
 
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dropped_minibatch", [False, True], ids=["", "dropped_minibatch"])
-def test_one_cycle_scheduler(dropped_minibatch, cuda):
+def test_one_cycle_scheduler(dropped_minibatch, device):
 
     # if there is a minibatch so small that it's below consts.SMALLEST_ALLOWED_BATCH
     # then the minibatch gets skipped. make sure this works with the scheduler.
 
     pyro.clear_param_store()
-    device = "cuda" if cuda else "cpu"
 
     n_cells = 3580
     n_empties = 50000
@@ -47,7 +42,7 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
         training_fraction=1.0,
         fraction_empties=0.3,
         shuffle=True,
-        use_cuda=cuda,
+        device=device,
     )
 
     print(f"epochs = {epochs}")

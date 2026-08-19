@@ -49,11 +49,20 @@ def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubP
         required=True,
         help="Output file location (the path must exist, and the file name must have .h5 extension).",
     )
-    subparser.add_argument(
+    device_group = subparser.add_mutually_exclusive_group()
+    device_group.add_argument(
         "--cuda",
         dest="use_cuda",
         action="store_true",
-        help="Including the flag --cuda will run the inference on a GPU.",
+        help="Including the flag --cuda will run the inference on an NVIDIA GPU.",
+    )
+    device_group.add_argument(
+        "--mps",
+        dest="use_mps",
+        action="store_true",
+        help="Including the flag --mps will run the inference on an Apple Silicon "
+        "GPU via Metal Performance Shaders. Requires macOS 12.3 or later. "
+        "See https://pytorch.org/docs/stable/notes/mps.html",
     )
     subparser.add_argument(
         "--checkpoint",

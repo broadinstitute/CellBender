@@ -1,5 +1,6 @@
 """Simulate a basic scRNA-seq count matrix dataset, for tests."""
 
+from cellbender.device import available_devices, seed_all
 from cellbender.remove_background.model import calculate_mu, calculate_lambda
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 from cellbender.remove_background.checkpoint import load_from_checkpoint
@@ -19,24 +20,17 @@ if TYPE_CHECKING:
     from cellbender.remove_background.model import RemoveBackgroundPyroModel
 
 
-if torch.cuda.is_available():
-    USE_CUDA = True
-    DEVICE = 'cuda'
-else:
-    USE_CUDA = False
-    DEVICE = 'cpu'
+DEVICE = available_devices()[0]
 
 
-def comprehensive_random_seed(seed, use_cuda=USE_CUDA):
+def comprehensive_random_seed(seed, device=DEVICE):
     """Establish a base random state
     https://pytorch.org/docs/stable/notes/randomness.html
     """
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
     pyro.util.set_rng_seed(seed)
-    if use_cuda:
-        torch.cuda.manual_seed_all(seed)
+    seed_all(seed, device)
 
 
 def generate_sample_inferred_model_dataset(
@@ -70,7 +64,7 @@ def generate_sample_inferred_model_dataset(
         filebase=None,
         tarball_name=checkpoint_file,
         to_load=['model', 'dataloader', 'param_store'],
-        force_device='cpu' if not torch.cuda.is_available() else None)
+        force_device=DEVICE)
     model = ckpt['model']
     n_genes = model.n_genes
 
@@ -82,16 +76,8 @@ def generate_sample_inferred_model_dataset(
 
     # Find z values for cells.
     data_loader = ckpt['train_loader']
-    if torch.cuda.is_available():
-        data_loader.use_cuda = True
-        data_loader.device = 'cuda'
-        model.use_cuda = True
-        model.device = 'cuda'
-    else:
-        data_loader.use_cuda = False
-        data_loader.device = 'cpu'
-        model.use_cuda = False
-        model.device = 'cpu'
+    data_loader.device = DEVICE
+    model.device = DEVICE
     z = np.zeros((len(data_loader), model.encoder['z'].output_dim))
     p = np.zeros(len(data_loader))
     chi_ambient = pyro.param('chi_ambient').detach()

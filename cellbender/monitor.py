@@ -12,12 +12,16 @@ import torch
 from psutil._common import bytes2human
 
 
-def get_hardware_usage(use_cuda: bool) -> str:
-    """Get a current snapshot of RAM, CPU, GPU memory, and GPU utilization as a string"""
+def get_hardware_usage(device: str) -> str:
+    """Get a current snapshot of RAM, CPU, GPU memory, and GPU utilization as a string
+
+    Args:
+        device: Backend in use, one of 'cpu', 'cuda', 'mps'.
+    """
 
     mem = psutil.virtual_memory()
 
-    if use_cuda:
+    if device == "cuda":
         # Run nvidia-smi to get GPU utilization
         gpu_query = "utilization.gpu"
         format = "csv,nounits,noheader"
@@ -33,6 +37,13 @@ def get_hardware_usage(use_cuda: bool) -> str:
             f"Volatile GPU utilization: {pct_gpu_util} %\n"
             f"GPU memory reserved: {torch.cuda.memory_reserved() / 1e9} GB\n"
             f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9} GB\n"
+        )
+    elif device == "mps":
+        # Metal has no per-process utilization counter comparable to nvidia-smi,
+        # so report the two memory figures torch.mps exposes.
+        gpu_string = (
+            f"GPU memory reserved: {torch.mps.driver_allocated_memory() / 1e9} GB\n"
+            f"GPU memory allocated: {torch.mps.current_allocated_memory() / 1e9} GB\n"
         )
     else:
         gpu_string = ""
