@@ -428,6 +428,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
         verbose: bool = False,
         n_chunks: Optional[int] = None,
         use_multiple_processes: bool = False,
+        device: str = "cpu",
         **kwargs,
     ) -> sp.csr_matrix:
         """Given the full probabilistic posterior, compute noise counts
@@ -442,6 +443,9 @@ class MultipleChoiceKnapsack(EstimationMethod):
                 If None, targets about 5000 genes per chunk.
             use_multiple_processes: True to use multiprocessing. Seems faster
                 without using it, not entirely clear why
+            device: The backend the caller selected. Accepted so that requesting
+                an accelerator is not silently swallowed, but this estimator
+                computes its MAP step on the CPU regardless, to bound memory use.
 
         Returns:
             noise_count_csr: Estimated noise count matrix.
@@ -456,6 +460,11 @@ class MultipleChoiceKnapsack(EstimationMethod):
         )
 
         t0 = time.time()
+
+        if device != "cpu":
+            logger.debug(
+                f"Estimator 'mckp' computes its MAP step on the CPU rather than on {device}, to bound memory use."
+            )
 
         if use_multiple_processes:
             logger.info("Dividing dataset into chunks of genes")
@@ -579,6 +588,9 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
         # First we need to compute the MAP to find out which direction to go.
         t = time.time()
+        # Deliberately on the CPU even when an accelerator was requested: MCKP
+        # is the memory-hungry estimator (issue #396) and this MAP runs over a
+        # whole chunk at once. estimate_noise() tells the user about it.
         map_dict = apply_function_dense_chunks(
             noise_log_prob_coo=noise_log_prob_coo, fun=MAP.torch_argmax, device="cpu"
         )

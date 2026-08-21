@@ -408,3 +408,24 @@ def test_estimation_array_to_csr():
     truth_csr = coo.tocsr()
 
     assert sparse_matrix_equal(output_csr, truth_csr)
+
+
+def test_mckp_accepts_a_device_without_silently_ignoring_it(log_prob_coo, caplog):
+    """--cuda / --mps must not be swallowed without a word.
+
+    MCKP computes its MAP step on the CPU deliberately, to bound memory use
+    (issue #396). That is fine, but it used to absorb the caller's device into
+    **kwargs and say nothing, so the flag looked effective and was not.
+    """
+    import logging
+
+    converter = IndexConverter(total_n_cells=3, total_n_genes=5)
+    estimator = MultipleChoiceKnapsack(index_converter=converter)
+    with caplog.at_level(logging.DEBUG, logger="cellbender"):
+        estimator.estimate_noise(
+            noise_log_prob_coo=log_prob_coo["coo"],
+            noise_offsets=log_prob_coo["offsets"],
+            noise_targets_per_gene=np.array([1, 0, 0, 0, 0]),
+            device="cuda",
+        )
+    assert "mckp" in caplog.text and "CPU" in caplog.text
