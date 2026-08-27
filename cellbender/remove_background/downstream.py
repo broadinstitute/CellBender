@@ -185,9 +185,12 @@ def load_anndata_from_input(input_file: str) -> anndata.AnnData:
     # Create anndata object from dict.
     barcodes = d.pop("barcode")
     gene_names = d.pop("gene_name")
+    matrix = d.pop("matrix")
     assert isinstance(barcodes, np.ndarray) and isinstance(gene_names, np.ndarray)
+    assert isinstance(matrix, (np.ndarray, sp.spmatrix))
+    # AnnData no longer casts via a dtype argument, so cast before handing it over.
     adata = anndata.AnnData(
-        X=d.pop("matrix"),
+        X=matrix.astype(int),
         obs={"barcode": barcodes.astype(str)},
         var={"gene_name": gene_names.astype(str)},
     )
