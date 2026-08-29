@@ -19,3 +19,9 @@ def test_get_hardware_usage(cuda):
     """
 
     print(get_hardware_usage(use_cuda=cuda))
+
+
+def test_hardware_usage_survives_unknown_cpu_count(monkeypatch):
+    """psutil.cpu_count() returns None when it cannot determine a count."""
+    monkeypatch.setattr("cellbender.monitor.psutil.cpu_count", lambda *a, **k: None)
+    assert "Avg CPU load" in get_hardware_usage(use_cuda=False)
