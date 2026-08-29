@@ -1,12 +1,14 @@
 """Functions for creation of an HTML report that plots and explains output."""
 
 import datetime
+import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import warnings
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -36,24 +38,102 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 warnings.filterwarnings("ignore", message="The dtype argument is deprecated and will be removed in late 2024.")
 
 
-def run_notebook_str(file):
-    return f"jupyter nbconvert --ExecutePreprocessor.timeout={TIMEOUT} --to notebook --allow-errors --execute {file}"
+def run_notebook_cmd(file: str, output: str) -> List[str]:
+    """Command that executes the report notebook, writing an executed notebook.
+
+    nbconvert is invoked as a module of the interpreter that is running
+    CellBender, not as the ``jupyter`` executable found on PATH. Those are not
+    always the same environment (a virtualenv whose bin directory is not on
+    PATH is enough to separate them), and the kernel nbconvert starts follows
+    the interpreter it was launched from. Running the wrong one means the
+    notebook cannot import cellbender.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "nbconvert",
+        f"--ExecutePreprocessor.timeout={TIMEOUT}",
+        "--to",
+        "notebook",
+        "--allow-errors",
+        "--execute",
+        file,
+        "--output",
+        output,
+    ]
 
 
-def to_html_str(file, output):
-    return f"jupyter nbconvert --to html --TemplateExporter.exclude_input=True {file}"
+def to_html_cmd(file: str, output: str) -> List[str]:
+    """Command that converts an executed notebook to HTML."""
+    return [
+        sys.executable,
+        "-m",
+        "nbconvert",
+        "--to",
+        "html",
+        "--TemplateExporter.exclude_input=True",
+        file,
+        "--output",
+        output,
+    ]
+
+
+def _run_nbconvert(cmd: List[str], step: str) -> None:
+    """Run an nbconvert command, surfacing its output if it fails.
+
+    Failures used to be swallowed: the commands ran under `shell=True` without
+    `check`, so a broken environment produced a missing file much later instead
+    of an error here.
+    """
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"nbconvert failed while {step} (exit code {result.returncode}).\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"stderr:\n{result.stderr.strip()}"
+        )
+
+
+def _log_notebook_cell_errors(file: str) -> None:
+    """Warn about cells that raised, since --allow-errors lets them through."""
+    try:
+        with open(file, mode="r", encoding="utf8") as f:
+            notebook = json.load(f)
+    except (OSError, ValueError):
+        return
+
+    errors = [
+        output.get("ename", "error")
+        for cell in notebook.get("cells", [])
+        for output in cell.get("outputs", [])
+        if output.get("output_type") == "error"
+    ]
+    if errors:
+        logger.warning(
+            f"The report notebook raised {len(errors)} error(s) during execution "
+            f"({', '.join(sorted(set(errors)))}). The report was still written, but "
+            f"parts of it may be missing."
+        )
 
 
 def _run_notebook(file):
     shutil.copy(file, "tmp.report.ipynb")
-    subprocess.run(run_notebook_str(file="tmp.report.ipynb"), shell=True)
+    executed = "tmp.report.nbconvert.ipynb"
+    _run_nbconvert(run_notebook_cmd(file="tmp.report.ipynb", output=executed), step="executing the report notebook")
     os.remove("tmp.report.ipynb")
-    return "tmp.report.nbconvert.ipynb"
+    _log_notebook_cell_errors(executed)
+    return executed
 
 
 def _to_html(file, output) -> str:
-    subprocess.run(to_html_str(file=file, output=output), shell=True)
-    shutil.move(file.replace(".ipynb", ".html"), output)
+    # nbconvert writes relative to the notebook unless told otherwise, so give
+    # it the directory and basename separately and let it name the file.
+    out_dir = os.path.dirname(os.path.abspath(output))
+    out_base = os.path.basename(output)
+    _run_nbconvert(
+        to_html_cmd(file=file, output=os.path.join(out_dir, out_base)),
+        step="converting the report notebook to HTML",
+    )
     os.remove(file)
     return output
 
