@@ -1153,7 +1153,7 @@ def plot_gene_expression_pca(adata, key="cellbender_embedding", input_layer_key=
     s = plt.scatter(
         x=adata.obsm["X_pca"][:, 0][cells][sizeorder],
         y=adata.obsm["X_pca"][:, 1][cells][sizeorder],
-        c=np.log10(adata.obs["cell_size"].iloc[cells][sizeorder]),
+        c=np.log10(adata.obs["cell_size"].iloc[cells].values[sizeorder]),
         s=2,
         cmap="brg",
         alpha=0.5,

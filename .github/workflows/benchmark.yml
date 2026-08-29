@@ -24,6 +24,10 @@ on:
       memory_gb:
         description: "Memory in GB hint — used only when machine_type is cleared (leave blank to use machine_type)."
         required: false
+      boot_disk_gb:
+        description: "Boot disk size in GB (default: 100). Increase for large datasets with heavy temp spill."
+        required: false
+        default: "100"
 
 jobs:
   run-cellbender:
@@ -84,6 +88,7 @@ jobs:
             --run-id "${{ github.run_id }}-${{ github.run_attempt }}" \
             --machine-type "${{ inputs.machine_type }}" \
             --gpu-type "${{ inputs.gpu_type }}" \
+            --boot-disk-gb "${{ inputs.boot_disk_gb }}" \
             $EXTRA_HW_ARGS \
             --outputs-file benchmarking/outputs.json
 

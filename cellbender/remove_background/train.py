@@ -15,7 +15,7 @@ from pyro.util import ignore_jit_warnings
 
 import cellbender.remove_background.consts as consts
 from cellbender.monitor import get_hardware_usage
-from cellbender.remove_background.checkpoint import save_checkpoint
+from cellbender.remove_background.checkpoint import flush_pending_checkpoint, save_checkpoint, save_checkpoint_async
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.exceptions import ElboException, NanException
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
@@ -52,6 +52,8 @@ def train_epoch(svi: SVI, train_loader: DataLoader) -> float:
 
     # Train an epoch by going through each mini-batch.
     for x_cell_batch in train_loader:
+        # Move from prefetch (CPU pinned) to training device.
+        x_cell_batch = x_cell_batch.to(train_loader.device, non_blocking=True)
         # Perform gradient descent step and accumulate loss.
         epoch_loss += svi.step(x_cell_batch)
         normalizer_train += x_cell_batch.size(0)
@@ -91,6 +93,8 @@ def evaluate_epoch(svi: pyro.infer.SVI, test_loader: DataLoader) -> float:
 
     # Compute the loss over the entire tests set.
     for x_cell_batch in test_loader:
+        # Move from prefetch (CPU pinned) to training device.
+        x_cell_batch = x_cell_batch.to(test_loader.device, non_blocking=True)
         # Accumulate loss.
         test_loss += svi.evaluate_loss(x_cell_batch)
         normalizer_test += x_cell_batch.size(0)
@@ -225,7 +229,7 @@ def run_training(
             if (ckpt_tarball_name != "none") and (
                 ((checkpoint_freq > 0) and (epoch % epoch_checkpoint_freq == 0)) or (epoch == epochs)
             ):  # checkpoint at final epoch
-                save_checkpoint(
+                save_checkpoint_async(
                     filebase=output_filename,
                     tarball_name=ckpt_tarball_name,
                     args=args,
@@ -296,5 +300,8 @@ def run_training(
 
     # Free up all the GPU memory we can once training is complete.
     torch.cuda.empty_cache()
+
+    # Ensure the last async checkpoint write has landed before returning.
+    flush_pending_checkpoint()
 
     return train_elbo, model.loss["test"]["elbo"]

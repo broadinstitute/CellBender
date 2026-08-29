@@ -1,292 +1,553 @@
-"""Helper functions for preparing dataloaders, as well as
-a class to implement loading data from a sparse matrix in mini-batches.
+"""DataLoader construction for CellBender training.
 
-Intentionally uses global random state, and does not keep its own random number
-generator, in order to facilitate checkpointing.
+Replaces the previous hand-rolled background thread with a standard
+torch.utils.data.DataLoader backed by a CellEmptyBatchSampler that owns a
+torch.Generator for all shuffle and empty-drop randomness.
+
+Key properties:
+- Deterministic checkpoint/resume: save generator.get_state() + epoch permutation.
+- Pluggable storage: InMemoryBackend (default) or MmapBackend for out-of-RAM datasets.
+- Backward-compatible interface: the DataLoader wrapper exposes the same attributes
+  (device, batch_size, get_state, set_state, reset_ptr) used by train.py, run.py,
+  and checkpoint.py.
 """
+
+import logging
+from pathlib import Path
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-
-import cellbender.remove_background.consts as consts
-
 import torch
 import torch.utils.data
 
-import logging
-from typing import Tuple, List, Optional, Callable
+import cellbender.remove_background.consts as consts
+from cellbender.remove_background.data.backends import InMemoryBackend, MmapBackend, _SlicedBackend
+
+logger = logging.getLogger("cellbender")
 
 
-logger = logging.getLogger('cellbender')
+def _get_or_create_mmap(matrix: sp.csr_matrix, cache_dir: Path) -> MmapBackend:
+    """Return a MmapBackend for *matrix*, creating mmap files if absent."""
+    if MmapBackend.exists(cache_dir):
+        logger.info(f"Reusing mmap cache at {cache_dir}")
+        return MmapBackend(cache_dir)
+    logger.info(f"Writing mmap cache to {cache_dir} (one-time cost)...")
+    backend = MmapBackend.create(matrix, cache_dir)
+    logger.info("Mmap cache written.")
+    return backend
 
 
-class SparseDataset(torch.utils.data.Dataset):
-    """torch.utils.data.Dataset wrapping a scipy.sparse.csr.csr_matrix
+# ──────────────────────────────────────────────────────────────────────────────
+# Dataset
+# ──────────────────────────────────────────────────────────────────────────────
 
-    Each sample will be retrieved by indexing matrices along the leftmost
-    dimension.
 
-    Args:
-        *csrs (scipy.sparse.csr.csr_matrix): sparse matrices that have the same
-        size in the leftmost dimension.
+class _SCRNADataset(torch.utils.data.Dataset):
+    """PyTorch Dataset wrapping two matrix backends (cells and empties).
 
+    Indices 0..n_cells-1 address the cell backend; n_cells.. address the
+    empty-drop backend.  __getitem__ returns a dense float32 row tensor.
     """
-    # see https://pytorch.org/docs/stable/_modules/torch/utils/data/dataset.html
 
-    def __init__(self, *csrs):
-        assert all(csrs[0].shape[0] == csr.shape[0] for csr in csrs)
-        self.csrs = csrs
-
-    def __getitem__(self, index) -> Tuple:
-        return tuple(csr[index, ...] for csr in self.csrs)
+    def __init__(self, cell_backend, empty_backend=None) -> None:
+        self._cell = cell_backend
+        self._empty = empty_backend
+        self.n_cells: int = len(cell_backend)
+        self.n_empties: int = len(empty_backend) if empty_backend is not None else 0
 
     def __len__(self) -> int:
-        return self.csrs[0].shape[0]
+        return self.n_cells + self.n_empties
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        return (len(self), self._cell.shape[1])
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        if idx < self.n_cells:
+            row = self._cell[np.array([idx])]
+        else:
+            row = self._empty[np.array([idx - self.n_cells])]
+        return torch.from_numpy(np.asarray(row.todense(), dtype=np.float32).squeeze(0))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Batch sampler
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class CellEmptyBatchSampler(torch.utils.data.Sampler):
+    """Yields mixed batches of cell and empty-drop indices.
+
+    Cells are shuffled once per epoch using a owned torch.Generator.
+    Empty indices are sampled with replacement from that same generator each
+    batch.  All randomness is fully contained in the generator, so saving
+    generator.get_state() + the current epoch permutation + the batch pointer
+    is sufficient to resume training bit-identically from any checkpoint.
+
+    Indices emitted are into the combined _SCRNADataset space:
+        0 .. n_cells-1           → cells
+        n_cells .. n_cells+n_empties-1  → empties
+    """
+
+    def __init__(
+        self,
+        n_cells: int,
+        n_empties: int,
+        cell_batch_size: int,
+        n_empty_per_batch: int,
+        generator: torch.Generator,
+        shuffle: bool = True,
+        original_cell_indices: Optional[np.ndarray] = None,
+        original_empty_indices: Optional[np.ndarray] = None,
+    ) -> None:
+        self._n_cells = n_cells
+        self._n_empties = n_empties
+        self._cell_batch_size = cell_batch_size
+        self._n_empty_per_batch = n_empty_per_batch
+        self._gen = generator
+        self._shuffle = shuffle
+        self.original_cell_indices = original_cell_indices
+        self.original_empty_indices = original_empty_indices
+        # Mutable epoch state.
+        self._perm: Optional[np.ndarray] = None  # cell permutation for current epoch
+        self._ptr: int = 0  # batches already emitted this epoch
+
+    # ------------------------------------------------------------------
+    # Length (analytical — no iteration needed)
+    # ------------------------------------------------------------------
+
+    def __len__(self) -> int:
+        n = self._n_cells // self._cell_batch_size
+        if self._n_cells % self._cell_batch_size >= consts.SMALLEST_ALLOWED_BATCH:
+            n += 1
+        return n
+
+    # ------------------------------------------------------------------
+    # Iteration
+    # ------------------------------------------------------------------
+
+    def __iter__(self):
+        # Generate permutation if not already set (new epoch or first run).
+        if self._perm is None:
+            if self._shuffle:
+                self._perm = torch.randperm(self._n_cells, generator=self._gen).numpy()
+            else:
+                self._perm = np.arange(self._n_cells, dtype=np.int64)
+
+        # Start from ptr to allow mid-epoch resume.
+        i = self._ptr * self._cell_batch_size
+
+        while i < len(self._perm):
+            end = min(i + self._cell_batch_size, len(self._perm))
+            cell_chunk = self._perm[i:end]
+            if len(cell_chunk) < consts.SMALLEST_ALLOWED_BATCH:
+                logger.debug(f"Dropped last minibatch of {len(cell_chunk)} cells")
+                break
+
+            if self._n_empties > 0 and self._n_empty_per_batch > 0:
+                empty_local = torch.randint(self._n_empties, (self._n_empty_per_batch,), generator=self._gen).numpy()
+                batch = np.concatenate([cell_chunk, empty_local + self._n_cells]).tolist()
+            else:
+                batch = cell_chunk.tolist()
+
+            self._ptr += 1
+            yield batch
+            i += self._cell_batch_size
+
+        # End of epoch: reset for next epoch.
+        self._perm = None
+        self._ptr = 0
+
+    # ------------------------------------------------------------------
+    # Checkpoint state
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> Dict:
+        batch_size = self._cell_batch_size + self._n_empty_per_batch
+        fraction_empties = self._n_empty_per_batch / batch_size if batch_size > 0 else 0.0
+        state: Dict = {
+            "perm": self._perm if self._perm is not None else np.array([], dtype=np.int64),
+            "ptr": np.int64(self._ptr),
+            "batch_size": np.int64(batch_size),
+            "cell_batch_size": np.int64(self._cell_batch_size),
+            "n_empty_per_batch": np.int64(self._n_empty_per_batch),
+            "fraction_empties": np.float64(fraction_empties),
+            "shuffle": np.bool_(self._shuffle),
+            "gen_state": self._gen.get_state().numpy(),
+        }
+        if self.original_cell_indices is not None:
+            state["original_cell_indices"] = self.original_cell_indices
+        if self.original_empty_indices is not None:
+            state["original_empty_indices"] = self.original_empty_indices
+        return state
+
+    def set_state(self, state: Dict) -> None:
+        perm = state.get("perm", np.array([], dtype=np.int64))
+        self._perm = perm if len(perm) > 0 else None
+        self._ptr = int(state["ptr"])
+        if "gen_state" in state:
+            self._gen.set_state(torch.tensor(state["gen_state"]))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DataLoader wrapper
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 class DataLoader:
-    """Dataloader.
+    """Thin wrapper around torch.utils.data.DataLoader.
 
-    This dataloader loads a specified fraction of cell barcodes + unknowns, and
-    also mixes in a specified fraction of a random sampling of empty barcodes.
+    Preserves the interface expected by train.py, run.py, and checkpoint.py:
+    ``device``, ``batch_size``, ``get_state``/``set_state``, ``reset_ptr``.
 
+    Iteration is epoch-scoped: each for-loop over this object covers one
+    training epoch and raises StopIteration at epoch end.
     """
 
-    def __init__(self,
-                 dataset: sp.csr_matrix,
-                 empty_drop_dataset: Optional[sp.csr_matrix],
-                 batch_size: int = consts.DEFAULT_BATCH_SIZE,
-                 fraction_empties: float = consts.FRACTION_EMPTIES,
-                 shuffle: bool = True,
-                 sort_by: Optional[Callable[[sp.csr_matrix], np.ndarray]] = None,
-                 use_cuda: bool = True):
-        """
-        Args:
-            dataset: Droplet count matrix [cell, gene]
-            empty_drop_dataset: Surely empty droplets count matrix
-            batch_size: Number of droplets in minibatch
-            fraction_empties: Fraction of each minibatch that will consist of
-                surely empty droplets
-            shuffle: True to shuffle data. Incompatible with sort_by.
-            sort_by: Lambda function which, when applied to the sparse matrix,
-                will return values that can be sorted to give a sort order to
-                the dataset. Dataloader will load data in order of increasing
-                values. Object attributes sort_order and unsort_order will be
-                made available.
-            use_cuda: True to load data to GPU
-        """
-        if shuffle:
-            assert sort_by is None, 'Cannot sort_by and shuffle at the same time'
-        self.sort_fn = sort_by
-        self.dataset = dataset
-        if self.sort_fn is not None:
-            sort_values = self.sort_fn(self.dataset)
-            sort_order = np.argsort(sort_values)
-            self.ind_list = sort_order
-            self.sort_order = sort_order.copy()
-            self._unsort_dict = {i: val for i, val in enumerate(self.sort_order)}
-        else:
-            self.ind_list = np.arange(self.dataset.shape[0])
-            self.sort_order = self.ind_list.copy()
-            self._unsort_dict = {i: i for i in self.ind_list}
-        self.empty_drop_dataset = empty_drop_dataset
-        if self.empty_drop_dataset is None:
-            self.empty_ind_list = np.array([])
-        else:
-            self.empty_ind_list = np.arange(self.empty_drop_dataset.shape[0])
+    def __init__(
+        self,
+        torch_loader: torch.utils.data.DataLoader,
+        sampler: Optional[CellEmptyBatchSampler],
+        use_cuda: bool,
+        batch_size: int,
+        fraction_empties: float = 0.0,
+    ) -> None:
+        self._torch_loader = torch_loader
+        self._sampler = sampler
+        self.use_cuda = use_cuda
         self.batch_size = batch_size
         self.fraction_empties = fraction_empties
-        self.cell_batch_size = int(batch_size * (1. - fraction_empties))
-        self.shuffle = shuffle
-        self.device = 'cpu'
-        self.use_cuda = use_cuda
-        if self.use_cuda:
-            self.device = 'cuda'
-        self._length = None
-        self._reset()
-
-    @torch.no_grad()
-    def unsort_inds(self, bcs):
-        if self.sort_fn is None:
-            return bcs  # just for speed
-        else:
-            return torch.tensor([self._unsort_dict[bc.item()] for bc in bcs], device='cpu')
-
-    def _reset(self):
-        if self.shuffle:
-            np.random.shuffle(self.ind_list)  # Shuffle cell inds in place
-        self.ptr = 0
-
-    def get_state(self):
-        """Internal state of the data loader, used for checkpointing"""
-        return {'ind_list': self.ind_list, 'ptr': self.ptr}
-
-    def set_state(self, ind_list: np.ndarray, ptr: int):
-        self.ind_list = ind_list
-        self.ptr = ptr
-        assert self.ptr <= len(self.ind_list), \
-            f'Problem setting dataloader state: pointer ({ptr}) is outside the ' \
-            f'length of the ind_list ({len(ind_list)})'
-
-    def reset_ptr(self):
-        self.ptr = 0
+        self._device = "cuda" if use_cuda else "cpu"
+        self._inner_iter: Optional[Iterator[torch.Tensor]] = None
+        self._length: Optional[int] = None
 
     @property
-    def length(self):
-        if self._length is None:
-            self._length = self._get_length()
-        return self._length
+    def dataset(self) -> torch.utils.data.Dataset:
+        return self._torch_loader.dataset
 
-    def _get_length(self):
-        # avoid the potential for an off-by-one error by just going through it
-        i = 0
-        for _ in self:
-            i += 1
-        return i
+    @property
+    def cell_batch_size(self) -> int:
+        if self._sampler is not None:
+            return self._sampler._cell_batch_size
+        return self.batch_size
 
-    def __len__(self):
-        return self.length
+    @property
+    def device(self) -> str:
+        return self._device
+
+    # ------------------------------------------------------------------
+    # Iteration (epoch-scoped)
+    # ------------------------------------------------------------------
 
     def __iter__(self):
+        self._inner_iter = iter(self._torch_loader)
         return self
 
-    def __next__(self):
-        # Skip last batch if the size is < smallest allowed batch
-        remaining_cells = self.ind_list.size - self.ptr
-        if remaining_cells < consts.SMALLEST_ALLOWED_BATCH:
-            if remaining_cells > 0:
-                logger.debug(f'Dropped last minibatch of {remaining_cells} cells')
-            self._reset()
-            raise StopIteration()
+    def __next__(self) -> torch.Tensor:
+        if self._inner_iter is None:
+            self._inner_iter = iter(self._torch_loader)
+        try:
+            return next(self._inner_iter)
+        except StopIteration:
+            raise
 
-        else:
-
-            # Move the pointer by the number of cells in this minibatch.
-            next_ptr = min(self.ind_list.size, self.ptr + self.cell_batch_size)
-
-            # Decide on cell (+ transition region) indices.
-            cell_inds = self.ind_list[self.ptr:next_ptr]
-
-            # Decide on empty droplet indices. (Number changes at end of epoch.)
-            n_empties = int(cell_inds.size *
-                            (self.fraction_empties /
-                             (1 - self.fraction_empties)))
-            if self.empty_ind_list.size > 0:
-                # This does not happen for 'simple' model.
-                empty_inds = np.random.choice(self.empty_ind_list,
-                                              size=n_empties,
-                                              replace=True)
-
-                if empty_inds.size > 0:
-                    csr_list = [self.dataset[cell_inds, :],
-                                self.empty_drop_dataset[empty_inds, :]]
-                else:
-                    csr_list = [self.dataset[cell_inds, :]]
+    def __len__(self) -> int:
+        if self._length is None:
+            if self._sampler is not None:
+                self._length = len(self._sampler)
             else:
-                csr_list = [self.dataset[cell_inds, :]]
+                self._length = len(self._torch_loader)
+        return self._length
 
-            # Get a dense tensor from the sparse matrix.
-            dense_tensor = sparse_collate(csr_list)
+    # ------------------------------------------------------------------
+    # Compatibility methods
+    # ------------------------------------------------------------------
 
-            # Increment the pointer and return the minibatch.
-            self.ptr = next_ptr
-            return dense_tensor.to(device=self.device)
+    def reset_ptr(self) -> None:
+        """Reset to the start of the current epoch permutation without re-shuffling.
+
+        Called in the zero-epoch path after consuming one batch for model init.
+        Keeps the saved permutation so a subsequent checkpoint captures the same
+        epoch order.
+        """
+        self._inner_iter = None
+        if self._sampler is not None:
+            self._sampler._ptr = 0
+            # Intentionally keep _perm so the epoch order is preserved in the checkpoint.
+
+    def get_state(self) -> Dict:
+        state = self._sampler.get_state() if self._sampler is not None else {}
+        state["use_cuda"] = np.bool_(self.use_cuda)
+        if self._length is not None:
+            state["_length"] = np.int64(self._length)
+        return state
+
+    def set_state(self, state: Dict) -> None:
+        if self._sampler is not None:
+            self._sampler.set_state(state)
+        self._inner_iter = None
+        if "_length" in state:
+            self._length = int(state["_length"])
+
+    def close(self) -> None:
+        self._inner_iter = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
-def prep_sparse_data_for_training(dataset: sp.csr_matrix,
-                                  empty_drop_dataset: sp.csr_matrix,
-                                  training_fraction: float = consts.TRAINING_FRACTION,
-                                  fraction_empties: float = consts.FRACTION_EMPTIES,
-                                  batch_size: int = consts.DEFAULT_BATCH_SIZE,
-                                  shuffle: bool = True,
-                                  use_cuda: bool = True) -> Tuple[
-                                      "DataLoader",
-                                      "DataLoader"]:
-    """Create torch.utils.data.DataLoaders for train and tests set.
+# ──────────────────────────────────────────────────────────────────────────────
+# Factory functions
+# ──────────────────────────────────────────────────────────────────────────────
 
-    The dataset is not loaded into memory as a dense matrix upfront.  Instead
-    of using a torch.utils.data.TensorDataset, a SparseDataset is used, which
-    only transforms a sparse matrix to a dense one when a minibatch is loaded.
-    This is slower, but necessary for datasets which are too large to be
-    loaded into memory as a dense matrix all at once.
+
+def _make_loader(
+    cell_backend,
+    empty_backend,
+    cell_batch_size: int,
+    n_empty_per_batch: int,
+    generator: torch.Generator,
+    shuffle: bool,
+    use_cuda: bool,
+    original_cell_indices: Optional[np.ndarray] = None,
+    original_empty_indices: Optional[np.ndarray] = None,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Internal factory: given backends and parameters, build a DataLoader."""
+    dataset = _SCRNADataset(cell_backend, empty_backend)
+    sampler = CellEmptyBatchSampler(
+        n_cells=cell_backend.__len__(),
+        n_empties=empty_backend.__len__() if empty_backend is not None else 0,
+        cell_batch_size=cell_batch_size,
+        n_empty_per_batch=n_empty_per_batch,
+        generator=generator,
+        shuffle=shuffle,
+        original_cell_indices=original_cell_indices,
+        original_empty_indices=original_empty_indices,
+    )
+    torch_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=use_cuda,
+    )
+    total_batch_size = cell_batch_size + n_empty_per_batch
+    fraction_empties = n_empty_per_batch / total_batch_size if total_batch_size > 0 else 0.0
+    return DataLoader(
+        torch_loader=torch_loader,
+        sampler=sampler,
+        use_cuda=use_cuda,
+        batch_size=total_batch_size,
+        fraction_empties=fraction_empties,
+    )
+
+
+def prep_sparse_data_for_training(
+    dataset: sp.csr_matrix,
+    empty_drop_dataset: sp.csr_matrix,
+    training_fraction: float = consts.TRAINING_FRACTION,
+    fraction_empties: float = consts.FRACTION_EMPTIES,
+    batch_size: int = consts.DEFAULT_BATCH_SIZE,
+    shuffle: bool = True,
+    use_cuda: bool = True,
+    mmap_cache_dir: Optional[Path] = None,
+    num_workers: int = 0,
+) -> Tuple[DataLoader, DataLoader]:
+    """Create train and test DataLoaders from sparse count matrices.
 
     Args:
-        dataset: Matrix of gene counts, where rows are cell barcodes and
-            columns are genes.
-        empty_drop_dataset: Matrix of gene counts, where rows are surely-empty
-            droplet barcodes and columns are genes.
-        training_fraction: Fraction of data to use as the training set.  The
-            rest becomes the test set.
-        fraction_empties: Fraction of each minibatch to be composed of empty
-            droplets.
-        batch_size: Number of cell barcodes per mini-batch of data.
-        shuffle: Passed as an argument to torch.utils.data.DataLoader.  If
-            True, the data is reshuffled at every epoch.
-        use_cuda: If True, the data loader will load tensors on GPU.
+        dataset: Cell/droplet count matrix [barcodes × genes].
+        empty_drop_dataset: Surely-empty droplet count matrix.
+        training_fraction: Fraction of barcodes used for training.
+        fraction_empties: Fraction of each minibatch from empty droplets.
+        batch_size: Total minibatch size (cells + empties).
+        shuffle: Shuffle cell order each epoch.
+        use_cuda: Pin tensors for non-blocking GPU transfer.
+        mmap_cache_dir: If given, matrices are stored as memory-mapped files
+            under this directory (``cells/`` and ``empties/`` subdirs).  The
+            DataLoaders then access the data via mmap rather than keeping
+            submatrices in RAM.
 
     Returns:
-        train_loader: torch.utils.data.DataLoader object for training set.
-        test_loader: torch.utils.data.DataLoader object for tests set.
-
-    Examples:
-        train_loader, test_loader = prep_sparse_data_for_training(dataset,
-                                        training_fraction=0.9,
-                                        batch_size=128, shuffle=True)
-
+        (train_loader, test_loader)
     """
+    cell_batch_size = int(batch_size * (1.0 - fraction_empties))
+    n_empty_per_batch = batch_size - cell_batch_size
 
-    # Choose train and test indices from analysis dataset.
+    # Train/test split (uses global numpy RNG seeded by pyro.set_rng_seed).
     training_mask = np.random.rand(dataset.shape[0]) < training_fraction
-    training_indices = [idx for idx in range(dataset.shape[0])
-                        if training_mask[idx]]
-    test_indices = [idx for idx in range(dataset.shape[0])
-                    if not training_mask[idx]]
+    training_indices = np.where(training_mask)[0]
+    test_indices = np.where(~training_mask)[0]
 
-    # Choose train and test indices from empty drop dataset.
-    training_mask_empty = (np.random.rand(empty_drop_dataset.shape[0]) < training_fraction)
-    training_indices_empty = [idx for idx in range(empty_drop_dataset.shape[0])
-                              if training_mask_empty[idx]]
-    test_indices_empty = [idx for idx in range(empty_drop_dataset.shape[0])
-                          if not training_mask_empty[idx]]
+    training_mask_empty = np.random.rand(empty_drop_dataset.shape[0]) < training_fraction
+    training_indices_empty = np.where(training_mask_empty)[0]
+    test_indices_empty = np.where(~training_mask_empty)[0]
 
-    # Set up training dataloader.
-    train_dataset = dataset[training_indices, ...]
-    train_dataset_empty = empty_drop_dataset[training_indices_empty, ...]
-    train_loader = DataLoader(dataset=train_dataset,
-                              empty_drop_dataset=train_dataset_empty,
-                              batch_size=batch_size,
-                              fraction_empties=fraction_empties,
-                              shuffle=shuffle,
-                              use_cuda=use_cuda)
+    # Seed generators from the current torch state so they are deterministic.
+    train_gen = torch.Generator().manual_seed(torch.initial_seed())
+    test_gen = torch.Generator().manual_seed(torch.initial_seed() + 1)
 
-    # Set up test dataloader.
-    test_dataset = dataset[test_indices, ...]
-    test_dataset_empty = empty_drop_dataset[test_indices_empty, ...]
-    test_loader = DataLoader(dataset=test_dataset,
-                             empty_drop_dataset=test_dataset_empty,
-                             batch_size=batch_size,
-                             fraction_empties=fraction_empties,
-                             shuffle=shuffle,
-                             use_cuda=use_cuda)
+    if mmap_cache_dir is not None:
+        cell_mmap = _get_or_create_mmap(dataset, mmap_cache_dir / "cells")
+        empty_mmap = _get_or_create_mmap(empty_drop_dataset, mmap_cache_dir / "empties")
+        train_cell_backend: _SlicedBackend | InMemoryBackend = _SlicedBackend(cell_mmap, training_indices)
+        train_empty_backend: _SlicedBackend | InMemoryBackend = _SlicedBackend(empty_mmap, training_indices_empty)
+        test_cell_backend: _SlicedBackend | InMemoryBackend = _SlicedBackend(cell_mmap, test_indices)
+        test_empty_backend: _SlicedBackend | InMemoryBackend = _SlicedBackend(empty_mmap, test_indices_empty)
+    else:
+        train_cell_backend = InMemoryBackend(dataset[training_indices])
+        train_empty_backend = InMemoryBackend(empty_drop_dataset[training_indices_empty])
+        test_cell_backend = InMemoryBackend(dataset[test_indices])
+        test_empty_backend = InMemoryBackend(empty_drop_dataset[test_indices_empty])
 
+    train_loader = _make_loader(
+        cell_backend=train_cell_backend,
+        empty_backend=train_empty_backend,
+        cell_batch_size=cell_batch_size,
+        n_empty_per_batch=n_empty_per_batch,
+        generator=train_gen,
+        shuffle=shuffle,
+        use_cuda=use_cuda,
+        original_cell_indices=training_indices,
+        original_empty_indices=training_indices_empty,
+        num_workers=num_workers,
+    )
+    test_loader = _make_loader(
+        cell_backend=test_cell_backend,
+        empty_backend=test_empty_backend,
+        cell_batch_size=cell_batch_size,
+        n_empty_per_batch=n_empty_per_batch,
+        generator=test_gen,
+        shuffle=shuffle,
+        use_cuda=use_cuda,
+        original_cell_indices=test_indices,
+        original_empty_indices=test_indices_empty,
+        num_workers=num_workers,
+    )
     return train_loader, test_loader
 
 
-def sparse_collate(batch: List[Tuple[sp.csr_matrix]]) -> torch.Tensor:
-    """Load a minibatch of sparse data as a dense torch.Tensor in memory.
+def make_simple_dataloader(
+    matrix: sp.csr_matrix,
+    batch_size: int,
+    use_cuda: bool = True,
+    shuffle: bool = False,
+) -> DataLoader:
+    """Build a DataLoader for a single matrix (no empty-drop mixing).
 
-    Puts each data field into a tensor with leftmost dimension batch size.
-    'batch' is a python list of items from the dataset.
-    For a scipy.sparse.csr matrix, this is rows of the matrix, but in python
-    list form.
+    Used by SingleCellRNACountsDataset.get_dataloader() for inference passes.
+    All rows are emitted (no dropped tails).
 
+    Args:
+        matrix: Count matrix to load.
+        batch_size: Rows per batch.
+        use_cuda: Pin tensors for GPU transfer.
+        shuffle: Shuffle row order.
     """
-    # https://pytorch.org/docs/stable/_modules/torch/utils/data/dataloader.html
-    # default_collate()
+    backend = InMemoryBackend(matrix)
+    dataset = _SCRNADataset(cell_backend=backend)
 
-    # Stack the list of csr matrices.
-    mat = sp.vstack(batch, format='csr')
-    # Output a dense torch.Tensor wrapped in a tuple.
-    # This is fastest if converted in-place using torch.from_numpy().
-    a = np.array(mat.todense(), dtype=np.float32)
-    return torch.from_numpy(a)
+    torch_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=False,
+        num_workers=0,
+        pin_memory=use_cuda,
+    )
+
+    return DataLoader(
+        torch_loader=torch_loader,
+        sampler=None,
+        use_cuda=use_cuda,
+        batch_size=batch_size,
+    )
+
+
+def reconstruct_loader(
+    state: Dict,
+    count_matrix: sp.csr_matrix,
+    empty_matrix: sp.csr_matrix,
+    use_cuda: bool,
+    mmap_cache_dir: Optional[Path] = None,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Reconstruct a DataLoader from a checkpoint state dict.
+
+    Handles checkpoints written by both the new code (perm + gen_state) and
+    old checkpoints (ind_list, no gen_state) for backward compatibility.
+
+    Args:
+        state: Checkpoint state dict from ``DataLoader.get_state()``.
+        count_matrix: Full cell count matrix (used to build the backend).
+        empty_matrix: Full empty-drop count matrix.
+        use_cuda: Pin tensors for GPU transfer.
+        mmap_cache_dir: If given, load backends from existing mmap files
+            under this directory rather than materialising in-memory subsets.
+    """
+    cell_inds = state["original_cell_indices"]
+    empty_inds = state["original_empty_indices"]
+
+    cell_batch_size = int(state.get("cell_batch_size", state["batch_size"]))
+    n_empty_per_batch = int(state.get("n_empty_per_batch", 0))
+    shuffle = bool(state.get("shuffle", True))
+
+    # Reconstruct empty count if only old-style batch_size + fraction_empties are stored.
+    if "n_empty_per_batch" not in state and "fraction_empties" in state:
+        fe = float(state["fraction_empties"])
+        total_bs = int(state["batch_size"])
+        cell_batch_size = int(total_bs * (1.0 - fe))
+        n_empty_per_batch = total_bs - cell_batch_size
+
+    gen = torch.Generator()
+    # Default seed; will be overwritten by gen_state if present.
+    gen.manual_seed(consts.RANDOM_SEED)
+
+    if mmap_cache_dir is not None:
+        cell_mmap = _get_or_create_mmap(count_matrix, mmap_cache_dir / "cells")
+        empty_mmap = _get_or_create_mmap(empty_matrix, mmap_cache_dir / "empties")
+        cell_backend: _SlicedBackend | InMemoryBackend = _SlicedBackend(cell_mmap, cell_inds)
+        empty_backend: _SlicedBackend | InMemoryBackend | None = (
+            _SlicedBackend(empty_mmap, empty_inds) if empty_inds.size > 0 else None
+        )
+    else:
+        cell_backend = InMemoryBackend(count_matrix[cell_inds])
+        empty_backend = InMemoryBackend(empty_matrix[empty_inds]) if empty_inds.size > 0 else None
+
+    loader = _make_loader(
+        cell_backend=cell_backend,
+        empty_backend=empty_backend,
+        cell_batch_size=cell_batch_size,
+        n_empty_per_batch=n_empty_per_batch,
+        generator=gen,
+        shuffle=shuffle,
+        use_cuda=use_cuda,
+        original_cell_indices=cell_inds,
+        original_empty_indices=empty_inds,
+        num_workers=num_workers,
+    )
+
+    # Backward compat: old checkpoints store 'ind_list' instead of 'perm'.
+    restore_state = dict(state)
+    if "perm" not in restore_state and "ind_list" in restore_state:
+        restore_state["perm"] = restore_state["ind_list"]
+
+    loader.set_state(restore_state)
+    return loader
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Legacy utility (kept for callers outside the training path)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def sparse_collate(batch: List[sp.csr_matrix]) -> torch.Tensor:
+    """Stack a list of sparse CSR matrices into a dense float32 tensor."""
+    import scipy.sparse as _sp
+
+    mat = _sp.vstack(batch, format="csr")
+    return torch.from_numpy(np.asarray(mat.todense(), dtype=np.float32))

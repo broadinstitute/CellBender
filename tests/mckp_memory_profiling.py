@@ -2,14 +2,15 @@
 
 import argparse
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
-import scipy.sparse as sp
 
 from cellbender.remove_background import consts
 from cellbender.remove_background.checkpoint import load_from_checkpoint
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset
-from cellbender.remove_background.estimation import EstimationMethod, MultipleChoiceKnapsack
+from cellbender.remove_background.estimation import MultipleChoiceKnapsack
 from cellbender.remove_background.posterior import Posterior, compute_mean_target_removal_as_function
 from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero
 
@@ -18,7 +19,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser_ = argparse.ArgumentParser(
         description="Run memory profiling on output count matrix generation. "
         "NOTE that you have to decorate "
-        "MultipleChoiceKnapsack.estimate_noise() with memory_profiler's "
+        "MultipleChoiceKnapsack.estimate_noise_to_parquet() with memory_profiler's "
         "@profile() decorator manually.",
     )
     parser_.add_argument(
@@ -33,62 +34,16 @@ def get_parser() -> argparse.ArgumentParser:
     return parser_
 
 
-def compute_noise_counts(
-    posterior, fpr: float, estimator_constructor: "type[EstimationMethod]", **kwargs
-) -> sp.csr_matrix:
-    """Probably the most important method: computation of the clean output count matrix.
-
-    Args:
-        estimator_constructor: A noise count estimator class derived from
-            the EstimationMethod base class, and implementing the
-            .estimate_noise() method, which creates a point estimate of
-            noise. Pass in the constructor, not an object.
-        **kwargs: Keyword arguments for estimator_constructor().estimate_noise()
-
-    Returns:
-        denoised_counts: Denoised output CSC sparse matrix (CSC for saving)
-
-    """
-
-    # Only compute using defaults if the cache is empty.
-    if posterior._noise_count_regularized_posterior_coo is not None:
-        # Priority is taken by a regularized posterior, since presumably
-        # the user computed it for a reason.
-        posterior_coo = posterior._noise_count_regularized_posterior_coo
-    else:
-        # Use exact posterior if a regularized version is not computed.
-        posterior_coo = (
-            posterior._noise_count_posterior_coo
-            if (posterior._noise_count_posterior_coo is not None)
-            else posterior.cell_noise_count_posterior_coo()
-        )
-
-    # Instantiate Estimator object.
-    estimator = estimator_constructor(index_converter=posterior.index_converter)
-
-    # Compute point estimate of noise in cells.
-    noise_targets = get_noise_targets(posterior=posterior, fpr=fpr)
-    noise_csr = estimator.estimate_noise(
-        estimator=estimator,
-        noise_log_prob_coo=posterior_coo,
-        noise_offsets=posterior._noise_count_posterior_coo_offsets,
-        noise_targets_per_gene=noise_targets,
-        **kwargs,
-    )
-
-    return noise_csr
-
-
 def get_noise_targets(posterior, fpr=0.01):
     count_matrix = posterior.dataset_obj.data["matrix"]  # all barcodes
     cell_inds = posterior.dataset_obj.analyzed_barcode_inds[posterior.latents_map["p"] > consts.CELL_PROB_CUTOFF]
     non_cell_row_logic = np.array([i not in cell_inds for i in range(count_matrix.shape[0])])
     cell_counts = csr_set_rows_to_zero(csr=count_matrix, row_logic=non_cell_row_logic)
 
+    assert posterior.posterior_path is not None, "Posterior must be computed before target estimation."
     noise_target_fun_per_cell = compute_mean_target_removal_as_function(
-        noise_count_posterior_coo=posterior._noise_count_posterior_coo,
-        noise_offsets=posterior._noise_count_posterior_coo_offsets,
-        index_converter=posterior.index_converter,
+        noise_count_posterior_coo=posterior.posterior_path,
+        n_genes=posterior.n_genes,
         raw_count_csr_for_cells=cell_counts,
         n_cells=len(cell_inds),
         device="cpu",
@@ -139,6 +94,16 @@ if __name__ == "__main__":
     posterior.load(file=ckpt["posterior_file"])
 
     # run output count matrix generation
-    compute_noise_counts(posterior=posterior, fpr=0.01, estimator_constructor=MultipleChoiceKnapsack, approx_gb=0.1)
+    noise_targets = get_noise_targets(posterior=posterior, fpr=0.01)
+    assert isinstance(posterior.n_cells, int) and isinstance(posterior.n_genes, int)  # mypy
+    estimator = MultipleChoiceKnapsack(n_cells=posterior.n_cells, n_genes=posterior.n_genes)
+    with tempfile.NamedTemporaryFile(suffix="_noise.parquet", delete=False) as f:
+        output_path = Path(f.name)
+    assert posterior.posterior_path is not None
+    estimator.estimate_noise_to_parquet(
+        noise_log_prob_coo=posterior.posterior_path,
+        output_path=output_path,
+        noise_targets_per_gene=noise_targets,
+    )
 
     sys.exit(0)

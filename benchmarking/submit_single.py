@@ -21,6 +21,7 @@ from submit_benchmarks import (
     PROJECT,
     REGION,
     _build_preamble_lines,
+    _local_input_path,
     _machine_resources,
     make_job_id,
     submit_job,
@@ -35,14 +36,50 @@ def build_dev_job_script(
     sample: str,
     output_gcs_dir: str,
     extra_args: str,
+    checkpoint_gcs: str = "",
+    checkpoint_copy_interval: int = 300,
 ) -> str:
     lines = _build_preamble_lines(git_hash, input_gcs)
+    if checkpoint_gcs:
+        lines.append(f"gsutil cp {checkpoint_gcs} /tmp/checkpoint.tar.gz")
+
+    # CellBender writes the checkpoint to this path (matches --checkpoint arg when
+    # resuming, or the library default ckpt.tar.gz for a fresh run).
+    ckpt_local = "/tmp/checkpoint.tar.gz" if checkpoint_gcs else "/tmp/ckpt.tar.gz"
+
+    # _cleanup fires via EXIT trap on both success and failure (including CUDA OOM,
+    # which exits via a Python exception rather than SIGKILL). It kills the periodic
+    # sidecar and does one final checkpoint copy so the last-written tarball is
+    # always uploaded even when the main outputs copy never runs.
+    lines += [
+        'CKPT_SIDECAR_PID=""',
+        (
+            "_cleanup() {\n"
+            "    set +e\n"
+            f'    [[ -n "$CKPT_SIDECAR_PID" ]] && kill "$CKPT_SIDECAR_PID" 2>/dev/null\n'
+            f"    [[ -f {ckpt_local} ]] && gsutil cp {ckpt_local} {output_gcs_dir}/ 2>/dev/null\n"
+            "}"
+        ),
+        "trap _cleanup EXIT",
+        (
+            f"while true; do"
+            f" sleep {checkpoint_copy_interval};"
+            f" [[ -f {ckpt_local} ]] && gsutil cp {ckpt_local} {output_gcs_dir}/ 2>/dev/null || true;"
+            f" done &"
+        ),
+        "CKPT_SIDECAR_PID=$!",
+    ]
+
+    local_input = _local_input_path(input_gcs)
     cmd_parts = [
         "cellbender remove-background",
-        "    --input /tmp/input.h5",
+        f"    --input {local_input}",
         f"    --output /tmp/{sample}_out.h5",
         "    --cuda",
     ]
+    if checkpoint_gcs:
+        cmd_parts.append("    --checkpoint /tmp/checkpoint.tar.gz")
+        cmd_parts.append("    --force-use-checkpoint")
     if extra_args.strip():
         cmd_parts.append(f"    {extra_args.strip()}")
     lines.append(" \\\n".join(cmd_parts))
@@ -65,6 +102,11 @@ def main() -> None:
         help="Extra args appended verbatim to the cellbender command",
     )
     parser.add_argument(
+        "--checkpoint-file",
+        default="",
+        help="GCS path to a checkpoint tarball to resume from (optional)",
+    )
+    parser.add_argument(
         "--output-bucket",
         default=DEFAULT_OUTPUT_BUCKET,
         help=f"GCS output prefix (default: {DEFAULT_OUTPUT_BUCKET})",
@@ -83,6 +125,12 @@ def main() -> None:
     hw.add_argument("--gpu-type", default="nvidia-tesla-t4")
     hw.add_argument("--cpu-count", type=int, default=None)
     hw.add_argument("--memory-gb", type=int, default=None)
+    hw.add_argument(
+        "--boot-disk-gb",
+        type=int,
+        default=100,
+        help="Boot disk size in GB (default: 100). Increase for large datasets with heavy temp spill.",
+    )
 
     args = parser.parse_args()
 
@@ -114,9 +162,13 @@ def main() -> None:
         sample=sample,
         output_gcs_dir=output_gcs_dir,
         extra_args=args.extra_args,
+        checkpoint_gcs=args.checkpoint_file,
     )
 
-    hw_desc = f"machine={machine_type or 'auto'}, gpu={args.gpu_type}, cpu={cpu_count}, memory={memory_gb}GB"
+    hw_desc = (
+        f"machine={machine_type or 'auto'}, gpu={args.gpu_type}, cpu={cpu_count}, "
+        f"memory={memory_gb}GB, boot_disk={args.boot_disk_gb}GB"
+    )
     print(f"Hardware: {hw_desc}", flush=True)
 
     client = batch_v1.BatchServiceClient()
@@ -129,6 +181,7 @@ def main() -> None:
         gpu_type=args.gpu_type,
         cpu_count=cpu_count,
         memory_gb=memory_gb,
+        boot_disk_gib=args.boot_disk_gb,
     )
 
     print(f"\nJob submitted: {job.name}", flush=True)

@@ -4,7 +4,7 @@ import scipy.sparse as sp
 import torch
 from conftest import sparse_matrix_equal
 
-from cellbender.remove_background.data.dataprep import DataLoader
+from cellbender.remove_background.data.dataprep import make_simple_dataloader
 from cellbender.remove_background.sparse_utils import (
     csr_set_rows_to_zero,
     dense_to_sparse_op_torch,
@@ -48,13 +48,11 @@ def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
     """test infer.py BasePosterior.dense_to_sparse_op_torch()"""
 
     d = simulated_dataset
-    data_loader = DataLoader(
+    data_loader = make_simple_dataloader(
         d["matrix"],
-        empty_drop_dataset=None,
         batch_size=5,
-        fraction_empties=0.0,
-        shuffle=False,
         use_cuda=cuda,
+        shuffle=False,
     )
 
     barcodes = []
@@ -68,11 +66,8 @@ def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
         # Convert to sparse.
         bcs_i_chunk, genes_i, counts_i = dense_to_sparse_op_torch(dense_counts)
 
-        # Barcode index in the dataloader.
+        # Barcode index in the dataloader (rows are emitted in original order).
         bcs_i = bcs_i_chunk + ind
-
-        # Obtain the real barcode index after unsorting the dataloader.
-        bcs_i = data_loader.unsort_inds(bcs_i)
 
         # Add sparse matrix values to lists.
         barcodes.append(bcs_i.detach().cpu())
@@ -80,7 +75,7 @@ def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
         counts.append(counts_i.detach().cpu())
 
         # Increment barcode index counter.
-        ind += data.shape[0]  # Same as data_loader.batch_size
+        ind += data.shape[0]
 
     # Convert the lists to numpy arrays.
     counts = np.concatenate(counts).astype(np.uint32)
