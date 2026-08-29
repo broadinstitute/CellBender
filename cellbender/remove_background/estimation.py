@@ -704,7 +704,7 @@ class MultipleChoiceKnapsack(EstimationMethod):
 
 def chunked_iterator(
     coo: sp.coo_matrix, max_dense_batch_size_GB: float = 1.0
-) -> Generator[Tuple[sp.coo_matrix, np.ndarray, np.ndarray], None, None]:
+) -> Generator[Tuple[sp.coo_matrix, np.ndarray], None, None]:
     """Return an iterator which yields the full dataset in chunks.
 
     NOTE: Idea is to prevent memory overflow. The use case is for worst-case
@@ -717,10 +717,12 @@ def chunked_iterator(
         max_dense_batch_size_GB: Size of a batch on disk, in gigabytes.
 
     Returns:
-        A generator that yields compact CSR sparse matrices until the whole dataset
-        has been yielded. "Compact" in the sense that if they are made dense, there
-        will be no all-zero rows.
-            Tuple[chunk csr, actual row values in the full matrix]
+        A generator that yields chunks until the whole dataset has been yielded.
+        Rows are compacted, in the sense that a densified chunk has no all-zero
+        rows. Columns are not: a column index of a yielded chunk is still a noise
+        count, which is what every caller relies on when it takes an argmax, a
+        cumulative sum or a probability-weighted average over that axis.
+            Tuple[chunk coo, actual row values in the full matrix]
 
     """
     n_elements_in_batch = max_dense_batch_size_GB * 1e9 / 4  # torch float32 is 4 bytes
@@ -736,12 +738,16 @@ def chunked_iterator(
         logic = coo_row_series.isin(set(row_m_values))
         # Map these row values to a compact set of unique integers
         unique_row_values, rows = np.unique(coo.row[logic], return_inverse=True)
-        unique_col_values, cols = np.unique(coo.col[logic], return_inverse=True)
+        # Columns are deliberately left alone. Compacting them onto 0..K-1 would
+        # make a column index mean "position among occupied noise counts" rather
+        # than "noise count", which every caller reads it as. The batch size
+        # above is already computed from the full column count, so keeping the
+        # axis intact stays inside the memory budget rather than exceeding it.
         chunk_coo = sp.coo_matrix(
-            (coo.data[logic], (rows, cols)),
-            shape=(len(unique_row_values), len(unique_col_values)),
+            (coo.data[logic], (rows, coo.col[logic])),
+            shape=(len(unique_row_values), coo.shape[1]),
         )
-        yield (chunk_coo, unique_row_values, unique_col_values)
+        yield (chunk_coo, unique_row_values)
 
 
 def apply_function_dense_chunks(
@@ -775,7 +781,7 @@ def apply_function_dense_chunks(
     out = np.zeros(array_length)
     a = 0
 
-    for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
+    for coo, row in chunked_iterator(coo=noise_log_prob_coo):
         dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
         if torch.numel(dense_tensor) == 0:
             # github issue 207
