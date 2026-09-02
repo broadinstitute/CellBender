@@ -75,15 +75,30 @@ class CLI(AbstractCLI):
         assert args.training_fraction > 0, "training-fraction must be > 0"
         assert args.training_fraction <= 1.0, "training-fraction must be <= 1"
 
-        # If cuda is requested, make sure it is available.
+        # Resolve the compute backend. CUDA takes precedence over MPS.
+        args.device = "cpu"
         if args.use_cuda:
             assert torch.cuda.is_available(), "Trying to use CUDA, but CUDA is not available."
+            args.device = "cuda"
+        elif args.use_mps:
+            if not torch.backends.mps.is_built():
+                raise AssertionError("Trying to use MPS, but this PyTorch install was not built with MPS enabled.")
+            if not torch.backends.mps.is_available():
+                raise AssertionError("Trying to use MPS, but no MPS-enabled device is available on this machine.")
+            args.device = "mps"
         else:
-            # Warn the user in case the CUDA flag was forgotten by mistake.
+            # Warn the user in case the accelerator flag was forgotten by mistake.
             if torch.cuda.is_available():
                 sys.stdout.write(
                     "Warning: CUDA is available, but will not be "
                     "used.  Use the flag --cuda for "
+                    "significant speed-ups.\n\n"
+                )
+                sys.stdout.flush()  # Write immediately
+            elif torch.backends.mps.is_available():
+                sys.stdout.write(
+                    "Warning: an Apple silicon GPU is available, but will not "
+                    "be used.  Use the flag --mps for "
                     "significant speed-ups.\n\n"
                 )
                 sys.stdout.flush()  # Write immediately

@@ -27,7 +27,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
         batch_size=5,
         fraction_empties=0.0,
         shuffle=False,
-        use_cuda=cuda,
+        device="cuda" if cuda else "cpu",
     )
     sorted_data_loader = DataLoader(
         d["matrix"],
@@ -36,7 +36,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
         fraction_empties=0.0,
         shuffle=False,
         sort_by=lambda x: -1 * np.array(x.max(axis=1).todense()).squeeze(),
-        use_cuda=cuda,
+        device="cuda" if cuda else "cpu",
     )
 
     # try to shuffle and sort at the same time, and expect a failure
@@ -48,7 +48,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
             fraction_empties=0.0,
             shuffle=True,
             sort_by=lambda x: -1 * np.array(x.max(axis=1).todense()).squeeze(),
-            use_cuda=cuda,
+            device="cuda" if cuda else "cpu",
         )
 
     # this is copied from infer.BasePosterior._get_mean() which is not ideal

@@ -9,12 +9,11 @@ from typing import List, Tuple
 
 import numpy as np
 import pyro
-import torch
 from pyro.infer import SVI
 from pyro.util import ignore_jit_warnings
 
 import cellbender.remove_background.consts as consts
-from cellbender.monitor import get_hardware_usage
+from cellbender.monitor import empty_cache, get_hardware_usage
 from cellbender.remove_background.checkpoint import save_checkpoint
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.exceptions import ElboException, NanException
@@ -161,7 +160,7 @@ def run_training(
             if args.debug:
                 # Don't spend time pinging usage stats if we will not use the log.
                 # TODO: use multiprocessing to sample these stats DURING training...
-                logger.debug("\n" + get_hardware_usage(use_cuda=model.use_cuda))
+                logger.debug("\n" + get_hardware_usage(device=model.device))
 
             # Display duration of an epoch (use 2 to avoid initializations).
             if epoch == start_epoch + 1:
@@ -295,6 +294,6 @@ def run_training(
             )
 
     # Free up all the GPU memory we can once training is complete.
-    torch.cuda.empty_cache()
+    empty_cache(model.device)
 
     return train_elbo, model.loss["test"]["elbo"]

@@ -47,7 +47,7 @@ def test_one_cycle_scheduler(dropped_minibatch, cuda):
         training_fraction=1.0,
         fraction_empties=0.3,
         shuffle=True,
-        use_cuda=cuda,
+        device="cuda" if cuda else "cpu",
     )
 
     print(f"epochs = {epochs}")

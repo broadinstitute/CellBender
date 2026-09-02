@@ -54,7 +54,7 @@ def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
         batch_size=5,
         fraction_empties=0.0,
         shuffle=False,
-        use_cuda=cuda,
+        device="cuda" if cuda else "cpu",
     )
 
     barcodes = []

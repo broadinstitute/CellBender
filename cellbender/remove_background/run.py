@@ -102,7 +102,7 @@ def run_remove_background(args: argparse.Namespace) -> Posterior:
     logger.info("Running remove-background")
 
     # Run pytorch multithreaded if running on CPU: but this makes little difference in runtime.
-    if not args.use_cuda:
+    if args.device == "cpu":
         if args.n_threads is not None:
             n_jobs = args.n_threads
         else:
@@ -274,7 +274,7 @@ def compute_output_denoised_counts_reports_metrics(
             index_converter=posterior.index_converter,
             raw_count_csr_for_cells=cell_counts,
             n_cells=len(cell_inds),
-            device="cuda" if args.use_cuda else "cpu",  # TODO check this
+            device=args.device,  # TODO check this
             per_gene=True,
         )
 
@@ -296,7 +296,7 @@ def compute_output_denoised_counts_reports_metrics(
                 raw_count_matrix=posterior.dataset_obj.data["matrix"],
                 fpr=fpr,
                 per_gene=True if (args.posterior_regularization == "PRmu_gene") else False,
-                device="cuda",
+                device=posterior.device,
             )
         else:
             # Other posterior regularizations were already performed in
@@ -318,7 +318,7 @@ def compute_output_denoised_counts_reports_metrics(
             noise_targets_per_gene=noise_targets,
             q=args.cdf_threshold_q,
             alpha=args.prq_alpha,
-            device="cuda" if args.use_cuda else "cpu",
+            device=args.device,
             use_multiple_processes=args.use_multiprocessing_estimation,
         )
 
@@ -662,14 +662,14 @@ def run_inference(
     # Set random seed, updating global state of python, numpy, and torch RNGs.
     pyro.clear_param_store()
     pyro.set_rng_seed(consts.RANDOM_SEED)
-    if args.use_cuda:
+    if args.device == "cuda":
         torch.cuda.manual_seed_all(consts.RANDOM_SEED)
 
     # Attempt to load from a previously-saved checkpoint.
     ckpt = attempt_load_checkpoint(
         filebase=checkpoint_filename,
         tarball_name=args.input_checkpoint_tarball,
-        force_device="cuda:0" if args.use_cuda else "cpu",
+        force_device="cuda:0" if args.device == "cuda" else args.device,
         force_use_checkpoint=args.force_use_checkpoint,
     )
     ckpt_loaded = ckpt["loaded"]  # True if a checkpoint was loaded successfully
@@ -739,7 +739,7 @@ def run_inference(
             analyzed_gene_names=dataset_obj.data["gene_names"][dataset_obj.analyzed_gene_inds],
             empty_UMI_threshold=dataset_obj.empty_UMI_threshold,
             log_counts_crossover=dataset_obj.priors["log_counts_crossover"],
-            use_cuda=args.use_cuda,
+            device=args.device,
         )
 
         # Load the dataset into DataLoaders.
@@ -754,7 +754,7 @@ def run_inference(
             training_fraction=frac,
             fraction_empties=args.fraction_empties,
             shuffle=True,
-            use_cuda=args.use_cuda,
+            device=args.device,
         )
 
         # Set up optimizer (optionally wrapped in a learning rate scheduler).

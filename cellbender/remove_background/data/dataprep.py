@@ -59,7 +59,7 @@ class DataLoader:
                  fraction_empties: float = consts.FRACTION_EMPTIES,
                  shuffle: bool = True,
                  sort_by: Optional[Callable[[sp.csr_matrix], np.ndarray]] = None,
-                 use_cuda: bool = True):
+                 device: str = 'cpu'):
         """
         Args:
             dataset: Droplet count matrix [cell, gene]
@@ -73,7 +73,8 @@ class DataLoader:
                 the dataset. Dataloader will load data in order of increasing
                 values. Object attributes sort_order and unsort_order will be
                 made available.
-            use_cuda: True to load data to GPU
+            device: Backend on which to place the minibatches, one of
+                ['cpu', 'cuda', 'mps']
         """
         if shuffle:
             assert sort_by is None, 'Cannot sort_by and shuffle at the same time'
@@ -98,10 +99,7 @@ class DataLoader:
         self.fraction_empties = fraction_empties
         self.cell_batch_size = int(batch_size * (1. - fraction_empties))
         self.shuffle = shuffle
-        self.device = 'cpu'
-        self.use_cuda = use_cuda
-        if self.use_cuda:
-            self.device = 'cuda'
+        self.device = device
         self._length = None
         self._reset()
 
@@ -199,7 +197,7 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
                                   fraction_empties: float = consts.FRACTION_EMPTIES,
                                   batch_size: int = consts.DEFAULT_BATCH_SIZE,
                                   shuffle: bool = True,
-                                  use_cuda: bool = True) -> Tuple[
+                                  device: str = 'cpu') -> Tuple[
                                       "DataLoader",
                                       "DataLoader"]:
     """Create torch.utils.data.DataLoaders for train and tests set.
@@ -222,7 +220,8 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
         batch_size: Number of cell barcodes per mini-batch of data.
         shuffle: Passed as an argument to torch.utils.data.DataLoader.  If
             True, the data is reshuffled at every epoch.
-        use_cuda: If True, the data loader will load tensors on GPU.
+        device: Backend on which the data loader places tensors, one of
+            ['cpu', 'cuda', 'mps'].
 
     Returns:
         train_loader: torch.utils.data.DataLoader object for training set.
@@ -257,7 +256,7 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
                               batch_size=batch_size,
                               fraction_empties=fraction_empties,
                               shuffle=shuffle,
-                              use_cuda=use_cuda)
+                              device=device)
 
     # Set up test dataloader.
     test_dataset = dataset[test_indices, ...]
@@ -267,7 +266,7 @@ def prep_sparse_data_for_training(dataset: sp.csr_matrix,
                              batch_size=batch_size,
                              fraction_empties=fraction_empties,
                              shuffle=shuffle,
-                             use_cuda=use_cuda)
+                             device=device)
 
     return train_loader, test_loader
 

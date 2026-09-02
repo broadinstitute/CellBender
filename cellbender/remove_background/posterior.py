@@ -20,7 +20,7 @@ import scipy.sparse as sp
 import torch
 
 import cellbender.remove_background.consts as consts
-from cellbender.monitor import get_hardware_usage
+from cellbender.monitor import empty_cache, get_hardware_usage
 from cellbender.remove_background.checkpoint import load_checkpoint, load_from_checkpoint, make_tarball, unpack_tarball
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.data.dataset import get_dataset_obj
@@ -81,7 +81,7 @@ def load_or_compute_posterior_and_save(
                 posterior.regularize_posterior(
                     regularization=PRq,
                     alpha=args.prq_alpha,
-                    device="cuda",
+                    device=posterior.device,
                 )
             elif args.posterior_regularization == "PRmu":
                 assert dataset_obj.data is not None
@@ -90,7 +90,7 @@ def load_or_compute_posterior_and_save(
                     raw_count_matrix=dataset_obj.data["matrix"],
                     fpr=args.fpr[0],
                     per_gene=False,
-                    device="cuda",
+                    device=posterior.device,
                 )
             elif args.posterior_regularization == "PRmu_gene":
                 assert dataset_obj.data is not None
@@ -99,7 +99,7 @@ def load_or_compute_posterior_and_save(
                     raw_count_matrix=dataset_obj.data["matrix"],
                     fpr=args.fpr[0],
                     per_gene=True,
-                    device="cuda",
+                    device=posterior.device,
                 )
             else:
                 raise ValueError(
@@ -212,8 +212,14 @@ class Posterior:
             encoder["z"].eval()
             encoder["other"].eval()
             vi_model.decoder.eval()
-        self.use_cuda = torch.cuda.is_available() if vi_model is None else vi_model.use_cuda
-        self.device = "cuda" if self.use_cuda else "cpu"
+        if vi_model is not None:
+            self.device = vi_model.device
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
         self.analyzed_gene_inds = None if (dataset_obj is None) else dataset_obj.analyzed_gene_inds
         if dataset_obj is not None and dataset_obj.data is not None:
             self.count_matrix_shape: tuple | None = dataset_obj.data["matrix"].shape
@@ -455,7 +461,7 @@ class Posterior:
 
         assert self.dataset_obj is not None
         # Compute posterior in mini-batches.
-        torch.cuda.empty_cache()
+        empty_cache(self.device)
 
         # Dataloader for cells only.
         analyzed_bcs_only = True
@@ -485,7 +491,7 @@ class Posterior:
             batch_size=self.posterior_batch_size,
             fraction_empties=0.0,
             shuffle=False,
-            use_cuda=self.use_cuda,
+            device=self.device,
         )
 
         bcs = []  # barcode index
@@ -515,7 +521,7 @@ class Posterior:
 
             if self.debug:
                 logger.debug(f"Posterior minibatch starting with droplet {ind}")
-                logger.debug("\n" + get_hardware_usage(use_cuda=self.use_cuda))
+                logger.debug("\n" + get_hardware_usage(device=self.device))
 
             # Compute noise count probabilities.
             noise_log_pdf_NGC, noise_count_offset_NG = self.noise_log_pdf(
@@ -869,7 +875,7 @@ class Posterior:
             return None
 
         data_loader = self.dataset_obj.get_dataloader(
-            use_cuda=self.use_cuda, analyzed_bcs_only=True, batch_size=500, shuffle=False
+            device=self.device, analyzed_bcs_only=True, batch_size=500, shuffle=False
         )
 
         n_analyzed = data_loader.dataset.shape[0]

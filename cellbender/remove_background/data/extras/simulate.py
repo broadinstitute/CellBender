@@ -82,16 +82,8 @@ def generate_sample_inferred_model_dataset(
 
     # Find z values for cells.
     data_loader = ckpt['train_loader']
-    if torch.cuda.is_available():
-        data_loader.use_cuda = True
-        data_loader.device = 'cuda'
-        model.use_cuda = True
-        model.device = 'cuda'
-    else:
-        data_loader.use_cuda = False
-        data_loader.device = 'cpu'
-        model.use_cuda = False
-        model.device = 'cpu'
+    data_loader.device = DEVICE
+    model.device = DEVICE
     z = np.zeros((len(data_loader), model.encoder['z'].output_dim))
     p = np.zeros(len(data_loader))
     chi_ambient = pyro.param('chi_ambient').detach()

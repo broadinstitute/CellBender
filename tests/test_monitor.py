@@ -18,4 +18,4 @@ def test_get_hardware_usage(cuda):
     we left off.  Use our model and dataloader.
     """
 
-    print(get_hardware_usage(use_cuda=cuda))
+    print(get_hardware_usage(device="cuda" if cuda else "cpu"))

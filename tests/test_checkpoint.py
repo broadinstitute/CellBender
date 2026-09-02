@@ -186,10 +186,10 @@ class PyroModel(torch.nn.Module):
         self.encoder = EncodeZ(input_dim=dim, hidden_dims=[hidden_layer], output_dim=z_dim)
         self.decoder = Decoder(input_dim=z_dim, hidden_dims=[hidden_layer], output_dim=dim)
         self.z_dim = z_dim
-        self.use_cuda = torch.cuda.is_available()
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.normal = pyro.distributions.Normal
         self.loss = []
-        # self.to(device='cuda' if self.use_cuda else 'cpu')  # CUDA not tested
+        # self.to(device=self.device)  # accelerators not tested here
 
     def model(self, x: torch.FloatTensor):
         pyro.module("decoder", self.decoder, update_module_params=True)
@@ -392,7 +392,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     args.z_dim = 10
     args.z_hidden_dims = [50]
     args.model = "ambient"
-    args.use_cuda = cuda
+    args.device = "cuda" if cuda else "cpu"
     args.use_jit = False
     args.learning_rate = 1e-3
     args.training_fraction = 0.9
