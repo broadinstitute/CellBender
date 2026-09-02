@@ -11,7 +11,7 @@ import pyro
 import pyro.optim as optim
 import pytest
 import torch
-from conftest import USE_CUDA
+from conftest import DEVICE_PARAMS, USE_CUDA
 from torch.distributions import constraints
 
 import cellbender
@@ -34,19 +34,19 @@ from cellbender.remove_background.vae.encoder import EncodeZ
 
 
 class RandomState:
-    def __init__(self, use_cuda=False):
+    def __init__(self, device="cpu"):
         self.python = random.randint(0, 100000)
         self.numpy = np.random.randint(0, 100000, size=1).item()
         self.torch = torch.randint(low=0, high=100000, size=[1], device="cpu").item()
-        self.use_cuda = use_cuda
-        if self.use_cuda:
-            self.cuda = torch.randint(low=0, high=100000, size=[1], device="cuda").item()
+        self.device = device
+        if self.device != "cpu":
+            self.accelerator = torch.randint(low=0, high=100000, size=[1], device=self.device).item()
 
     def __repr__(self):
-        if self.use_cuda:
-            return f"python {self.python}; numpy {self.numpy}; torch {self.torch}; torch_cuda {self.cuda}"
-        else:
-            return f"python {self.python}; numpy {self.numpy}; torch {self.torch}"
+        base = f"python {self.python}; numpy {self.numpy}; torch {self.torch}"
+        if self.device != "cpu":
+            return f"{base}; torch_{self.device} {self.accelerator}"
+        return base
 
 
 def test_create_workflow_hashcode():
@@ -148,12 +148,8 @@ def test_that_randomstate_plus_perturb_gives_perturbedrandomstate(perturbed_rand
     assert str(prs0) == str(this_prs0)
 
 
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
-def test_save_and_load_random_state(tmpdir_factory, perturbed_random_state_dict, cuda):
+@pytest.mark.parametrize("device", DEVICE_PARAMS)
+def test_save_and_load_random_state(tmpdir_factory, perturbed_random_state_dict, device):
     """Test whether random states are being preserved correctly.
     perturbed_random_state_dict is important since it initializes the state."""
 
@@ -162,12 +158,12 @@ def test_save_and_load_random_state(tmpdir_factory, perturbed_random_state_dict,
     save_random_state(filebase=filebase)
 
     # see "what would have happened had we continued"
-    counterfactual = RandomState(use_cuda=cuda)
-    incorrect = RandomState(use_cuda=cuda)  # a second draw
+    counterfactual = RandomState(device=device)
+    incorrect = RandomState(device=device)  # a second draw
 
     # load the random states and check random number generators
     load_random_state(filebase=filebase)
-    actual = RandomState(use_cuda=cuda)
+    actual = RandomState(device=device)
 
     # check equality
     assert str(counterfactual) == str(actual)
@@ -350,13 +346,9 @@ def test_save_and_load_pyro_checkpoint(tmpdir_factory, batch_size_n):
             assert disagreement == 0, "Guide traces disagree with and without checkpoint restart"
 
 
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
+@pytest.mark.parametrize("device", DEVICE_PARAMS)
 @pytest.mark.parametrize("scheduler", [False, True], ids=lambda b: "OneCycleLR" if b else "Adam")
-def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
+def test_save_and_load_cellbender_checkpoint(tmpdir_factory, device, scheduler):
     """Check and see if restarting from a checkpoint picks up in the same place
     we left off.  Use our model and dataloader.
     """
@@ -392,7 +384,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler):
     args.z_dim = 10
     args.z_hidden_dims = [50]
     args.model = "ambient"
-    args.device = "cuda" if cuda else "cpu"
+    args.device = device
     args.use_jit = False
     args.learning_rate = 1e-3
     args.training_fraction = 0.9

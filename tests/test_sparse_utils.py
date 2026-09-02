@@ -1,8 +1,7 @@
 import numpy as np
 import pytest
 import scipy.sparse as sp
-import torch
-from conftest import sparse_matrix_equal
+from conftest import DEVICE_PARAMS, sparse_matrix_equal
 
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.sparse_utils import (
@@ -12,8 +11,6 @@ from cellbender.remove_background.sparse_utils import (
     overwrite_matrix_with_columns_from_another,
     todense_fill,
 )
-
-USE_CUDA = torch.cuda.is_available()
 
 
 @pytest.mark.parametrize("val", [0, 1, np.nan, np.inf, -np.inf])
@@ -39,12 +36,8 @@ def test_todense_fill(val):
     np.testing.assert_array_equal(brute_force, dense)
 
 
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
-def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
+@pytest.mark.parametrize("device", DEVICE_PARAMS)
+def test_dense_to_sparse_op_torch(simulated_dataset, device):
     """test infer.py BasePosterior.dense_to_sparse_op_torch()"""
 
     d = simulated_dataset
@@ -54,7 +47,7 @@ def test_dense_to_sparse_op_torch(simulated_dataset, cuda):
         batch_size=5,
         fraction_empties=0.0,
         shuffle=False,
-        device="cuda" if cuda else "cpu",
+        device=device,
     )
 
     barcodes = []

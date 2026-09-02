@@ -14,6 +14,13 @@ from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 USE_CUDA = torch.cuda.is_available()
 USE_MPS = torch.backends.mps.is_available()
 
+# Every device-dependent test runs on each backend that this machine has.
+DEVICE_PARAMS = [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA")),
+    pytest.param("mps", marks=pytest.mark.skipif(not USE_MPS, reason="requires MPS")),
+]
+
 
 def sparse_matrix_equal(mat1, mat2):
     """Fast assertion that sparse matrices are equal"""

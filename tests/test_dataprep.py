@@ -3,21 +3,14 @@
 import numpy as np
 import pytest
 import scipy.sparse as sp
-import torch
-from conftest import sparse_matrix_equal
+from conftest import DEVICE_PARAMS, sparse_matrix_equal
 
 from cellbender.remove_background.data.dataprep import DataLoader
 from cellbender.remove_background.sparse_utils import dense_to_sparse_op_torch
 
-USE_CUDA = torch.cuda.is_available()
 
-
-@pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
-)
-def test_dataloader_sorting(simulated_dataset, cuda):
+@pytest.mark.parametrize("device", DEVICE_PARAMS)
+def test_dataloader_sorting(simulated_dataset, device):
     """test dataset.py _overwrite_matrix_with_columns_from_another()"""
 
     d = simulated_dataset
@@ -27,7 +20,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
         batch_size=5,
         fraction_empties=0.0,
         shuffle=False,
-        device="cuda" if cuda else "cpu",
+        device=device,
     )
     sorted_data_loader = DataLoader(
         d["matrix"],
@@ -36,7 +29,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
         fraction_empties=0.0,
         shuffle=False,
         sort_by=lambda x: -1 * np.array(x.max(axis=1).todense()).squeeze(),
-        device="cuda" if cuda else "cpu",
+        device=device,
     )
 
     # try to shuffle and sort at the same time, and expect a failure
@@ -48,7 +41,7 @@ def test_dataloader_sorting(simulated_dataset, cuda):
             fraction_empties=0.0,
             shuffle=True,
             sort_by=lambda x: -1 * np.array(x.max(axis=1).todense()).squeeze(),
-            device="cuda" if cuda else "cpu",
+            device=device,
         )
 
     # this is copied from infer.BasePosterior._get_mean() which is not ideal
