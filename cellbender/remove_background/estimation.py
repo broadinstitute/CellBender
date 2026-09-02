@@ -17,7 +17,7 @@ import scipy.sparse as sp
 import torch
 from torch.distributions.categorical import Categorical
 
-from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense
+from cellbender.remove_background.sparse_utils import log_prob_sparse_to_dense, tensor_to_device
 
 logger = logging.getLogger("cellbender")
 
@@ -134,7 +134,7 @@ class Mean(EstimationMethod):
         # c = torch.arange(noise_log_prob_coo.shape[1], dtype=float).to(device).t()
 
         def _torch_mean(x):
-            c = torch.arange(x.shape[1], dtype=float).to(x.device)
+            c = torch.arange(x.shape[1], dtype=x.dtype).to(x.device)
             return torch.matmul(x.exp(), c.t())
 
         result = apply_function_dense_chunks(noise_log_prob_coo=noise_log_prob_coo, fun=_torch_mean, device=device)
@@ -776,7 +776,7 @@ def apply_function_dense_chunks(
     a = 0
 
     for coo, row, col in chunked_iterator(coo=noise_log_prob_coo):
-        dense_tensor = torch.tensor(log_prob_sparse_to_dense(coo)).to(device)
+        dense_tensor = tensor_to_device(log_prob_sparse_to_dense(coo), device)
         if torch.numel(dense_tensor) == 0:
             # github issue 207
             continue

@@ -12,6 +12,7 @@ from cellbender.remove_background.data.extras.simulate import generate_sample_di
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
 
 USE_CUDA = torch.cuda.is_available()
+USE_MPS = torch.backends.mps.is_available()
 
 
 def sparse_matrix_equal(mat1, mat2):

@@ -4,7 +4,7 @@ import os
 
 import numpy as np
 import pytest
-from conftest import USE_CUDA
+from conftest import USE_CUDA, USE_MPS
 
 from cellbender.base_cli import get_populated_argparser
 from cellbender.remove_background import consts
@@ -13,11 +13,14 @@ from cellbender.remove_background.downstream import anndata_from_h5
 
 
 @pytest.mark.parametrize(
-    "cuda",
-    [False, pytest.param(True, marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA"))],
-    ids=lambda b: "cuda" if b else "cpu",
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not USE_CUDA, reason="requires CUDA")),
+        pytest.param("mps", marks=pytest.mark.skipif(not USE_MPS, reason="requires MPS")),
+    ],
 )
-def test_full_run(tmpdir_factory, h5_v3_file, cuda):
+def test_full_run(tmpdir_factory, h5_v3_file, device):
     """Do a full run of the command line tool using a small simulated dataset"""
 
     tmp_dir = tmpdir_factory.mktemp("data")
@@ -36,8 +39,8 @@ def test_full_run(tmpdir_factory, h5_v3_file, cuda):
         "--epochs",
         "5",
     ]
-    if cuda:
-        input_args.append("--cuda")
+    if device != "cpu":
+        input_args.append(f"--{device}")
     args = get_populated_argparser().parse_args(input_args[1:])
     args = CLI.validate_args(args=args)
 

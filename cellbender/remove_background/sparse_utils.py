@@ -33,6 +33,19 @@ def dense_to_sparse_op_torch(
     return nonzero_inds_tuple + (nonzero_values,)
 
 
+def tensor_to_device(data, device: str) -> torch.Tensor:
+    """Put data on a device, downcasting float64 for backends that lack it.
+
+    The MPS backend has no float64, and the densify helpers below go through
+    numpy, which produces float64. Log probabilities are the only thing that
+    travels this path, and they are consumed in float32 on the GPU anyway.
+    """
+    tensor = torch.as_tensor(data)
+    if tensor.dtype == torch.float64 and device.startswith("mps"):
+        tensor = tensor.float()
+    return tensor.to(device)
+
+
 def log_prob_sparse_to_dense(coo: sp.coo_matrix) -> np.ndarray:
     """Densify a sparse log prob COO data structure. Same as coo_matrix.todense()
     except it fills missing entries with -np.inf instead of 0, since 0 is a

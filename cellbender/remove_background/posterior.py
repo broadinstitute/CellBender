@@ -36,6 +36,7 @@ from cellbender.remove_background.sparse_utils import (
     csr_set_rows_to_zero,
     dense_to_sparse_op_torch,
     log_prob_sparse_to_dense,
+    tensor_to_device,
 )
 
 logger = logging.getLogger("cellbender")
@@ -1122,9 +1123,9 @@ class PRq(PosteriorRegularization):
 
         for i in range(n_chunks):
             # B index here represents a batch: the re-defined m-index
-            log_pdf_noise_counts_BC = torch.tensor(
-                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)])
-            ).to(device)
+            log_pdf_noise_counts_BC = tensor_to_device(
+                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)]), device
+            )
             noise_count_BC = (
                 torch.arange(log_pdf_noise_counts_BC.shape[1])
                 .to(log_pdf_noise_counts_BC.device)
@@ -1216,7 +1217,7 @@ class PRq(PosteriorRegularization):
             noise_count_posterior_coo=noise_count_posterior_coo,
             alpha=alpha,
         )
-        log_target_M = torch.tensor(list(log_target_dict.values())).to(device)
+        log_target_M = tensor_to_device(list(log_target_dict.values()), device)
 
         reg_noise_count_posterior_coo = PRq._chunked_compute_regularized_posterior(
             noise_count_posterior_coo=noise_count_posterior_coo,
@@ -1290,7 +1291,7 @@ class PRmu(PosteriorRegularization):
             else:
                 noise_counts = map_noise_csr.sum()
 
-            return torch.tensor(noise_counts).to(device)
+            return tensor_to_device(noise_counts, device)
 
         # Perform binary search for beta.
         per_gene = False
@@ -1346,9 +1347,9 @@ class PRmu(PosteriorRegularization):
 
         for i in range(n_chunks):
             # B index here represents a batch: the re-defined m-index
-            log_pdf_noise_counts_BC = torch.tensor(
-                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)])
-            ).to(device)
+            log_pdf_noise_counts_BC = tensor_to_device(
+                log_prob_sparse_to_dense(densifiable_csr[(i * chunk_size) : ((i + 1) * chunk_size)]), device
+            )
             noise_count_BC = (
                 torch.arange(log_pdf_noise_counts_BC.shape[1])
                 .to(log_pdf_noise_counts_BC.device)
@@ -1651,7 +1652,7 @@ def compute_mean_target_removal_as_function(
             target = target + fpr * approx_signal_csr.sum()
 
         # Return target scaled to be per-cell.
-        return torch.tensor(target / n_cells).to(device)
+        return tensor_to_device(target / n_cells, device)
 
     return _target_fun
 
