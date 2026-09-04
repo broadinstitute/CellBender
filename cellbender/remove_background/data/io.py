@@ -237,6 +237,7 @@ POSTERIOR_SCHEMA = pa.schema(
         pa.field("gene_id", pa.int32()),
         pa.field("c", pa.int32()),
         pa.field("log_prob", pa.float32()),
+        pa.field("modality", pa.string()),
     ]
 )
 
@@ -265,15 +266,23 @@ def _make_duckdb_conn(
 
 
 def write_posterior_batch_to_parquet(
-    writer: pq.ParquetWriter, cell_ids: np.ndarray, gene_ids: np.ndarray, c_vals: np.ndarray, log_probs: np.ndarray
+    writer: pq.ParquetWriter,
+    cell_ids: np.ndarray,
+    gene_ids: np.ndarray,
+    c_vals: np.ndarray,
+    log_probs: np.ndarray,
+    modalities: Optional[np.ndarray] = None,
 ) -> None:
     """Stream one batch of posterior rows into an open ParquetWriter."""
+    if modalities is None:
+        modalities = np.full(len(cell_ids), "gene_expression", dtype=object)
     batch = pa.table(
         {
             "cell_id": pa.array(cell_ids.astype(np.int32), type=pa.int32()),
             "gene_id": pa.array(gene_ids.astype(np.int32), type=pa.int32()),
             "c": pa.array(c_vals.astype(np.int32), type=pa.int32()),
             "log_prob": pa.array(log_probs.astype(np.float32), type=pa.float32()),
+            "modality": pa.array(modalities, type=pa.string()),
         }
     )
     writer.write_table(batch)

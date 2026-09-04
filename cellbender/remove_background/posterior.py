@@ -37,7 +37,7 @@ from cellbender.remove_background.data.io import (
     write_posterior_latents_csv,
 )
 from cellbender.remove_background.estimation import estimate_mean_noise_per_gene
-from cellbender.remove_background.model import calculate_lambda, calculate_mu
+from cellbender.remove_background.modality import ModalityModule, calculate_lambda, calculate_mu
 from cellbender.remove_background.sparse_utils import (
     dense_to_sparse_op_torch,
 )
@@ -244,10 +244,16 @@ class Posterior:
             vi_model.eval()
             import cellbender.remove_background.vae.encoder as encoder_module
 
-            encoder = cast(encoder_module.CompositeEncoder, vi_model.encoder)
+            gex = vi_model._gene_expression
+            encoder = cast(encoder_module.CompositeEncoder, gex.encoder)
             encoder["z"].eval()
             encoder["other"].eval()
-            vi_model.decoder.eval()
+            gex.decoder.eval()
+            # Cache GEX local feature indices (within analyzed feature space) so they
+            # remain accessible after vi_model is released in _compute_and_stream_posterior.
+            self._gex_local_inds: Optional[np.ndarray] = gex.feature_indices_f.cpu().numpy().copy()
+        else:
+            self._gex_local_inds = None
         self.use_cuda = torch.cuda.is_available() if vi_model is None else vi_model.use_cuda
         self.device = "cuda" if self.use_cuda else "cpu"
         self.analyzed_gene_inds = None if (dataset_obj is None) else dataset_obj.analyzed_gene_inds
@@ -417,6 +423,16 @@ class Posterior:
         else:
             assert self.barcode_inds is not None
             barcode_inds = torch.tensor(self.barcode_inds.copy())
+
+        # Build a lookup: analyzed-feature local index → modality name string.
+        assert self.vi_model is not None
+        n_analyzed = len(self.analyzed_gene_inds)
+        modality_of_analyzed = np.empty(n_analyzed, dtype=object)
+        for mod_name, mod in self.vi_model.modalities.items():
+            assert isinstance(mod, ModalityModule)
+            local_inds = mod.feature_indices_f.cpu().numpy()
+            modality_of_analyzed[local_inds] = mod_name
+
         logger.info(f"Computing posterior noise count probabilities in {n_minibatches} chunk(s).")
 
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,6 +477,9 @@ class Posterior:
                 offset_i = noise_count_offset_NG[bcs_i_chunk, genes_i_analyzed].detach().cpu()
                 c_i_absolute = (c_i.detach().cpu() + offset_i).numpy().astype(np.int32)
 
+                # Resolve modality label for each sparse entry.
+                modality_i = modality_of_analyzed[genes_i_analyzed.cpu().numpy()].astype(str)
+
                 # Stream this batch to parquet with absolute c values.
                 write_posterior_batch_to_parquet(
                     writer=writer,
@@ -468,6 +487,7 @@ class Posterior:
                     gene_ids=genes_i.numpy().astype(np.int32),
                     c_vals=c_i_absolute,
                     log_probs=log_prob_i.detach().cpu().numpy().astype(np.float32),
+                    modalities=modality_i,
                 )
 
                 ind += data.shape[0]
@@ -527,16 +547,12 @@ class Posterior:
 
         """
 
-        # Sample all the latent variables in the model and get mu, lambda, alpha.
-        mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
-
-        # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
-        log_prob_noise_counts_NGC, poisson_values_low_NG = self._log_prob_noise_count_tensor(
+        # Sample one draw of all latent variables and get noise log PDF.
+        log_prob_noise_counts_NGC, poisson_values_low_NG = self.noise_log_pdf(
             data=data,
-            mu_est=mu_sample + 1e-30,
-            lambda_est=lambda_sample * lambda_multiplier + 1e-30,
-            alpha_est=alpha_sample + 1e-30,
-            debug=self.debug,
+            n_samples=1,
+            lambda_multiplier=lambda_multiplier,
+            y_map=y_map,
         )
 
         # Use those probabilities to draw a sample of c_{ng}^{noise}
@@ -611,91 +627,89 @@ class Posterior:
 
         """
 
+        assert self.vi_model is not None
+        n_batch, n_features = data.shape
+
         noise_log_pdf_NGC = None
         noise_count_offset_NG = None
 
         for s in range(1, n_samples + 1):
-            # Sample all the latent variables in the model and get mu, lambda, alpha.
-            mu_sample, lambda_sample, alpha_sample = self.sample_mu_lambda_alpha(data, y_map=y_map)
+            # Sample all latent variables; get per-modality mu/lam/alpha.
+            modality_samples = self.sample_mu_lambda_alpha(data, y_map=y_map)
 
-            # Compute the big tensor of log probabilities of possible c_{ng}^{noise} values.
-            log_prob_noise_counts_NGC, noise_count_offset_NG = self._log_prob_noise_count_tensor(
-                data=data,
-                mu_est=mu_sample + 1e-30,
-                lambda_est=lambda_sample * lambda_multiplier + 1e-30,
-                alpha_est=alpha_sample + 1e-30,
-                n_counts_max=n_counts_max,
-                debug=self.debug,
+            # Accumulate per-modality log_prob tensors, then assemble into
+            # a single (n_batch, n_features, n_counts_max) tensor.
+            log_prob_noise_counts_NGC = torch.full(
+                (n_batch, n_features, n_counts_max),
+                float("-inf"),
+                device=data.device,
             )
+            noise_count_offset_NG_sample = torch.zeros(n_batch, n_features, device=data.device, dtype=torch.float32)
 
-            # Normalize the PDFs (not necessarily normalized over the count range).
+            for mod_name, tensors in modality_samples.items():
+                mod = cast(ModalityModule, self.vi_model.modalities[mod_name])
+                local_inds = mod.feature_indices_f  # LOCAL indices into the analyzed feature space
+                mod_data = data[:, local_inds]
+                lp, offset = self._log_prob_noise_count_tensor(
+                    data=mod_data,
+                    mu_est=tensors["mu"] + 1e-30,
+                    lambda_est=tensors["lam"] * lambda_multiplier + 1e-30,
+                    alpha_est=tensors["alpha"] + 1e-30,
+                    n_counts_max=n_counts_max,
+                    debug=self.debug,
+                )
+                # lp has shape (n_batch, n_mod_features, n_mod) where n_mod <= n_counts_max
+                n_mod = lp.shape[-1]
+                log_prob_noise_counts_NGC[:, local_inds, :n_mod] = lp
+                noise_count_offset_NG_sample[:, local_inds] = offset
+
+            # Normalize per (droplet, feature).
             log_prob_noise_counts_NGC = log_prob_noise_counts_NGC - torch.logsumexp(
                 log_prob_noise_counts_NGC, dim=-1, keepdim=True
             )
 
-            # Add the probability from this sample to our running total.
-            # Update rule is
-            # log_prob_total_n = LAE [ log(1 - 1/n) + log_prob_total_{n-1}, log(1/n) + log_prob_sample ]
+            # Running log-average over samples.
+            # Update: log_total = LAE[log(1-1/s) + log_total_{s-1}, log(1/s) + log_sample]
             if s == 1:
                 noise_log_pdf_NGC = log_prob_noise_counts_NGC
             else:
-                # This is a (normalized) running sum over samples in log-probability space.
                 assert noise_log_pdf_NGC is not None
                 noise_log_pdf_NGC = torch.logaddexp(
                     noise_log_pdf_NGC + torch.log(torch.tensor(1.0 - 1.0 / s).to(device=data.device)),
                     log_prob_noise_counts_NGC + torch.log(torch.tensor(1.0 / s).to(device=data.device)),
                 )
 
+            # Use the last sample's offset (consistent with previous single-modality behaviour).
+            noise_count_offset_NG = noise_count_offset_NG_sample
+
         assert noise_log_pdf_NGC is not None
         assert noise_count_offset_NG is not None
         return noise_log_pdf_NGC, noise_count_offset_NG
 
     @torch.no_grad()
-    def sample_mu_lambda_alpha(
-        self, data: torch.Tensor, y_map: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Calculate a single sample estimate of mu, the mean of the true count
-        matrix, and lambda, the rate parameter of the Poisson background counts.
+    def sample_mu_lambda_alpha(self, data: torch.Tensor, y_map: bool) -> Dict[str, Dict[str, torch.Tensor]]:
+        """Sample mu, lambda, and alpha from the variational posterior for all modalities.
 
         Args:
-            data: Dense tensor minibatch of cell by gene count data.
-            y_map: True to enforce the use of a MAP estimate of y rather than
-                sampling y. This prevents some samples from having a cell and
-                some not, which can lead to strange summary statistics over
-                many samples.
+            data: Dense tensor minibatch of cell by feature count data.
+            y_map: True to enforce a MAP estimate of y (cell/empty) rather than
+                sampling, so samples are consistently cell or consistently empty.
 
         Returns:
-            mu_sample: Dense tensor sample of Negative Binomial mean for true
-                counts.
-            lambda_sample: Dense tensor sample of Poisson rate params for noise
-                counts.
-            alpha_sample: Dense tensor sample of Dirichlet concentration params
-                that inform the overdispersion of the Negative Binomial.
-
+            Dict mapping modality name → {"mu": tensor, "lam": tensor, "alpha": tensor},
+            each of shape (n_batch, n_features_in_modality).
         """
 
-        # logger.debug("Replaying model with guide to sample mu, alpha, lambda")
-
         assert self.vi_model is not None
-        # Use pyro poutine to trace the guide and sample parameter values.
-        guide_trace = pyro.poutine.trace(self.vi_model.guide).get_trace(x=data)
+        guide_trace = pyro.poutine.trace(self.vi_model.guide).get_trace(data)
 
-        # If using MAP for y (so that you never get samples of cell and no cell),
-        # then intervene and replace a sampled y with the MAP
         if y_map:
-            guide_trace.nodes["y"]["value"] = (guide_trace.nodes["p_passback"]["value"] > 0).clone().detach()
+            guide_trace.nodes["y_n"]["value"] = (guide_trace.nodes["p_passback"]["value"] > 0).clone().detach()
 
         replayed_model = pyro.poutine.replay(self.vi_model.model, guide_trace)
+        replayed_model_output = replayed_model(data)
 
-        # Run the model using these sampled values.
-        replayed_model_output = replayed_model(x=data)
-
-        # The model returns mu, alpha, and lambda.
-        mu_sample = replayed_model_output["mu"]
-        lambda_sample = replayed_model_output["lam"]
-        alpha_sample = replayed_model_output["alpha"]
-
-        return mu_sample, lambda_sample, alpha_sample
+        return replayed_model_output["modalities"]
 
     @staticmethod
     @torch.no_grad()
@@ -790,28 +804,28 @@ class Posterior:
 
         n_analyzed = data_loader.dataset.shape[0]
 
-        z = np.zeros((n_analyzed, self.vi_model.encoder["z"].output_dim))
+        gex = self.vi_model._gene_expression
+        z = np.zeros((n_analyzed, gex.encoder["z"].output_dim))
         d = np.zeros(n_analyzed)
         p = np.zeros(n_analyzed)
         epsilon = np.zeros(n_analyzed)
 
-        phi_loc = pyro.param("phi_loc")
-        phi_scale = pyro.param("phi_scale")
-        if "chi_ambient" in pyro.get_param_store().keys():
-            chi_ambient = pyro.param("chi_ambient").detach()
-        else:
-            chi_ambient = None
+        phi_loc = pyro.param("phi_loc_gene_expression")
+        phi_scale = pyro.param("phi_scale_gene_expression")
 
         start = 0
         for i, data in enumerate(data_loader):
             data = data.to(data_loader.device, non_blocking=True)
             end = start + data.shape[0]
 
-            enc = self.vi_model.encoder(x=data, chi_ambient=chi_ambient, cell_prior_log=self.vi_model.d_cell_loc_prior)
+            enc = gex.run_encoder(data[:, gex.feature_indices_f])
             z[start:end, :] = enc["z"]["loc"].detach().cpu().numpy()
 
             d[start:end] = (
-                dist.LogNormal(loc=enc["d_loc"], scale=pyro.param("d_cell_scale")).mean.detach().cpu().numpy()
+                dist.LogNormal(loc=enc["d_loc"], scale=pyro.param("d_cell_scale_gene_expression"))
+                .mean.detach()
+                .cpu()
+                .numpy()
             )
 
             p[start:end] = enc["p_y"].sigmoid().detach().cpu().numpy()
@@ -822,6 +836,7 @@ class Posterior:
                 .cpu()
                 .numpy()
             )
+            gex._enc_cache = None
 
             start = end
 
@@ -853,20 +868,23 @@ class Posterior:
         logger.debug("Computing MAP esitmate of mu, lambda, alpha")
 
         assert self.vi_model is not None
-        # Encode latents.
-        enc = self.vi_model.encoder(x=data, chi_ambient=chi_ambient, cell_prior_log=self.vi_model.d_cell_loc_prior)
+        gex = self.vi_model._gene_expression
+        enc = gex.run_encoder(data)
         z_map = enc["z"]["loc"]
 
-        chi_map = self.vi_model.decoder(z_map)
-        phi_loc = pyro.param("phi_loc")
-        phi_scale = pyro.param("phi_scale")
+        chi_map = gex.decoder(z_map)
+        phi_loc = pyro.param("phi_loc_gene_expression")
+        phi_scale = pyro.param("phi_scale_gene_expression")
         phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
         phi_rate = phi_loc / phi_scale.pow(2)
         alpha_map = 1.0 / dist.Gamma(phi_conc, phi_rate).mean
 
         y = (enc["p_y"] > 0).float()
-        d_empty = dist.LogNormal(loc=pyro.param("d_empty_loc"), scale=pyro.param("d_empty_scale")).mean
-        d_cell = dist.LogNormal(loc=enc["d_loc"], scale=pyro.param("d_cell_scale")).mean
+        d_empty = dist.LogNormal(
+            loc=pyro.param("d_empty_loc_gene_expression"),
+            scale=pyro.param("d_empty_scale_gene_expression"),
+        ).mean
+        d_cell = dist.LogNormal(loc=enc["d_loc"], scale=pyro.param("d_cell_scale_gene_expression")).mean
         epsilon = dist.Gamma(enc["epsilon"] * self.vi_model.epsilon_prior, self.vi_model.epsilon_prior).mean
 
         if self.vi_model.include_rho:
@@ -874,25 +892,26 @@ class Posterior:
         else:
             rho = None
 
+        include_rho = self.vi_model.model_type in ("full", "swapping")
+
         # Calculate MAP estimates of mu and lambda.
         mu_map = calculate_mu(
-            model_type=self.vi_model.model_type,
-            epsilon=epsilon,
-            d_cell=d_cell,
-            chi=chi_map,
-            y=y,
-            rho=rho,
+            epsilon_n=epsilon,
+            d_cell_n=d_cell,
+            chi_nf=chi_map,
+            y_n=y,
+            rho_n=rho if include_rho else None,
         )
         lambda_map = calculate_lambda(
-            model_type=self.vi_model.model_type,
-            epsilon=epsilon,
-            chi_ambient=chi_ambient,
-            d_empty=d_empty,
-            y=y,
-            d_cell=d_cell,
-            rho=rho,
-            chi_bar=self.vi_model.avg_gene_expression,
+            epsilon_n=epsilon,
+            chi_ambient_f=chi_ambient,
+            d_empty_n=d_empty,
+            y_n=y,
+            d_cell_n=d_cell,
+            rho_n=rho if include_rho else None,
+            chi_bar_f=gex.chi_bar_f if include_rho else None,
         )
+        gex._enc_cache = None
 
         return {"mu": mu_map, "lam": lambda_map, "alpha": alpha_map}
 

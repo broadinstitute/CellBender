@@ -466,7 +466,7 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler, ex
         output_checkpoint_tarball="none",
         total_epochs_for_testing_only=epochs + epochs2,
     )
-    weights_oneshot = _get_params(model_oneshot.encoder["z"])
+    weights_oneshot = _get_params(model_oneshot._gene_expression.encoder["z"])
 
     # --- CHECKPOINT PATH, ROUND 1 ---
     # Train the first `epochs` epochs.  Identical to one-shot up to epoch
@@ -506,13 +506,13 @@ def test_save_and_load_cellbender_checkpoint(tmpdir_factory, cuda, scheduler, ex
         output_checkpoint_tarball="none",
         total_epochs_for_testing_only=epochs + epochs2,
     )
-    weights_resumed = _get_params(model_resumed.encoder["z"])
+    weights_resumed = _get_params(model_resumed._gene_expression.encoder["z"])
 
     # Clean up all checkpoint files now that both runs are done.
     shutil.rmtree(str(filedir))
 
     # Training must change the weights relative to initial (one-shot as proxy).
-    w1 = _get_params(model_r1.encoder["z"])  # weights after round-1 training
+    w1 = _get_params(model_r1._gene_expression.encoder["z"])  # weights after round-1 training
     assert (weights_oneshot[0] != w1[0]).sum().item() > 0, (
         "Training is not changing the weight matrix in test_save_and_load_cellbender_checkpoint"
     )

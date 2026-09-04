@@ -17,6 +17,7 @@ import psutil
 import pyro
 import scipy.sparse as sp
 import torch
+import torch.nn as nn
 from pyro.infer import SVI, JitTrace_ELBO, JitTraceEnum_ELBO, Trace_ELBO, TraceEnum_ELBO
 from pyro.optim import ClippedAdam
 
@@ -33,6 +34,13 @@ from cellbender.remove_background.data.dataprep import prep_sparse_data_for_trai
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
 from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
+from cellbender.remove_background.modality import (
+    ATACModality,
+    GeneExpressionModality,
+    ModalityModule,
+    ModalityPriors,
+    ProteinModality,
+)
 from cellbender.remove_background.model import RemoveBackgroundPyroModel
 from cellbender.remove_background.posterior import (
     Posterior,
@@ -277,11 +285,16 @@ def compute_output_denoised_counts_and_metrics(
     dataset_obj = posterior.dataset_obj
 
     # --- Extract Pyro params once, then clear the store ---
-    ambient_expression_trimmed = pyro.param("chi_ambient").detach().cpu().numpy()
+    ambient_expression_trimmed = pyro.param("chi_ambient_gene_expression").detach().cpu().numpy()
     assert dataset_obj.data is not None  # mypy
     total_genes_all = dataset_obj.data["matrix"].shape[1]
     ambient_expression = np.zeros(total_genes_all)
-    ambient_expression[dataset_obj.analyzed_gene_inds] = ambient_expression_trimmed
+    # chi_ambient_gene_expression covers GEX features only; map through GEX local indices.
+    gex_local_inds = posterior._gex_local_inds
+    gex_raw_inds = (
+        dataset_obj.analyzed_gene_inds[gex_local_inds] if gex_local_inds is not None else dataset_obj.analyzed_gene_inds
+    )
+    ambient_expression[gex_raw_inds] = ambient_expression_trimmed
     del ambient_expression_trimmed
 
     rho = None
@@ -295,9 +308,9 @@ def compute_output_denoised_counts_and_metrics(
 
     global_latents: Dict[str, Any] = {
         "ambient_expression": ambient_expression,
-        "empty_droplet_size_lognormal_loc": np.array(pyro.param("d_empty_loc").item()),
-        "empty_droplet_size_lognormal_scale": np.array(pyro.param("d_empty_scale").item()),
-        "cell_size_lognormal_std": np.array(pyro.param("d_cell_scale").item()),
+        "empty_droplet_size_lognormal_loc": np.array(pyro.param("d_empty_loc_gene_expression").item()),
+        "empty_droplet_size_lognormal_scale": np.array(pyro.param("d_empty_scale_gene_expression").item()),
+        "cell_size_lognormal_std": np.array(pyro.param("d_cell_scale_gene_expression").item()),
         "swapping_fraction_dist_params": rho,
     }
     pyro.clear_param_store()
@@ -746,8 +759,31 @@ def _build_model(
     """Construct a fresh RemoveBackgroundPyroModel from dataset priors and args.
     Used by both fresh-start and checkpoint-restart branches of run_inference."""
     assert dataset_obj.data is not None
+    priors = dataset_obj.priors
+    chi_ambient_all: torch.Tensor = priors["chi_ambient"]
+
+    # Determine which features belong to each modality.
+    analyzed_feature_types = dataset_obj.analyzed_feature_types
+    modality_feature_indices: Dict[str, torch.Tensor] = {}
+    for ft in np.unique(analyzed_feature_types):
+        idx = np.where(analyzed_feature_types == ft)[0]
+        modality_feature_indices[ft] = torch.tensor(idx, dtype=torch.long)
+
+    gex_indices = modality_feature_indices.get(
+        consts.GEX_FEATURE_TYPE,
+        torch.arange(count_matrix.shape[1], dtype=torch.long),
+    )
+    n_gex = int(gex_indices.shape[0])
+    gex_mod_priors = priors["modalities"][consts.GEX_FEATURE_TYPE]
+
+    def _slice_chi(indices: torch.Tensor, n_features: int) -> torch.Tensor:
+        chi = chi_ambient_all[indices]
+        total = chi.sum()
+        return (chi / total) if total > 0 else torch.ones(n_features) / n_features
+
+    # --- GEX modality ---
     encoder_z = EncodeZ(
-        input_dim=count_matrix.shape[1],
+        input_dim=n_gex,
         hidden_dims=args.z_hidden_dims,
         output_dim=args.z_dim,
         use_batch_norm=False,
@@ -755,12 +791,12 @@ def _build_model(
         input_transform="normalize",
     )
     encoder_other = EncodeNonZLatents(
-        n_genes=count_matrix.shape[1],
+        n_genes=n_gex,
         z_dim=args.z_dim,
-        log_count_crossover=dataset_obj.priors["log_counts_crossover"],
-        prior_log_cell_counts=np.log1p(dataset_obj.priors["cell_counts"]),
+        log_count_crossover=priors["log_counts_crossover_gex"],
+        prior_log_cell_counts=np.log1p(gex_mod_priors["cell_counts"]),
         empty_log_count_threshold=np.log1p(dataset_obj.empty_UMI_threshold),
-        prior_logit_cell_prob=dataset_obj.priors["cell_logit"],
+        prior_logit_cell_prob=priors["cell_logit"],
         input_transform="log_normalize",
     )
     encoder = CompositeEncoder({"z": encoder_z, "other": encoder_other})
@@ -769,19 +805,75 @@ def _build_model(
         hidden_dims=args.z_hidden_dims[::-1],
         use_batch_norm=True,
         use_layer_norm=False,
-        output_dim=count_matrix.shape[1],
+        output_dim=n_gex,
     )
-    return RemoveBackgroundPyroModel(
-        model_type=args.model,
+    gex_priors = ModalityPriors(
+        d_cell_loc_prior=np.log1p(gex_mod_priors["cell_counts"]),
+        d_cell_scale_prior=gex_mod_priors["d_std"],
+        d_empty_loc_prior=np.log1p(gex_mod_priors["empty_counts"]),
+        d_empty_scale_prior=gex_mod_priors["d_empty_std"],
+        chi_ambient_init=_slice_chi(gex_indices, n_gex),
+        chi_bar=priors.get("chi_bar"),
+    )
+    ge_modality = GeneExpressionModality(
+        priors=gex_priors,
+        feature_indices_f=gex_indices,
         encoder=encoder,
         decoder=decoder,
-        dataset_obj_priors=dataset_obj.priors,
-        n_analyzed_genes=dataset_obj.analyzed_gene_inds.size,
+    )
+    modalities: Dict[str, Any] = {"gene_expression": ge_modality}
+
+    # --- Secondary modalities (own z; decoder uses concat(z_gex.detach(), z_self)) ---
+    _secondary_map = {
+        consts.ATAC_FEATURE_TYPE: ("atac", ATACModality),
+        consts.PROTEIN_FEATURE_TYPE: ("protein", ProteinModality),
+    }
+    for ft, (mod_name, ModClass) in _secondary_map.items():
+        if ft not in modality_feature_indices:
+            continue
+        ft_indices = modality_feature_indices[ft]
+        n_ft = int(ft_indices.shape[0])
+        sec_encoder = EncodeZ(
+            input_dim=n_ft,
+            hidden_dims=args.z_hidden_dims,
+            output_dim=args.z_dim,
+            use_batch_norm=False,
+            use_layer_norm=False,
+            input_transform="log_normalize",
+        )
+        # Decoder input is concat(z_gex, z_self), so input_dim = 2 * z_dim.
+        sec_decoder = Decoder(
+            input_dim=2 * args.z_dim,
+            hidden_dims=args.z_hidden_dims[::-1],
+            use_batch_norm=True,
+            use_layer_norm=False,
+            output_dim=n_ft,
+        )
+        sec_mod_priors_dict = priors["modalities"][ft]
+        sec_priors = ModalityPriors(
+            d_cell_loc_prior=np.log1p(sec_mod_priors_dict["cell_counts"]),
+            d_cell_scale_prior=sec_mod_priors_dict["d_std"],
+            d_empty_loc_prior=np.log1p(sec_mod_priors_dict["empty_counts"]),
+            d_empty_scale_prior=sec_mod_priors_dict["d_empty_std"],
+            chi_ambient_init=_slice_chi(ft_indices, n_ft),
+        )
+        modalities[mod_name] = ModClass(
+            priors=sec_priors,
+            feature_indices_f=ft_indices,
+            encoder=sec_encoder,
+            decoder=sec_decoder,
+            z_dim=args.z_dim,
+        )
+        logger.debug(f"Built {mod_name} modality with {n_ft} features")
+
+    return RemoveBackgroundPyroModel(
+        modalities=nn.ModuleDict(modalities),
         n_droplets=dataset_obj.analyzed_barcode_inds.size,
-        analyzed_gene_names=dataset_obj.data["gene_names"][dataset_obj.analyzed_gene_inds],
         empty_UMI_threshold=dataset_obj.empty_UMI_threshold,
-        log_counts_crossover=dataset_obj.priors["log_counts_crossover"],
+        log_counts_crossover=priors["log_counts_crossover_gex"],
+        p_logit_prior=priors["cell_logit"],
         use_cuda=args.use_cuda,
+        model_type=args.model,
         z_hidden_dims=args.z_hidden_dims,
     )
 
@@ -886,9 +978,10 @@ def run_inference(
         # By pre-registering here, the param store state at the start of
         # resumed training exactly matches the one-shot state, making
         # checkpoint-resume produce bit-for-bit identical results.
-        for _enc_name, _enc_module in model.encoder.items():
-            pyro.module("encoder_" + _enc_name, _enc_module, update_module_params=False)
-        pyro.module("decoder", model.decoder, update_module_params=False)
+        for _mod_name, _mod in model.modalities.items():
+            assert isinstance(_mod, ModalityModule)
+            pyro.module(f"encoder_{_mod_name}", _mod.encoder, update_module_params=False)
+            pyro.module(f"decoder_{_mod_name}", _mod.decoder, update_module_params=False)
         del _ps
 
         if "model_meta" in ckpt:

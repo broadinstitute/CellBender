@@ -241,7 +241,12 @@ class EncodeNonZLatents(nn.Module):
         self.x_scaling = state.get("x_scaling")
 
     def forward(
-        self, x: torch.Tensor, chi_ambient: Optional[torch.Tensor], z: torch.Tensor, **kwargs
+        self,
+        x: torch.Tensor,
+        chi_ambient: Optional[torch.Tensor],
+        z: torch.Tensor,
+        d_empty_loc: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Dict[str, torch.Tensor]:
         # Define the forward computation to go from gene expression to cell
         # probabilities.  The log of the total UMI counts is concatenated with
@@ -250,6 +255,10 @@ class EncodeNonZLatents(nn.Module):
         # an augmented input.
 
         x = x.reshape(-1, self.n_genes)
+
+        # Resolve d_empty_loc: accept explicit value or fall back to param store.
+        if d_empty_loc is None:
+            d_empty_loc = pyro.param("d_empty_loc").detach()
 
         # Calculate log total UMI counts per barcode.
         counts = x.sum(dim=-1, keepdim=True)
@@ -261,13 +270,13 @@ class EncodeNonZLatents(nn.Module):
         # Calculate probability that log counts are consistent with d_empty.
         if chi_ambient is not None:
             # Gaussian log probability
-            overlap = -0.5 * (torch.clamp(log_sum - pyro.param("d_empty_loc").detach(), min=0.0) / 0.1).pow(2)
+            overlap = -0.5 * (torch.clamp(log_sum - d_empty_loc, min=0.0) / 0.1).pow(2)
         else:
             overlap = torch.zeros_like(counts)
 
         # Calculate a dot product between expression and ambient, for epsilon.
         if chi_ambient is not None:
-            x_ambient = pyro.param("d_empty_loc").exp().detach() * chi_ambient.detach().unsqueeze(0)
+            x_ambient = d_empty_loc.exp() * chi_ambient.detach().unsqueeze(0)
             x_ambient_norm = x_ambient / torch.linalg.vector_norm(x_ambient, ord=2, dim=-1, keepdim=True)
             eps_overlap = (x_ambient_norm * x).sum(dim=-1, keepdim=True)
         else:
@@ -329,7 +338,7 @@ class EncodeNonZLatents(nn.Module):
         # 1.0986122886681098 = log(3)
         epsilon = 2.0 * (eps_out * self.EPS_OUTPUT_SCALE - 1.0986122886681098).sigmoid() + 0.5
 
-        d_empty = pyro.param("d_empty_loc").exp().detach()
+        d_empty = d_empty_loc.exp()
 
         d_loc = (
             self.softplus(

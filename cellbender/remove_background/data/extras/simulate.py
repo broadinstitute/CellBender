@@ -13,7 +13,7 @@ from sklearn.decomposition import PCA
 
 from cellbender.remove_background.checkpoint import load_from_checkpoint
 from cellbender.remove_background.data.io import write_matrix_to_cellranger_h5
-from cellbender.remove_background.model import calculate_lambda, calculate_mu
+from cellbender.remove_background.modality import calculate_lambda, calculate_mu
 
 if TYPE_CHECKING:
     import anndata
@@ -698,7 +698,11 @@ def sample_from_model(
 
     mu = (
         calculate_mu(
-            epsilon=epsilon, d_cell=d, chi=chi, y=torch.ones(d.shape).to(DEVICE) * y, rho=rho, model_type=model_type
+            epsilon_n=epsilon,
+            d_cell_n=d,
+            chi_nf=chi,
+            y_n=torch.ones(d.shape).to(DEVICE) * y,
+            rho_n=rho if model_type in ("full", "swapping") else None,
         )
         + 1e-30
     )
@@ -710,14 +714,13 @@ def sample_from_model(
 
     lam = (
         calculate_lambda(
-            epsilon=epsilon,
-            chi_ambient=chi_ambient,
-            d_cell=d,
-            d_empty=v,
-            y=torch.ones(d.shape).to(DEVICE) * y,
-            rho=rho,
-            chi_bar=chi_ambient,
-            model_type=model_type,
+            epsilon_n=epsilon,
+            chi_ambient_f=chi_ambient,
+            d_cell_n=d,
+            d_empty_n=v,
+            y_n=torch.ones(d.shape).to(DEVICE) * y,
+            rho_n=rho if model_type in ("full", "swapping") else None,
+            chi_bar_f=chi_ambient if model_type in ("full", "swapping") else None,
         )
         + 1e-30
     )
@@ -809,26 +812,24 @@ def sample_from_dirichlet_model(
     rho = rng.beta(a=rho_alpha, b=rho_beta, size=num)
 
     mu = calculate_mu(
-        epsilon=torch.tensor(epsilon),
-        d_cell=torch.tensor(d),
-        chi=torch.tensor(chi),
-        y=torch.ones(d.shape) * y,
-        rho=torch.tensor(rho),
-        model_type=model_type,
+        epsilon_n=torch.tensor(epsilon),
+        d_cell_n=torch.tensor(d),
+        chi_nf=torch.tensor(chi),
+        y_n=torch.ones(d.shape) * y,
+        rho_n=torch.tensor(rho) if model_type in ("full", "swapping") else None,
     ).numpy()
 
     # Draw cell counts ~ Poisson(y * epsilon * d * chi)
     c_real = rng.poisson(lam=mu, size=(num, chi_ambient.size))
 
     lam = calculate_lambda(
-        epsilon=torch.tensor(epsilon),
-        chi_ambient=torch.tensor(chi_ambient),
-        d_cell=torch.tensor(d),
-        d_empty=torch.tensor(v),
-        y=torch.ones(d.shape) * y,
-        rho=torch.tensor(rho),
-        chi_bar=torch.tensor(chi_ambient),
-        model_type=model_type,
+        epsilon_n=torch.tensor(epsilon),
+        chi_ambient_f=torch.tensor(chi_ambient),
+        d_cell_n=torch.tensor(d),
+        d_empty_n=torch.tensor(v),
+        y_n=torch.ones(d.shape) * y,
+        rho_n=torch.tensor(rho) if model_type in ("full", "swapping") else None,
+        chi_bar_f=torch.tensor(chi_ambient) if model_type in ("full", "swapping") else None,
     ).numpy()
 
     # Draw empty counts ~ Poisson(epsilon * v * chi_ambient)

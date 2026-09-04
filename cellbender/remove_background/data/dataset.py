@@ -11,12 +11,7 @@ import torch
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.data.dataprep import DataLoader, make_simple_dataloader
 from cellbender.remove_background.data.io import load_data
-from cellbender.remove_background.data.priors import (
-    compute_crossover_surely_empty_and_stds,
-    get_cell_count_given_expected_cells,
-    get_empty_count_given_expected_cells_and_total_droplets,
-    get_priors,
-)
+from cellbender.remove_background.data.priors import get_all_priors
 from cellbender.remove_background.sparse_utils import csr_set_rows_to_zero, overwrite_matrix_with_columns_from_another
 
 logger = logging.getLogger("cellbender")
@@ -104,6 +99,7 @@ class SingleCellRNACountsDataset:
         # Load the dataset.
         self.data = load_data(self.input_file)
         self.analyzed_gene_logic: np.ndarray | bool = True
+        self.feature_types: Optional[np.ndarray] = None  # set by _exclude_feature_types
 
         # Eliminate feature types not used in the analysis.
         self._exclude_feature_types()
@@ -111,59 +107,22 @@ class SingleCellRNACountsDataset:
         # Eliminate zero-count features and blacklisted features.
         self._clean_features(gene_blacklist=gene_blacklist)
 
-        # Estimate priors.
-        counts = np.array(self.data["matrix"][:, self.analyzed_gene_logic].sum(axis=1)).squeeze()
-        self.priors = get_priors(umi_counts=counts, low_count_threshold=low_count_threshold)
-
-        # Overwrite heuristic priors with user inputs.
-        if expected_cell_count is not None:
-            logger.debug(f"Fixing expected_cells at {expected_cell_count}")
-            self.priors["expected_cells"] = expected_cell_count
-            self.priors.update(
-                get_cell_count_given_expected_cells(
-                    umi_counts=counts,
-                    expected_cells=expected_cell_count,
-                )
-            )
-            if (expected_cell_count + consts.NUM_EMPTIES_INCREMENT) > self.priors["total_droplets"]:
-                # Bump this up to avoid an immediate error
-                total_drops = expected_cell_count + consts.NUM_EMPTIES_INCREMENT
-                self.priors["total_droplets"] = total_drops
-                logger.debug(f"Incrementing total_droplets to be {total_drops}")
-                if total_droplet_barcodes is None:
-                    # If this isn't getting recomputed next, recompute now
-                    self.priors.update(
-                        get_empty_count_given_expected_cells_and_total_droplets(
-                            umi_counts=counts,
-                            expected_cells=int(self.priors["expected_cells"]),
-                            total_droplets=total_drops,
-                        )
-                    )
-        if total_droplet_barcodes is not None:
-            logger.debug(f"Fixing total_droplets at {total_droplet_barcodes}")
-            self.priors["total_droplets"] = total_droplet_barcodes
-            self.priors.update(
-                get_empty_count_given_expected_cells_and_total_droplets(
-                    umi_counts=counts,
-                    expected_cells=int(self.priors["expected_cells"]),
-                    total_droplets=total_droplet_barcodes,
-                )
-            )
-
-        # Force priors if user elects to do so.
-        if force_cell_umi_prior is not None:
-            logger.debug(f"Forcing cell UMI count prior to be {force_cell_umi_prior}")
-            self.priors["cell_counts"] = force_cell_umi_prior
-        if force_empty_umi_prior is not None:
-            logger.debug(f"Forcing empty droplet UMI count prior to be {force_empty_umi_prior}")
-            self.priors["empty_counts"] = force_empty_umi_prior
-            middle = np.sqrt(self.priors["cell_counts"] * force_empty_umi_prior)
-            self.priors["empty_count_upper_limit"] = min(middle, 2 * force_empty_umi_prior)
-
-        # Recompute a few quantities if some things were replaced by user input.
-        compute_crossover_surely_empty_and_stds(umi_counts=counts, priors=self.priors)
-        logger.info(f"Prior on counts for cells is {int(self.priors['cell_counts'])}")
-        logger.info(f"Prior on counts for empty droplets is {int(self.priors['empty_counts'])}")
+        # Estimate priors (GEX-anchored; handles all user overrides internally).
+        analyzed_feature_types = (
+            self.feature_types[self.analyzed_gene_logic] if self.feature_types is not None else None
+        )
+        self.priors = get_all_priors(
+            matrix=self.data["matrix"][:, self.analyzed_gene_logic],
+            analyzed_feature_types=analyzed_feature_types,
+            low_count_threshold=low_count_threshold,
+            expected_cells_override=expected_cell_count,
+            total_droplets_override=total_droplet_barcodes,
+            force_cell_umi_prior=force_cell_umi_prior,
+            force_empty_umi_prior=force_empty_umi_prior,
+        )
+        gex_mod_priors = self.priors["modalities"][consts.GEX_FEATURE_TYPE]
+        logger.info(f"Prior on counts for cells is {int(gex_mod_priors['cell_counts'])}")
+        logger.info(f"Prior on counts for empty droplets is {int(gex_mod_priors['empty_counts'])}")
         logger.debug("\n".join(["Priors:"] + [f"{k}: {v}" for k, v in self.priors.items()]))
 
         # Do not analyze features which are not expected to contribute to noise.
@@ -212,6 +171,7 @@ class SingleCellRNACountsDataset:
             return s
 
         feature_type_array = np.array([convert(f) for f in self.data["feature_types"]], dtype=str)
+        self.feature_types = feature_type_array  # uniform string array over all features
         feature_types = np.unique(feature_type_array)
         feature_info = [f"{(feature_type_array == f).sum()} {f}" for f in feature_types]
         logger.info(f"Features in dataset: {', '.join(feature_info)}")
@@ -230,6 +190,17 @@ class SingleCellRNACountsDataset:
             self.analyzed_gene_logic,
             inclusion_logic,
         )
+
+    @property
+    def analyzed_feature_types(self) -> np.ndarray:
+        """Feature type string for each analyzed feature, shape (n_analyzed_features,).
+
+        Falls back to "Gene Expression" for every feature when the input file
+        did not contain feature-type annotations.
+        """
+        if self.feature_types is None:
+            return np.full(len(self.analyzed_gene_inds), "Gene Expression", dtype=str)
+        return self.feature_types[self.analyzed_gene_inds]
 
     def _clean_features(self, gene_blacklist: List[int] = []):
         """Trim the dataset by removing zero-count and blacklisted features.
@@ -284,13 +255,13 @@ class SingleCellRNACountsDataset:
         Sets the value of self.analyzed_gene_inds
         """
 
-        assert len(self.priors.keys()) > 0, "Run self.priors = get_priors() before self._trim_noiseless_features()"
+        assert len(self.priors.keys()) > 0, "Run self.priors = get_all_priors() before self._trim_noiseless_features()"
 
         assert self.data is not None
         # Find average counts per gene in empty droplets.
         count_matrix = self.data["matrix"][:, self.analyzed_gene_logic]
         counts = np.array(count_matrix.sum(axis=1)).squeeze()
-        cutoff = self.priors["empty_count_upper_limit"]
+        cutoff = self.priors["modalities"][consts.GEX_FEATURE_TYPE]["empty_count_upper_limit"]
         count_matrix_empties = count_matrix[(counts < cutoff) & (counts > self.low_count_threshold), :]
         mean_counts_per_empty_g = np.array(count_matrix_empties.mean(axis=0)).squeeze()
 
@@ -353,7 +324,9 @@ class SingleCellRNACountsDataset:
             # Set the low UMI count cutoff to be the greater of either
             # the user input value, or an empirically-derived value.
             factor = consts.EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD
-            empirical_low_count_cutoff = int(self.priors["empty_counts"] * factor)
+            empirical_low_count_cutoff = int(
+                self.priors["modalities"][consts.GEX_FEATURE_TYPE]["empty_counts"] * factor
+            )
             low_count_cutoff = max(self.low_count_threshold, empirical_low_count_cutoff)
             self.low_count_cutoff = low_count_cutoff
             logger.info(f"Excluding barcodes with counts below {low_count_cutoff}")
@@ -418,7 +391,9 @@ class SingleCellRNACountsDataset:
 
         # Estimate the ambient gene expression profile.
         ep = np.finfo(np.float32).eps.item()  # small value
-        empty_droplet_logic = (umi_counts < self.priors["surely_empty_counts"]) & (umi_counts > self.low_count_cutoff)
+        empty_droplet_logic = (umi_counts < self.priors["surely_empty_counts_gex"]) & (
+            umi_counts > self.low_count_cutoff
+        )
         chi_ambient_arr = np.array(count_matrix[empty_droplet_logic, :].sum(axis=0)).squeeze() + ep
         chi_ambient: torch.Tensor = torch.tensor(chi_ambient_arr / chi_ambient_arr.sum()).float()
         chi_bar_arr = np.array(count_matrix.sum(axis=0)).squeeze() + ep

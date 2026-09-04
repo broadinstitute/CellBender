@@ -78,7 +78,7 @@ def _build_model_meta_dict(model_obj: "RemoveBackgroundPyroModel") -> Optional[D
     return {
         "model_type": model_obj.model_type,
         "z_dim": int(model_obj.z_dim),
-        "z_hidden_dims": model_obj.z_hidden_dims or [],
+        "z_hidden_dims": list(model_obj.z_hidden_dims) if model_obj.z_hidden_dims else [],
         "n_analyzed_genes": int(model_obj.n_genes),
         "n_droplets": int(model_obj.n_droplets),
         "empty_UMI_threshold": umi_thresh.item() if isinstance(umi_thresh, torch.Tensor) else int(umi_thresh),

@@ -1,7 +1,22 @@
-"""Definition of the model and the inference setup, with helper functions."""
+"""Multimodal VAE model and guide for CellBender remove-background.
+
+RemoveBackgroundPyroModel is the orchestrator.  It owns a registry of
+ModalityModule instances (one per assay modality) and delegates all
+modality-specific Pyro calls to them.  Global quantities shared across
+modalities (cell probability y_n, ambient scaling epsilon_n, RNA swapping
+fraction rho_n) are sampled here.
+
+Variable naming convention
+--------------------------
+  _n   : one value per droplet   (batch dimension N)
+  _f   : one value per feature   (feature dimension F)
+  _nf  : per-droplet per-feature (N x F)
+  _nk  : per-droplet per-latent  (N x K)  — z tensors
+  _mask_n : boolean mask, one entry per droplet
+"""
 
 from numbers import Number
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Dict, List, Optional, Union, cast
 
 import numpy as np
 import pyro
@@ -13,629 +28,483 @@ from pyro.infer import config_enumerate
 from torch.distributions import constraints
 
 import cellbender.remove_background.consts as consts
-from cellbender.remove_background.distributions.NegativeBinomialPoissonConv import NegativeBinomialPoissonConv as NBPC
-from cellbender.remove_background.distributions.NegativeBinomialPoissonConvApprox import (
-    NegativeBinomialPoissonConvApprox as NBPCapprox,
-)
 from cellbender.remove_background.distributions.NullDist import NullDist
 from cellbender.remove_background.exceptions import NanException
-from cellbender.remove_background.vae import encoder as encoder_module
-
-
-def calculate_lambda(
-    model_type: str,
-    epsilon: torch.Tensor,
-    chi_ambient: torch.Tensor,
-    d_empty: torch.Tensor,
-    y: Union[torch.Tensor, None] = None,
-    d_cell: Union[torch.Tensor, None] = None,
-    rho: Union[torch.Tensor, None] = None,
-    chi_bar: Union[torch.Tensor, None] = None,
-):
-    """Calculate noise rate based on the model."""
-
-    if model_type == "simple" or model_type == "ambient":
-        lam = epsilon.unsqueeze(-1) * d_empty.unsqueeze(-1) * chi_ambient
-
-    elif model_type == "swapping":
-        assert rho is not None and chi_bar is not None and y is not None and d_cell is not None
-        lam = (
-            rho.unsqueeze(-1)
-            * chi_bar
-            * epsilon.unsqueeze(-1)
-            * (y.unsqueeze(-1) * d_cell.unsqueeze(-1) + d_empty.unsqueeze(-1))
-        )
-
-    elif model_type == "full":
-        assert rho is not None and chi_bar is not None and y is not None and d_cell is not None
-        lam = epsilon.unsqueeze(-1) * (
-            (1.0 - rho.unsqueeze(-1)) * chi_ambient * d_empty.unsqueeze(-1)
-            + rho.unsqueeze(-1) * chi_bar * (y.unsqueeze(-1) * d_cell.unsqueeze(-1) + d_empty.unsqueeze(-1))
-        )
-    else:
-        raise NotImplementedError(f"model_type was set to {model_type}, which is not implemented.")
-
-    return lam
-
-
-def calculate_mu(
-    model_type: str,
-    epsilon: torch.Tensor,
-    d_cell: torch.Tensor,
-    chi: torch.Tensor,
-    y: Union[torch.Tensor, None] = None,
-    rho: Union[torch.Tensor, None] = None,
-):
-    """Calculate mean expression based on the model."""
-
-    if model_type == "simple":
-        mu = epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
-
-    elif model_type == "ambient":
-        assert y is not None
-        mu = y.unsqueeze(-1) * epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
-
-    elif model_type == "swapping" or model_type == "full":
-        assert rho is not None and y is not None
-        mu = (1.0 - rho.unsqueeze(-1)) * y.unsqueeze(-1) * epsilon.unsqueeze(-1) * d_cell.unsqueeze(-1) * chi
-
-    else:
-        raise NotImplementedError(f"model_type was set to {model_type}, which is not implemented.")
-
-    return mu
+from cellbender.remove_background.modality import GeneExpressionModality, ModalityModule, calculate_lambda, calculate_mu
 
 
 class RemoveBackgroundPyroModel(nn.Module):
-    """Class that contains the model and guide used for variational inference.
+    """Multimodal VAE orchestrator for CellBender remove-background.
 
     Args:
-        model_type: Which model is being used, one of ['simple', 'ambient',
-            'swapping', 'full'].
-        encoder: An instance of an encoder object.  Can be a CompositeEncoder.
-        decoder: An instance of a decoder object.
-        dataset_obj_priors: Dict which contains relevant priors.
-        use_cuda: Will use GPU if True.
-        analyzed_gene_names: Here only so that when we save a checkpoint, if we
-            ever want to look at it, we will know which genes are which.
-        phi_loc_prior: Mean of gamma distribution for global overdispersion.
-        phi_scale_prior: Scale of gamma distribution for global overdispersion.
-        rho_alpha_prior: Param of beta distribution for swapping fraction.
-        rho_beta_prior: Param of beta distribution for swapping fraction.
-        use_exact_log_prob: False (typical usage) to use an approximate log_prob
-            computation, which is faster than an exact calculation.
-
-    Attributes:
-        All the above, plus
-        device: Either 'cpu' or 'cuda' depending on value of use_cuda.
-        loss: Dict that records information about the loss during training.
-
+        modalities: nn.ModuleDict mapping modality name -> ModalityModule.
+            Must contain at least "gene_expression".
+        n_droplets: Total number of droplets in the dataset.
+        empty_UMI_threshold: UMI count below which a droplet is considered
+            surely empty (used for the p_n prior).
+        log_counts_crossover: log(UMI) at the cell / empty transition boundary.
+        p_logit_prior: Naive logit prior for cell probability.
+        use_cuda: Move model to GPU if True.
+        epsilon_prior: Concentration/rate parameter for the Gamma prior on
+            epsilon_n (ambient RT-efficiency scaling).
+        rho_alpha_prior: Alpha for the Beta prior on RNA swapping fraction rho_n.
+        rho_beta_prior: Beta for the Beta prior on rho_n.
+        include_rho: Whether to model RNA swapping (rho_n).
+        include_empties: Whether to model empty droplets.  Always True for
+            multimodal datasets; set False only for the legacy 'simple' model.
+        model_type: Legacy string kept for checkpoint compatibility.
     """
 
     def __init__(
         self,
-        model_type: str,
-        encoder: encoder_module.CompositeEncoder,
-        decoder: nn.Module,
-        dataset_obj_priors: Dict[str, Any],
-        n_analyzed_genes: int,
+        modalities: nn.ModuleDict,
         n_droplets: int,
-        analyzed_gene_names: np.ndarray,
         empty_UMI_threshold: int,
         log_counts_crossover: float,
+        p_logit_prior: float,
         use_cuda: bool,
-        z_hidden_dims: Optional[List[int]] = None,
-        phi_loc_prior: float = consts.PHI_LOC_PRIOR,
-        phi_scale_prior: float = consts.PHI_SCALE_PRIOR,
+        epsilon_prior: float = consts.EPSILON_PRIOR,
         rho_alpha_prior: float = consts.RHO_ALPHA_PRIOR,
         rho_beta_prior: float = consts.RHO_BETA_PRIOR,
-        epsilon_prior: float = consts.EPSILON_PRIOR,
-        use_exact_log_prob: bool = consts.USE_EXACT_LOG_PROB,
+        include_rho: bool = False,
+        include_empties: bool = True,
+        model_type: str = "full",
+        z_hidden_dims: Optional[List[int]] = None,
     ):
-        super(RemoveBackgroundPyroModel, self).__init__()
+        super().__init__()
 
-        self.model_type = model_type
-        self.include_empties = True
-        if self.model_type == "simple":
-            self.include_empties = False
-        self.include_rho = False
-        if (self.model_type == "full") or (self.model_type == "swapping"):
-            self.include_rho = True
-
-        self.n_genes = n_analyzed_genes
+        self.modalities: nn.ModuleDict = modalities
         self.n_droplets = n_droplets
-        self.analyzed_gene_names = analyzed_gene_names
-        self.z_dim: int = cast(int, decoder.input_dim)
-        self.z_hidden_dims: Optional[List[int]] = z_hidden_dims
-        self.encoder = encoder
-        self.decoder = decoder
-        self.use_exact_log_prob = use_exact_log_prob
+        self.include_empties = include_empties
+        self.include_rho = include_rho
+        self.model_type = model_type
+        self.log_counts_crossover = log_counts_crossover
+        self.counts_crossover = np.exp(log_counts_crossover)
+        self.z_hidden_dims: List[int] = z_hidden_dims or []
+
         self.loss: Dict[str, Dict[str, list]] = {
             "train": {"epoch": [], "elbo": []},
             "test": {"epoch": [], "elbo": []},
             "learning_rate": {"epoch": [], "value": []},
         }
-        self.empty_UMI_threshold: int | torch.Tensor = empty_UMI_threshold
-        self.log_counts_crossover = log_counts_crossover
-        self.counts_crossover = np.exp(log_counts_crossover)
 
-        # Determine whether we are working on a GPU.
         if use_cuda:
-            # Calling cuda() here will put all the parameters of
-            # the encoder and decoder networks into GPU memory.
-            # CompositeEncoder is an nn.ModuleDict so self.cuda() recurses into it.
             self.cuda()
-            try:
-                for key, value in self.encoder.items():
-                    value.cuda()
-            except KeyError:
-                pass
             self.device = "cuda"
         else:
             self.device = "cpu"
         self.use_cuda = use_cuda
 
-        # Priors
-        assert dataset_obj_priors["d_std"] > 0, (
-            f"Issue with prior: d_std is {dataset_obj_priors['d_std']}, but should be > 0."
-        )
-        assert dataset_obj_priors["cell_counts"] > 0, (
-            f"Issue with prior: cell_counts is {dataset_obj_priors['cell_counts']}, but should be > 0."
-        )
-
-        self.d_cell_loc_prior = torch.tensor(np.log1p(dataset_obj_priors["cell_counts"])).float().to(self.device)
-
-        self.d_cell_scale_prior = torch.tensor(dataset_obj_priors["d_std"]).to(self.device)
-        self.z_loc_prior = torch.zeros(torch.Size([self.z_dim])).to(self.device)
-        self.z_scale_prior = torch.ones(torch.Size([self.z_dim])).to(self.device)
+        # Global scalar priors (not modality-specific).
         self.epsilon_prior = torch.tensor(epsilon_prior).to(self.device)
+        self.p_logit_prior = torch.tensor(p_logit_prior).float().to(self.device)
+        self.empty_UMI_threshold = torch.tensor(empty_UMI_threshold).float().to(self.device)
+        self.rho_alpha_prior = rho_alpha_prior * torch.ones([]).to(self.device)
+        self.rho_beta_prior = rho_beta_prior * torch.ones([]).to(self.device)
 
-        self.phi_loc_prior = phi_loc_prior * torch.ones(torch.Size([])).to(self.device)
-        self.phi_scale_prior = phi_scale_prior * torch.ones(torch.Size([])).to(self.device)
-        self.phi_conc_prior = (phi_loc_prior**2 / phi_scale_prior**2) * torch.ones(torch.Size([])).to(self.device)
-        self.phi_rate_prior = (phi_loc_prior / phi_scale_prior**2) * torch.ones(torch.Size([])).to(self.device)
+        # Convenience reference to GE modality (always required).
+        assert "gene_expression" in modalities, "modalities must include 'gene_expression'"
+        self._gene_expression = cast(GeneExpressionModality, modalities["gene_expression"])
 
-        if self.model_type != "simple":
-            assert dataset_obj_priors["empty_counts"] > 0, (
-                f"Issue with prior: empty_counts should be > 0, but is {dataset_obj_priors['empty_counts']}"
-            )
-            chi_ambient_sum = dataset_obj_priors["chi_ambient"].sum()
-            assert np.isclose(a=chi_ambient_sum, b=[1.0], atol=1e-5), (
-                f"Issue with prior: chi_ambient should sum to 1, but it sums to {chi_ambient_sum}"
-            )
-            chi_bar_sum = dataset_obj_priors["chi_bar"].sum()
-            assert np.isclose(a=chi_bar_sum, b=[1.0], atol=1e-5), (
-                f"Issue with prior: chi_bar should sum to 1, but is {chi_bar_sum}"
-            )
+    @property
+    def z_dim(self) -> int:
+        return self._gene_expression.z_dim
 
-            self.d_empty_loc_prior = np.log1p(dataset_obj_priors["empty_counts"], dtype=np.float32).item() * torch.ones(
-                torch.Size([])
-            ).to(self.device)
+    @property
+    def n_genes(self) -> int:
+        return int(self._gene_expression.feature_indices_f.shape[0])
 
-            self.d_empty_scale_prior = dataset_obj_priors["d_empty_std"] * torch.ones(torch.Size([])).to(self.device)
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
 
-            self.p_logit_prior = dataset_obj_priors["cell_logit"] * torch.ones(torch.Size([])).to(self.device)
+    def _iter_modalities(self):
+        """Iterate modalities.items() with ModalityModule types (not bare nn.Module)."""
+        for name, mod in self.modalities.items():
+            assert isinstance(mod, ModalityModule)
+            yield name, mod
 
-            self.chi_ambient_init = dataset_obj_priors["chi_ambient"].to(self.device)
-            self.avg_gene_expression = dataset_obj_priors["chi_bar"].to(self.device)
+    def split_by_modality(self, x_nf: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Split the full count matrix into per-modality sub-matrices."""
+        return {name: x_nf[:, mod.feature_indices_f] for name, mod in self._iter_modalities()}
 
-            self.empty_UMI_threshold = torch.tensor(empty_UMI_threshold).float().to(self.device)
+    # ------------------------------------------------------------------
+    # Pyro model
+    # ------------------------------------------------------------------
 
-        else:
-            self.avg_gene_expression = None
-
-        self.rho_alpha_prior = rho_alpha_prior * torch.ones(torch.Size([])).to(self.device)
-        self.rho_beta_prior = rho_beta_prior * torch.ones(torch.Size([])).to(self.device)
-
-    def _calculate_mu(self, **kwargs):
-        return calculate_mu(model_type=self.model_type, **kwargs)
-
-    def _calculate_lambda(self, **kwargs):
-        return calculate_lambda(model_type=self.model_type, **kwargs)
-
-    def model(self, x: torch.Tensor):
-        """Data likelihood model.
+    def model(self, x_nf: torch.Tensor):
+        """Data likelihood model (generative process).
 
         Args:
-            x: Mini-batch of data. Barcodes are rows, genes are columns.
-
+            x_nf: Mini-batch count matrix, shape (N, total_features).
+                  Rows are droplets, columns are all features across all modalities.
         """
 
-        # Register the decoder with pyro.
-        pyro.module("decoder", self.decoder, update_module_params=True)
+        # Split into per-modality tensors.
+        raw_data_dict = self.split_by_modality(x_nf)
+        N = x_nf.shape[0]
 
-        # Register the hyperparameter for ambient gene expression.
-        if self.include_empties:
-            chi_ambient = pyro.param(
-                "chi_ambient",
-                self.chi_ambient_init * torch.ones(torch.Size([])).to(self.device),
-                constraint=constraints.simplex,
+        # Register all decoders with Pyro.
+        for name, mod in self._iter_modalities():
+            pyro.module(f"decoder_{name}", mod.decoder, update_module_params=True)
+
+        # --- Outside plate: global parameters per modality (chi_ambient, phi) ---
+
+        global_model_params: Dict[str, dict] = {}
+        for name, mod in self._iter_modalities():
+            global_model_params[name] = mod.model_global()
+
+        # Global RNA-swapping fraction rho_n prior parameters.
+        if self.include_rho:
+            rho_alpha = self.rho_alpha_prior
+            rho_beta = self.rho_beta_prior
+
+        # --- Inside plate: per-droplet sampling ---
+
+        # Total UMI counts used for cell/empty classification (from
+        # cell-probability-contributing modalities only).
+        counts_n = sum(
+            (
+                raw_data_dict[name].sum(dim=-1)
+                for name, mod in self._iter_modalities()
+                if mod.contributes_to_cell_probability
+            ),
+            torch.zeros(N, device=self.device),
+        )
+
+        with pyro.plate("data", N, use_cuda=self.use_cuda, device=self.device):
+            # Global per-droplet latents (not modality-specific).
+            epsilon_n = pyro.sample(
+                "epsilon_n",
+                dist.Gamma(
+                    concentration=self.epsilon_prior,
+                    rate=self.epsilon_prior,
+                ).expand([N]),
             )
-        else:
-            chi_ambient = None
 
-        POISSON_APPROX = False
-
-        if not POISSON_APPROX:
-            # Sample phi from Gamma prior.
-            phi = pyro.sample("phi", dist.Gamma(self.phi_conc_prior, self.phi_rate_prior))
-
-        # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.shape[0], use_cuda=self.use_cuda, device=self.device):
-            # Sample z from prior.
-            z = pyro.sample(
-                "z", dist.Normal(loc=self.z_loc_prior, scale=self.z_scale_prior).expand_by([x.size(0)]).to_event(1)
-            )
-
-            # Decode the latent code z to get fractional gene expression, chi.
-            chi = pyro.deterministic("chi", self.decoder(z))
-
-            # Sample d_cell based on priors.
-            d_cell = pyro.sample(
-                "d_cell",
-                dist.LogNormal(loc=self.d_cell_loc_prior, scale=self.d_cell_scale_prior).expand_by([x.size(0)]),
-            )
-
-            # Sample swapping fraction rho.
             if self.include_rho:
-                rho = pyro.sample("rho", dist.Beta(self.rho_alpha_prior, self.rho_beta_prior).expand_by([x.size(0)]))
-            else:
-                rho = None
-
-            # Sample epsilon based on priors.
-            epsilon = pyro.sample(
-                "epsilon", dist.Gamma(concentration=self.epsilon_prior, rate=self.epsilon_prior).expand_by([x.size(0)])
-            )
-
-            # If modelling empty droplets:
-            if self.include_empties:
-                # Sample d_empty based on priors.
-                d_empty = pyro.sample(
-                    "d_empty",
-                    dist.LogNormal(loc=self.d_empty_loc_prior, scale=self.d_empty_scale_prior).expand_by([x.size(0)]),
+                rho_n = pyro.sample(
+                    "rho_n",
+                    dist.Beta(rho_alpha, rho_beta).expand([N]),
                 )
+            else:
+                rho_n = None
 
-                # Sample y, the presence of a real cell, based on p_logit_prior.
-                p_logit_prior = get_p_logit_prior(
-                    log_counts=x.sum(dim=-1).log(),
-                    log_cell_prior_counts=self.d_cell_loc_prior,
+            if self.include_empties:
+                p_logit_prior_n = get_p_logit_prior(
+                    log_counts=counts_n.log(),
+                    log_cell_prior_counts=self._gene_expression.d_cell_loc_prior,
                     surely_empty_counts=self.empty_UMI_threshold,
                     naive_p_logit_prior=self.p_logit_prior,
                 )
-                y = pyro.sample("y", dist.Bernoulli(logits=p_logit_prior))
-
+                y_n = pyro.sample("y_n", dist.Bernoulli(logits=p_logit_prior_n))
+                empty_mask_n = cast(torch.BoolTensor, y_n.detach().bool().logical_not())
             else:
-                d_empty = None
-                y = None
+                y_n = torch.ones(N, device=self.device)
+                empty_mask_n = cast(torch.BoolTensor, torch.zeros(N, dtype=torch.bool, device=self.device))
 
-            # Calculate the mean gene expression counts (for each barcode).
-            mu_cell = self._calculate_mu(epsilon=epsilon, d_cell=d_cell, chi=chi, y=y, rho=rho)
+            # --- z prior sampling (one site per modality) ---
 
-            if self.include_empties:
-                # Calculate the background rate parameter (for each barcode).
-                lam = self._calculate_lambda(
-                    epsilon=epsilon,
-                    chi_ambient=chi_ambient,
-                    d_empty=d_empty,
-                    y=y,
-                    d_cell=d_cell,
-                    rho=rho,
-                    chi_bar=self.avg_gene_expression,
+            latents_dict: Dict[str, Optional[torch.Tensor]] = {}
+            for name, mod in self._iter_modalities():
+                latents_dict[name] = mod.model_latent(N)
+
+            # --- Per-modality: per-droplet params, decode, observe ---
+
+            surely_cell_mask_n: Optional[torch.Tensor] = None
+            probably_empty_mask_n: Optional[torch.Tensor] = None
+            probably_cell_mask_n: Optional[torch.Tensor] = None
+
+            # Per-modality outputs collected for the return dict (used by posterior inference).
+            modality_outputs: Dict[str, Dict[str, torch.Tensor]] = {}
+
+            for name, mod in self._iter_modalities():
+                x_mod_nf = raw_data_dict[name]
+                phi = global_model_params[name]["phi"]
+                chi_ambient_f = global_model_params[name]["chi_ambient_f"]
+
+                d_cell_n, d_empty_n = mod.model_per_droplet(
+                    x_nf=x_mod_nf,
+                    empty_mask_n=empty_mask_n,
+                    epsilon_n=epsilon_n,
+                    y_n=y_n,
+                    rho_n=rho_n,
+                    phi=phi,
                 )
-            else:
-                lam = torch.zeros([self.n_genes]).to(self.device)
 
-            if POISSON_APPROX:
-                # Data distributed as the sum of two Poissons.
-                c = pyro.sample(
-                    "obs",
-                    dist.Poisson(rate=mu_cell + lam + consts.POISSON_EPS_SAFEGAURD).to_event(1),
-                    obs=x.reshape(-1, self.n_genes),
+                # Decode to fractional expression.
+                decoder_input = mod.prepare_decoder_input(latents_dict)
+                chi_nf = pyro.deterministic(f"chi_{name}", mod.decode(decoder_input), event_dim=1)
+
+                # Compute mean signal and ambient rates.
+                mu_nf = calculate_mu(
+                    epsilon_n=epsilon_n,
+                    d_cell_n=d_cell_n,
+                    chi_nf=chi_nf,
+                    y_n=y_n if self.include_empties else None,
+                    rho_n=rho_n,
                 )
-                alpha = None
+                lam_nf = calculate_lambda(
+                    epsilon_n=epsilon_n,
+                    chi_ambient_f=chi_ambient_f,
+                    d_empty_n=d_empty_n,
+                    y_n=y_n if self.include_empties else None,
+                    d_cell_n=d_cell_n,
+                    rho_n=rho_n,
+                    chi_bar_f=mod.chi_bar_f,
+                )
+                if not self.include_empties:
+                    lam_nf = torch.zeros_like(mu_nf)
 
-            else:
-                alpha = phi.reciprocal()
+                pyro.sample(
+                    f"obs_{name}",
+                    mod.observation_dist(mu_nf, lam_nf, phi).to_event(1),
+                    obs=x_mod_nf,
+                )
 
-                if not consts.USE_EXACT_LOG_PROB:
-                    # Use a negative binomial approximation as the observation model.
-                    c = pyro.sample(
-                        "obs",
-                        NBPCapprox(
-                            mu=mu_cell + consts.NBPC_MU_EPS_SAFEGAURD,
-                            alpha=alpha + consts.NBPC_ALPHA_EPS_SAFEGAURD,
-                            lam=lam + consts.NBPC_LAM_EPS_SAFEGAURD,
-                        ).to_event(1),
-                        obs=x.reshape(-1, self.n_genes),
-                    )
+                modality_outputs[name] = {
+                    "mu": mu_nf,
+                    "lam": lam_nf,
+                    "alpha": (1.0 / phi).expand_as(mu_nf),
+                }
 
-                else:
-                    c = pyro.sample(
-                        "obs",
-                        NBPC(
-                            mu=mu_cell + consts.NBPC_MU_EPS_SAFEGAURD,
-                            alpha=alpha + consts.NBPC_ALPHA_EPS_SAFEGAURD,
-                            lam=lam + consts.NBPC_LAM_EPS_SAFEGAURD,
-                            max_poisson=100,
-                        ).to_event(1),
-                        obs=x.reshape(-1, self.n_genes),
-                    )
-
+            # Compute cell/empty masks once (from GE counts).
             if self.include_empties:
-                # Put a prior on p_y_logit to maintain balance.
-                assert y is not None
-                assert d_empty is not None
+                assert y_n is not None
+                ge_counts_n = raw_data_dict["gene_expression"].sum(dim=-1)
+                surely_cell_mask_n = (ge_counts_n >= self._gene_expression.d_cell_loc_prior.exp()).bool()
+                probably_empty_mask_n = (ge_counts_n < self.counts_crossover).bool()
+                probably_cell_mask_n = (ge_counts_n >= self.counts_crossover).bool()
+
+                # Regularise logit cell probability.
                 pyro.sample(
                     "p_logit_reg",
-                    dist.Normal(loc=self.p_logit_prior, scale=(consts.P_LOGIT_SCALE * torch.ones([1]).to(self.device))),
+                    dist.Normal(
+                        loc=self.p_logit_prior,
+                        scale=consts.P_LOGIT_SCALE * torch.ones([1], device=self.device),
+                    ),
                 )
 
-                # Additionally use the surely empty droplets for regularization,
-                # since we know these droplets by their UMI counts.
-                counts = x.sum(dim=-1, keepdim=False)
-                surely_cell_mask = (counts >= self.d_cell_loc_prior.exp()).bool().to(self.device)
-
-                with poutine.mask(
-                    mask=cast(torch.BoolTensor, cast(torch.Tensor, y).detach().bool().logical_not())
-                ):  # surely_empty_mask):
-                    with poutine.scale(scale=consts.REG_SCALE_AMBIENT_EXPRESSION):
-                        if self.include_rho:
-                            assert rho is not None
-                            r = rho.detach()
-                        else:
-                            r = None
-
-                        # Semi-supervision of ambient expression using all empties.
-                        lam = self._calculate_lambda(
-                            epsilon=torch.tensor(1.0).to(d_empty.device),  # epsilon.detach(),
-                            chi_ambient=chi_ambient,
-                            d_empty=d_empty,
-                            y=torch.zeros_like(d_empty),
-                            d_cell=d_cell.detach(),
-                            rho=r,
-                            chi_bar=self.avg_gene_expression,
-                        )
-                        pyro.sample(
-                            "obs_empty",
-                            dist.Poisson(rate=lam + consts.POISSON_EPS_SAFEGAURD).to_event(1),
-                            obs=x.reshape(-1, self.n_genes),
-                        )
-
-                # Grab our posterior for the logit cell probability (this is a workaround).
-                p_logit_posterior = pyro.sample(
-                    "p_passback", NullDist(torch.zeros(1).to(self.device)).expand_by([x.size(0)])
+                # Pass the p_n posterior back into the model for soft supervision.
+                p_logit_n = pyro.sample(
+                    "p_passback",
+                    NullDist(torch.zeros(1, device=self.device)).expand_by([N]),
                 )
 
-                # Softer semi-supervision to encourage cell probabilities to do the right thing.
-                probably_empty_mask = (counts < self.counts_crossover).bool().to(self.device)
-                probably_cell_mask = (counts >= self.counts_crossover).bool().to(self.device)
-
-                with poutine.mask(mask=probably_empty_mask):
+                with poutine.mask(mask=cast(torch.BoolTensor, probably_empty_mask_n)):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample(
                             "obs_probably_empty_y",
                             dist.Normal(
-                                loc=-1 * torch.ones_like(y) * consts.REG_LOGIT_MEAN, scale=consts.REG_LOGIT_SOFT_SCALE
+                                loc=-1 * torch.ones_like(y_n) * consts.REG_LOGIT_MEAN,
+                                scale=consts.REG_LOGIT_SOFT_SCALE,
                             ),
-                            obs=p_logit_posterior,
+                            obs=p_logit_n,
                         )
 
-                with poutine.mask(mask=probably_cell_mask):
+                with poutine.mask(mask=cast(torch.BoolTensor, probably_cell_mask_n)):
                     with poutine.scale(scale=consts.REG_SCALE_SOFT_SUPERVISION):
                         pyro.sample(
                             "obs_probably_cell_y",
                             dist.Normal(
-                                loc=torch.ones_like(y) * consts.REG_LOGIT_MEAN, scale=consts.REG_LOGIT_SOFT_SCALE
+                                loc=torch.ones_like(y_n) * consts.REG_LOGIT_MEAN,
+                                scale=consts.REG_LOGIT_SOFT_SCALE,
                             ),
-                            obs=p_logit_posterior,
+                            obs=p_logit_n,
                         )
 
-        # Regularization of epsilon.mean()
-        if surely_cell_mask.sum() >= 2:
-            epsilon_median = epsilon[probably_cell_mask].median()
-            # with poutine.scale(scale=probably_cell_mask.sum() / 10.):
-            pyro.sample(
-                "epsilon_mean", dist.Normal(loc=epsilon_median, scale=0.01), obs=torch.ones_like(epsilon_median)
-            )
+        # --- Outside plate: regularise epsilon_n mean ---
 
-        epsilon_median_empty = epsilon[probably_empty_mask].median()
-        # with poutine.scale(scale=probably_cell_mask.sum() / 10.):
-        pyro.sample(
-            "epsilon_empty_mean",
-            dist.Normal(loc=epsilon_median_empty, scale=0.01),
-            obs=torch.ones_like(epsilon_median_empty),
-        )
+        if self.include_empties and probably_cell_mask_n is not None and probably_empty_mask_n is not None:
+            if surely_cell_mask_n is not None and surely_cell_mask_n.sum() >= 2 and probably_cell_mask_n.sum() >= 2:
+                epsilon_median = epsilon_n[probably_cell_mask_n].median()
+                pyro.sample(
+                    "epsilon_mean",
+                    dist.Normal(loc=epsilon_median, scale=0.01),
+                    obs=torch.ones_like(epsilon_median),
+                )
 
-        return {"chi_ambient": chi_ambient, "z": z, "mu": mu_cell, "lam": lam, "alpha": alpha, "counts": c}
+            if probably_empty_mask_n.sum() >= 1:
+                epsilon_median_empty = epsilon_n[probably_empty_mask_n].median()
+                pyro.sample(
+                    "epsilon_empty_mean",
+                    dist.Normal(loc=epsilon_median_empty, scale=0.01),
+                    obs=torch.ones_like(epsilon_median_empty),
+                )
+
+        return {
+            "z_gex": latents_dict.get("gene_expression"),
+            "chi_ambient_gex": global_model_params.get("gene_expression", {}).get("chi_ambient_f"),
+            "modalities": modality_outputs,
+        }
+
+    # ------------------------------------------------------------------
+    # Pyro guide
+    # ------------------------------------------------------------------
 
     @config_enumerate(default="parallel")
-    def guide(self, x: torch.Tensor):
+    def guide(self, x_nf: torch.Tensor):
         """Variational posterior.
 
         Args:
-            x: Mini-batch of data. Barcodes are rows, genes are columns.
-
+            x_nf: Mini-batch count matrix, same shape as in model().
         """
 
         nan_check = False
-
         if nan_check:
             for param in pyro.get_param_store().keys():
                 if torch.isnan(pyro.param(param).sum()):
                     raise NanException(param)
 
-        # Register the encoder(s) with pyro.
-        for name, module in self.encoder.items():
-            pyro.module("encoder_" + name, module, update_module_params=True)
+        raw_data_dict = self.split_by_modality(x_nf)
+        N = x_nf.shape[0]
 
-        # Initialize variational parameters for d_cell.
-        d_cell_scale = pyro.param(
-            "d_cell_scale", torch.tensor([consts.D_CELL_SCALE_INIT]).to(self.device), constraint=constraints.positive
-        )
+        # Register all encoders with Pyro.
+        for name, mod in self._iter_modalities():
+            pyro.module(f"encoder_{name}", mod.encoder, update_module_params=True)
 
-        if self.include_empties:
-            # Initialize variational parameters for d_empty.
-            d_empty_loc = pyro.param(
-                "d_empty_loc",
-                self.d_empty_loc_prior * torch.ones(torch.Size([])).to(self.device),
-                constraint=constraints.positive,
-            )
-            d_empty_scale = pyro.param(
-                "d_empty_scale",
-                self.d_empty_scale_prior * torch.ones(torch.Size([])).to(self.device),
-                constraint=constraints.positive,
-            )
+        # --- Outside plate: global variational params per modality (phi) ---
 
-            # Register the hyperparameter for ambient gene expression.
-            chi_ambient = pyro.param(
-                "chi_ambient",
-                self.chi_ambient_init * torch.ones(torch.Size([])).to(self.device),
-                constraint=constraints.simplex,
-            )
+        global_guide_params: Dict[str, dict] = {}
+        for name, mod in self._iter_modalities():
+            global_guide_params[name] = mod.guide_global()
 
-        # Initialize variational parameters for rho.
+        # Global rho variational parameters.
         if self.include_rho:
             rho_alpha = pyro.param(
                 "rho_alpha",
-                self.rho_alpha_prior * torch.ones(torch.Size([])).to(self.device),
+                self.rho_alpha_prior.clone(),
                 constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
-            )  # Prevent NaNs
+            )
             rho_beta = pyro.param(
                 "rho_beta",
-                self.rho_beta_prior * torch.ones(torch.Size([])).to(self.device),
+                self.rho_beta_prior.clone(),
                 constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
             )
 
-        # Initialize variational parameters for phi.
-        phi_loc = pyro.param(
-            "phi_loc", self.phi_loc_prior * torch.ones(torch.Size([])).to(self.device), constraint=constraints.positive
-        )
-        phi_scale = pyro.param(
-            "phi_scale",
-            self.phi_scale_prior * torch.ones(torch.Size([])).to(self.device),
-            constraint=constraints.positive,
-        )
+        # --- Run GE encoder before entering the plate ---
+        # The GE encoder output is needed for the global p_n and epsilon_n sites,
+        # which must be sampled inside the plate.  Running it here avoids a
+        # second forward pass inside the plate.
 
-        # Sample phi from a Gamma distribution (after re-parameterization).
-        phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
-        phi_rate = phi_loc / phi_scale.pow(2)
-        pyro.sample("phi", dist.Gamma(phi_conc, phi_rate))
+        x_gex_nf = raw_data_dict["gene_expression"]
+        enc_gex = self._gene_expression.run_encoder(x_gex_nf)
 
-        # Happens in parallel for each data point (cell barcode) independently:
-        with pyro.plate("data", x.shape[0], use_cuda=self.use_cuda, device=self.device):
-            # Sample swapping fraction rho.
+        # --- Inside plate ---
+
+        with pyro.plate("data", N, use_cuda=self.use_cuda, device=self.device):
             if self.include_rho:
-                _rho = pyro.sample("rho", dist.Beta(rho_alpha, rho_beta).expand_by([x.size(0)]))
+                pyro.sample("rho_n", dist.Beta(rho_alpha, rho_beta).expand([N]))
 
-            # Encode the latent variables from the input gene expression counts.
             if self.include_empties:
-                # Sample d_empty, which doesn't depend on y.
-                _d_empty = pyro.sample(
-                    "d_empty", dist.LogNormal(loc=d_empty_loc, scale=d_empty_scale).expand_by([x.size(0)])
+                # p regularisation and passback (GE-only global supervision sites).
+                pyro.sample("p_logit_reg", dist.Normal(loc=enc_gex["p_y"], scale=consts.P_LOGIT_SCALE))
+                pyro.sample("p_passback", NullDist(enc_gex["p_y"].detach()))
+
+                y_n = pyro.sample("y_n", dist.Bernoulli(logits=enc_gex["p_y"]))
+                prob_n = enc_gex["p_y"].sigmoid().detach()
+            else:
+                y_n = torch.ones(N, device=self.device)
+                prob_n = torch.ones(N, device=self.device)
+
+            # Sample global epsilon_n using the GE encoder's estimate.
+            epsilon_n_dist = self._gene_expression.guide_epsilon_dist(enc_gex)
+            if epsilon_n_dist is not None:
+                epsilon_gated = prob_n * enc_gex["epsilon"] + (1.0 - prob_n) * 1.0
+                pyro.sample(
+                    "epsilon_n",
+                    dist.Gamma(
+                        concentration=epsilon_gated * consts.EPSILON_PRIOR,
+                        rate=torch.tensor(consts.EPSILON_PRIOR, device=self.device),
+                    ),
                 )
 
-                enc = self.encoder(x=x, chi_ambient=chi_ambient.detach(), cell_prior_log=self.d_cell_loc_prior)
+            # --- z_nk sampling for each modality ---
 
-            else:
-                enc = self.encoder(x=x, chi_ambient=None, cell_prior_log=self.d_cell_loc_prior)
+            latents_dict: Dict[str, Optional[torch.Tensor]] = {}
 
-            # Code specific to models with empty droplets.
-            if self.include_empties:
-                # Regularize based on wanting a balanced p_y_logit.
-                pyro.sample("p_logit_reg", dist.Normal(loc=enc["p_y"], scale=consts.P_LOGIT_SCALE))
+            # GE z is gated by y_n (only meaningful for cell-containing droplets).
+            with poutine.mask(mask=cast(torch.BoolTensor, y_n.bool().detach())):
+                latents_dict["gene_expression"] = self._gene_expression.guide_latent(x_gex_nf)
 
-                # Pass back the inferred p_y to the model.
-                pyro.sample("p_passback", NullDist(enc["p_y"].detach()))
+            # All other modalities: also gate z by y_n so that empty droplets
+            # do not contribute gradients to the secondary latent spaces.
+            for name, mod in self._iter_modalities():
+                if name == "gene_expression":
+                    continue
+                enc_input = mod.prepare_encoder_input(raw_data_dict)
+                with poutine.mask(mask=cast(torch.BoolTensor, y_n.bool().detach())):
+                    latents_dict[name] = mod.guide_latent(enc_input)
 
-                # Sample the Bernoulli y from encoded p(y).
-                y = pyro.sample("y", dist.Bernoulli(logits=enc["p_y"]))
+            # --- Per-droplet variational params for each modality ---
 
-                # Get cell probabilities for gating.
-                prob = enc["p_y"].sigmoid().detach()  # Logits to probability
+            for name, mod in self._iter_modalities():
+                x_mod_nf = raw_data_dict[name]
+                mod.guide_per_droplet(x_mod_nf, prob_n)
 
-                # Mask out empty droplets.
-                with poutine.mask(mask=cast(torch.BoolTensor, y.bool().detach())):
-                    # Sample latent code z for the barcodes containing cells.
-                    _z = pyro.sample("z", dist.Normal(loc=enc["z"]["loc"], scale=enc["z"]["scale"]).to_event(1))
+        # Clear GE encoder cache to avoid stale tensors between training steps.
+        self._gene_expression._enc_cache = None
 
-                # Gate d based and sample.
-                d_cell_loc_gated = (
-                    prob * enc["d_loc"] + (1 - prob) * self.d_cell_loc_prior
-                )  # NOTE: necessary to pass on sim6
-                _d_cell = pyro.sample("d_cell", dist.LogNormal(loc=d_cell_loc_gated, scale=d_cell_scale))
 
-                # Gate epsilon and sample.
-                epsilon_gated = prob * enc["epsilon"] + (1 - prob) * 1.0
-                _epsilon = pyro.sample(
-                    "epsilon", dist.Gamma(concentration=epsilon_gated * self.epsilon_prior, rate=self.epsilon_prior)
-                )
-
-            else:
-                # Sample d based on the encoding.
-                pyro.sample("d_cell", dist.LogNormal(loc=enc["d_loc"], scale=d_cell_scale))
-
-                # Sample latent code z for each cell.
-                pyro.sample("z", dist.Normal(loc=enc["z"]["loc"], scale=enc["z"]["scale"]).to_event(1))
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 
 def get_p_logit_prior(
     log_counts: torch.Tensor,
-    log_cell_prior_counts: torch.Tensor | float,
-    surely_empty_counts: torch.Tensor | int,
-    naive_p_logit_prior: torch.Tensor | float,
+    log_cell_prior_counts: Union[torch.Tensor, float],
+    surely_empty_counts: Union[torch.Tensor, int],
+    naive_p_logit_prior: Union[torch.Tensor, float],
 ) -> torch.Tensor:
-    """Compute the logit cell probability prior per droplet based on counts"""
+    """Compute a per-droplet logit cell-probability prior from UMI counts.
+
+    Droplets well below the empty/cell boundary get a strongly negative logit
+    (surely empty); droplets at or above the expected cell size get a strongly
+    positive logit (surely cell); all others get the naive prior.
+    """
     ones = torch.ones_like(log_counts)
-    p_logit_prior = ones * naive_p_logit_prior
-    p_logit_prior = torch.where(
+    p_logit_prior_n = ones * naive_p_logit_prior
+    p_logit_prior_n = torch.where(
         log_counts <= (torch.as_tensor(surely_empty_counts, dtype=log_counts.dtype).log() + log_cell_prior_counts) / 2,
         ones * -100.0,
-        p_logit_prior,
+        p_logit_prior_n,
     )
-    p_logit_prior = torch.where(log_counts >= log_cell_prior_counts, ones * consts.REG_LOGIT_MEAN, p_logit_prior)
-    return p_logit_prior
+    p_logit_prior_n = torch.where(
+        log_counts >= log_cell_prior_counts,
+        ones * consts.REG_LOGIT_MEAN,
+        p_logit_prior_n,
+    )
+    return p_logit_prior_n
 
 
 def get_rho() -> Optional[np.ndarray]:
-    """Get ambient RNA expression for 'empty' droplets.
-
-    Return:
-        chi_ambient: The ambient gene expression profile, as a normalized
-            vector that sums to one.
-
-    Note:
-        Inference must have been performed on a model with a 'chi_ambient'
-        hyperparameter prior to making this call.
-
-    """
-
+    """Return (alpha, beta) of the learned rho posterior, or None."""
     rho = None
-
-    if "rho_alpha" in pyro.get_param_store().keys() and "rho_beta" in pyro.get_param_store().keys():
-        rho = np.array([to_ndarray(pyro.param("rho_alpha")).item(), to_ndarray(pyro.param("rho_beta")).item()])
-
+    if "rho_alpha" in pyro.get_param_store() and "rho_beta" in pyro.get_param_store():
+        rho = np.array(
+            [
+                to_ndarray(pyro.param("rho_alpha")).item(),
+                to_ndarray(pyro.param("rho_beta")).item(),
+            ]
+        )
     return rho
 
 
 def get_param_store_key(key: str) -> Union[np.ndarray, None]:
     val = None
-
-    if key in pyro.get_param_store().keys():
+    if key in pyro.get_param_store():
         val = to_ndarray(pyro.param(key)).squeeze()
-
     return val
 
 
 def to_ndarray(x: Union[Number, np.ndarray, torch.Tensor]) -> np.ndarray:
-    """Convert a numeric value or array to a numpy array on cpu."""
-
+    """Convert a numeric value or array to a numpy array on CPU."""
     if type(x) is np.ndarray:
         return x
-
     elif type(x) is torch.Tensor:
         return x.detach().cpu().numpy()
-
-    elif type(x) is Number:
+    elif isinstance(x, Number):
         return np.array(x)
-
     else:
         raise TypeError(f"to_ndarray() received input of type {type(x)}")
