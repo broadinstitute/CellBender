@@ -585,7 +585,11 @@ class GuidePerturbationModality(ModalityModule):
     chi_ambient_init: torch.Tensor
     z_loc_prior: torch.Tensor
     z_scale_prior: torch.Tensor
-    transform_params: Optional[torch.Tensor]
+    transform_mean: Optional[torch.Tensor]
+    transform_std: Optional[torch.Tensor]
+    transform_hvg_indices: Optional[torch.Tensor]
+    transform_clamp_min: torch.Tensor
+    transform_clamp_max: torch.Tensor
 
     def __init__(
         self,
@@ -594,7 +598,11 @@ class GuidePerturbationModality(ModalityModule):
         encoder: nn.Module,
         decoder: nn.Module,
         device: str = "cpu",
-        transform_params: Optional[torch.Tensor] = None,
+        transform_mean: Optional[torch.Tensor] = None,
+        transform_std: Optional[torch.Tensor] = None,
+        transform_hvg_indices: Optional[torch.Tensor] = None,
+        transform_clamp_min: float = -5.0,
+        transform_clamp_max: float = 5.0,
     ):
         super().__init__(priors, feature_indices_f, encoder, decoder, device)
         self.z_dim = cast(int, decoder.input_dim)
@@ -608,29 +616,44 @@ class GuidePerturbationModality(ModalityModule):
         self.register_buffer("z_scale_prior", torch.ones(self.z_dim).float())
 
         # Precomputed static transform for the encoder input.
-        # Shape and semantics are transform-specific (e.g. (n_gex_features,) mean
-        # and variance tensors for t-statistic normalization).
-        # None until the upstream pipeline provides it.
-        if transform_params is not None:
-            self.register_buffer("transform_params", transform_params.float())
-        else:
-            self.transform_params = None
+        # These are registered as None-able buffers so they survive checkpoint
+        # round-trips.  All three must be provided together; a missing set
+        # causes _apply_transform to raise at runtime.
+        self.register_buffer(
+            "transform_mean",
+            transform_mean.float() if transform_mean is not None else None,
+        )
+        self.register_buffer(
+            "transform_std",
+            transform_std.float() if transform_std is not None else None,
+        )
+        self.register_buffer(
+            "transform_hvg_indices",
+            transform_hvg_indices.long() if transform_hvg_indices is not None else None,
+        )
+        self.register_buffer("transform_clamp_min", torch.tensor(transform_clamp_min).float())
+        self.register_buffer("transform_clamp_max", torch.tensor(transform_clamp_max).float())
 
     def _apply_transform(self, x_gex_nf: torch.Tensor) -> torch.Tensor:
-        """Apply the static precomputed transform to GE counts.
+        """Select HVG columns from GEX counts and z-score using control cell statistics.
 
-        Currently a placeholder: returns log1p(x_gex) normalised by transform_params
-        if available, otherwise log1p(x_gex) directly.
+        Transform: select HVGs → log1p → z-score (mean/std from negative control
+        cells) → clamp to data-derived bounds.
 
-        Replace with the concrete t-statistic transform once the upstream pipeline
-        supplies transform_params.
+        The encoder expects input of shape (N, n_hvg) — not (N, n_gex).
         """
-        x = x_gex_nf.log1p()
-        if self.transform_params is not None:
-            mean = self.transform_params[0]
-            std = self.transform_params[1].clamp(min=1e-6)
-            x = (x - mean) / std
-        return x
+        if self.transform_hvg_indices is None:
+            raise RuntimeError(
+                "GuidePerturbationModality transform parameters are not set.  "
+                "Ensure compute_guide_transform_params() was called and its results "
+                "were passed to the constructor via transform_mean / transform_std / "
+                "transform_hvg_indices."
+            )
+        x = x_gex_nf[:, self.transform_hvg_indices].log1p()
+        if self.transform_mean is not None and self.transform_std is not None:
+            std = self.transform_std.clamp(min=1e-6)
+            x = (x - self.transform_mean) / std
+        return x.clamp(self.transform_clamp_min.item(), self.transform_clamp_max.item())
 
     # --- Routing ---
 

@@ -386,6 +386,28 @@ def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubP
         "will be slightly slower due to disk I/O (68%% speed on test data).",
     )
     subparser.add_argument(
+        "--negative-control-guide-feature",
+        type=str,
+        default="negative_control",
+        dest="negative_control_guide_feature",
+        help="Name (or comma-separated names) identifying the negative control guide "
+        "feature(s) in a CRISPR Guide Capture dataset.  A guide feature matches if "
+        "any supplied string is a substring of its name (case-sensitive).  Only "
+        "relevant when the input contains CRISPR Guide Capture features.  "
+        "Default: 'negative_control'.",
+    )
+    subparser.add_argument(
+        "--num-guide-hvgs",
+        type=int,
+        default=2000,
+        dest="num_guide_hvgs",
+        help="Number of highly variable genes to use as input to the guide perturbation "
+        "encoder.  HVGs are selected by the ratio of total-cell variance to negative "
+        "control cell variance of log1p gene expression, after excluding genes detected "
+        "in fewer than 5%% of high-confidence cells.  Only relevant when the input "
+        "contains CRISPR Guide Capture features.  Default: 2000.",
+    )
+    subparser.add_argument(
         "--no-report",
         dest="no_report",
         action="store_true",

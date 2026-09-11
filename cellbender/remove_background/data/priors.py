@@ -502,6 +502,9 @@ def get_all_priors(
         # crossover values are filled in at the end after all overrides
         "log_counts_crossover_gex": None,
         "surely_empty_counts_gex": None,
+        # Descending sort of all droplets by GEX UMI count; used downstream
+        # (e.g. guide transform computation) to identify high-confidence cells.
+        "gex_sort_order": gex_sort_order,
         "modalities": {
             GEX_FEATURE_TYPE: {
                 "cell_counts": gex_priors["cell_counts"],

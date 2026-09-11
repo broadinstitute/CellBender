@@ -32,11 +32,13 @@ from cellbender.remove_background.checkpoint import (
 from cellbender.remove_background.data.dataprep import DataLoader, reconstruct_loader
 from cellbender.remove_background.data.dataprep import prep_sparse_data_for_training as prep_data_for_training
 from cellbender.remove_background.data.dataset import SingleCellRNACountsDataset, get_dataset_obj
+from cellbender.remove_background.data.guide_transform import _decode_names, compute_guide_transform_params
 from cellbender.remove_background.estimation import MAP, Mean, MultipleChoiceKnapsack, SingleSample, ThresholdCDF
 from cellbender.remove_background.exceptions import ElboException
 from cellbender.remove_background.modality import (
     ATACModality,
     GeneExpressionModality,
+    GuidePerturbationModality,
     ModalityModule,
     ModalityPriors,
     ProteinModality,
@@ -865,6 +867,100 @@ def _build_model(
             z_dim=args.z_dim,
         )
         logger.debug(f"Built {mod_name} modality with {n_ft} features")
+
+    # --- CRISPR guide capture modality ---
+    if consts.CRISPR_FEATURE_TYPE in modality_feature_indices:
+        guide_indices = modality_feature_indices[consts.CRISPR_FEATURE_TYPE]
+        n_guide = int(guide_indices.shape[0])
+
+        assert dataset_obj.data is not None
+        neg_ctrl_names = [s.strip() for s in args.negative_control_guide_feature.split(",")]
+
+        # Use the raw (pre-filtering) matrix to identify negative control cells.
+        # The negative control guide may have very low ambient signal and be
+        # excluded from CellBender's noise analysis, but we still need its
+        # counts to identify which cells are negative controls for the encoder
+        # transform.  The ValueError for missing feature names is raised here,
+        # before passing pre-computed count vectors into the transform function.
+        raw_feature_names = _decode_names(dataset_obj.data["gene_names"])
+        raw_feature_types = dataset_obj.data["feature_types"]
+        raw_crispr_mask = raw_feature_types == consts.CRISPR_FEATURE_TYPE
+        raw_guide_names = raw_feature_names[raw_crispr_mask]
+
+        neg_ctrl_col_mask = np.zeros(len(raw_guide_names), dtype=bool)
+        for pattern in neg_ctrl_names:
+            neg_ctrl_col_mask |= np.array([pattern in name for name in raw_guide_names])
+
+        if not neg_ctrl_col_mask.any():
+            preview = list(raw_guide_names[:20])
+            suffix = "..." if len(raw_guide_names) > 20 else ""
+            raise ValueError(
+                f"No CRISPR guide features matched the negative control name(s) "
+                f"{neg_ctrl_names!r}.  "
+                f"Available guide feature names (first 20): {preview}{suffix}.  "
+                f"Use --negative-control-guide-feature with a comma-separated list "
+                f"of name substrings that match your negative control guides."
+            )
+        logger.debug(
+            f"Found {neg_ctrl_col_mask.sum()} negative control guide feature(s) "
+            f"matching {neg_ctrl_names!r} in the raw (unfiltered) matrix"
+        )
+
+        # Slice raw matrix to analyzed barcodes; row order matches count_matrix.
+        raw_guide_mat = dataset_obj.data["matrix"][dataset_obj.analyzed_barcode_inds, :][:, raw_crispr_mask].tocsr()
+        raw_neg_ctrl_counts_n = np.asarray(raw_guide_mat[:, neg_ctrl_col_mask].sum(axis=1)).ravel()
+        raw_total_guide_counts_n = np.asarray(raw_guide_mat.sum(axis=1)).ravel()
+
+        tp = compute_guide_transform_params(
+            count_matrix=count_matrix,
+            analyzed_feature_types=dataset_obj.analyzed_feature_types,
+            raw_neg_ctrl_counts_n=raw_neg_ctrl_counts_n,
+            raw_total_guide_counts_n=raw_total_guide_counts_n,
+            gex_sort_order=priors["gex_sort_order"],
+            expected_cells=int(priors["expected_cells"]),
+            num_hvgs=args.num_guide_hvgs,
+        )
+
+        # Encoder input is z-scored HVG features; no further transform needed.
+        guide_encoder = EncodeZ(
+            input_dim=tp.n_hvg,
+            hidden_dims=args.z_hidden_dims,
+            output_dim=args.z_dim,
+            use_batch_norm=False,
+            use_layer_norm=False,
+            input_transform=None,
+        )
+        # Decoder: z_guide → chi over guide features.
+        guide_decoder = Decoder(
+            input_dim=args.z_dim,
+            hidden_dims=args.z_hidden_dims[::-1],
+            use_batch_norm=True,
+            use_layer_norm=False,
+            output_dim=n_guide,
+        )
+        guide_mod_priors_dict = priors["modalities"][consts.CRISPR_FEATURE_TYPE]
+        guide_priors = ModalityPriors(
+            d_cell_loc_prior=np.log1p(guide_mod_priors_dict["cell_counts"]),
+            d_cell_scale_prior=guide_mod_priors_dict["d_std"],
+            d_empty_loc_prior=np.log1p(guide_mod_priors_dict["empty_counts"]),
+            d_empty_scale_prior=guide_mod_priors_dict["d_empty_std"],
+            chi_ambient_init=_slice_chi(guide_indices, n_guide),
+        )
+        modalities["guide_perturbation"] = GuidePerturbationModality(
+            priors=guide_priors,
+            feature_indices_f=guide_indices,
+            encoder=guide_encoder,
+            decoder=guide_decoder,
+            transform_mean=torch.from_numpy(tp.mean_ctrl),
+            transform_std=torch.from_numpy(tp.std_ctrl),
+            transform_hvg_indices=torch.from_numpy(tp.hvg_indices),
+            transform_clamp_min=tp.clamp_min,
+            transform_clamp_max=tp.clamp_max,
+        )
+        logger.info(
+            f"Built guide_perturbation modality with {n_guide} guide features, "
+            f"{tp.n_hvg} HVGs, and {tp.n_control_cells} negative control cells"
+        )
 
     return RemoveBackgroundPyroModel(
         modalities=nn.ModuleDict(modalities),
