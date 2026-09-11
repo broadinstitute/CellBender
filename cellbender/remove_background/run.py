@@ -43,7 +43,7 @@ from cellbender.remove_background.modality import (
     ModalityPriors,
     ProteinModality,
 )
-from cellbender.remove_background.model import RemoveBackgroundPyroModel
+from cellbender.remove_background.model import RemoveBackgroundPyroModel, get_chi_ambient, get_phi, get_rho
 from cellbender.remove_background.posterior import (
     Posterior,
     compute_mean_target_removal_as_function,
@@ -299,22 +299,22 @@ def compute_output_denoised_counts_and_metrics(
     ambient_expression[gex_raw_inds] = ambient_expression_trimmed
     del ambient_expression_trimmed
 
-    rho = None
-    if ("rho_alpha" in pyro.get_param_store().keys()) and ("rho_beta" in pyro.get_param_store().keys()):
-        rho = np.array(
-            [
-                pyro.param("rho_alpha").detach().cpu().numpy().item(),
-                pyro.param("rho_beta").detach().cpu().numpy().item(),
-            ]
-        )
+    rho_per_modality: Dict[str, np.ndarray] = get_rho() or {}
+    # Legacy scalar key for backward compat with downstream readers that expect it.
+    rho_legacy = rho_per_modality.get("gene_expression", None)
 
     global_latents: Dict[str, Any] = {
         "ambient_expression": ambient_expression,
         "empty_droplet_size_lognormal_loc": np.array(pyro.param("d_empty_loc_gene_expression").item()),
         "empty_droplet_size_lognormal_scale": np.array(pyro.param("d_empty_scale_gene_expression").item()),
         "cell_size_lognormal_std": np.array(pyro.param("d_cell_scale_gene_expression").item()),
-        "swapping_fraction_dist_params": rho,
+        "swapping_fraction_dist_params": rho_legacy,
     }
+    global_latents.update({f"chi_ambient_{k}": v for k, v in get_chi_ambient().items()})
+    for k, phi in get_phi().items():
+        global_latents[f"phi_loc_{k}"] = np.array(phi[0])
+        global_latents[f"phi_scale_{k}"] = np.array(phi[1])
+    global_latents.update({f"rho_{k}": v for k, v in rho_per_modality.items()})
     pyro.clear_param_store()
     logger.debug("Pyro param store cleared after extracting global latents.")
 
@@ -777,11 +777,18 @@ def _build_model(
     )
     n_gex = int(gex_indices.shape[0])
     gex_mod_priors = priors["modalities"][consts.GEX_FEATURE_TYPE]
+    include_rho = args.model in ("full", "swapping")
 
     def _slice_chi(indices: torch.Tensor, n_features: int) -> torch.Tensor:
         chi = chi_ambient_all[indices]
         total = chi.sum()
         return (chi / total) if total > 0 else torch.ones(n_features) / n_features
+
+    def _chi_bar_for_indices(indices: torch.Tensor, n_features: int) -> torch.Tensor:
+        """Compute population-average profile for a modality (law of mass action)."""
+        ep = np.finfo(np.float32).eps.item()
+        counts = np.array(count_matrix[:, indices.numpy()].sum(axis=0)).squeeze() + ep
+        return torch.tensor(counts / counts.sum()).float()
 
     # --- GEX modality ---
     encoder_z = EncodeZ(
@@ -815,7 +822,8 @@ def _build_model(
         d_empty_loc_prior=np.log1p(gex_mod_priors["empty_counts"]),
         d_empty_scale_prior=gex_mod_priors["d_empty_std"],
         chi_ambient_init=_slice_chi(gex_indices, n_gex),
-        chi_bar=priors.get("chi_bar"),
+        chi_bar=_chi_bar_for_indices(gex_indices, n_gex),
+        include_rho=include_rho,
     )
     ge_modality = GeneExpressionModality(
         priors=gex_priors,
@@ -858,6 +866,8 @@ def _build_model(
             d_empty_loc_prior=np.log1p(sec_mod_priors_dict["empty_counts"]),
             d_empty_scale_prior=sec_mod_priors_dict["d_empty_std"],
             chi_ambient_init=_slice_chi(ft_indices, n_ft),
+            chi_bar=_chi_bar_for_indices(ft_indices, n_ft),
+            include_rho=include_rho,
         )
         modalities[mod_name] = ModClass(
             priors=sec_priors,
@@ -883,13 +893,13 @@ def _build_model(
         # transform.  The ValueError for missing feature names is raised here,
         # before passing pre-computed count vectors into the transform function.
         raw_feature_names = _decode_names(dataset_obj.data["gene_names"])
-        raw_feature_types = dataset_obj.data["feature_types"]
+        raw_feature_types = _decode_names(dataset_obj.data["feature_types"])
         raw_crispr_mask = raw_feature_types == consts.CRISPR_FEATURE_TYPE
         raw_guide_names = raw_feature_names[raw_crispr_mask]
 
         neg_ctrl_col_mask = np.zeros(len(raw_guide_names), dtype=bool)
         for pattern in neg_ctrl_names:
-            neg_ctrl_col_mask |= np.array([pattern in name for name in raw_guide_names])
+            neg_ctrl_col_mask |= np.array([pattern in name for name in raw_guide_names], dtype=bool)
 
         if not neg_ctrl_col_mask.any():
             preview = list(raw_guide_names[:20])
@@ -945,6 +955,8 @@ def _build_model(
             d_empty_loc_prior=np.log1p(guide_mod_priors_dict["empty_counts"]),
             d_empty_scale_prior=guide_mod_priors_dict["d_empty_std"],
             chi_ambient_init=_slice_chi(guide_indices, n_guide),
+            chi_bar=_chi_bar_for_indices(guide_indices, n_guide),
+            include_rho=include_rho,
         )
         modalities["guide_perturbation"] = GuidePerturbationModality(
             priors=guide_priors,

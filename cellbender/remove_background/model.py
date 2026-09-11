@@ -3,8 +3,9 @@
 RemoveBackgroundPyroModel is the orchestrator.  It owns a registry of
 ModalityModule instances (one per assay modality) and delegates all
 modality-specific Pyro calls to them.  Global quantities shared across
-modalities (cell probability y_n, ambient scaling epsilon_n, RNA swapping
-fraction rho_n) are sampled here.
+modalities (cell probability y_n, ambient scaling epsilon_n) are sampled here.
+Per-modality PCR-chimera swapping fractions (rho_n_{name}) are sampled inside
+each ModalityModule's model_per_droplet / guide_per_droplet methods.
 
 Variable naming convention
 --------------------------
@@ -25,7 +26,6 @@ import pyro.poutine as poutine
 import torch
 import torch.nn as nn
 from pyro.infer import config_enumerate
-from torch.distributions import constraints
 
 import cellbender.remove_background.consts as consts
 from cellbender.remove_background.distributions.NullDist import NullDist
@@ -64,9 +64,6 @@ class RemoveBackgroundPyroModel(nn.Module):
         p_logit_prior: float,
         use_cuda: bool,
         epsilon_prior: float = consts.EPSILON_PRIOR,
-        rho_alpha_prior: float = consts.RHO_ALPHA_PRIOR,
-        rho_beta_prior: float = consts.RHO_BETA_PRIOR,
-        include_rho: bool = False,
         include_empties: bool = True,
         model_type: str = "full",
         z_hidden_dims: Optional[List[int]] = None,
@@ -76,7 +73,6 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.modalities: nn.ModuleDict = modalities
         self.n_droplets = n_droplets
         self.include_empties = include_empties
-        self.include_rho = include_rho
         self.model_type = model_type
         self.log_counts_crossover = log_counts_crossover
         self.counts_crossover = np.exp(log_counts_crossover)
@@ -99,8 +95,6 @@ class RemoveBackgroundPyroModel(nn.Module):
         self.epsilon_prior = torch.tensor(epsilon_prior).to(self.device)
         self.p_logit_prior = torch.tensor(p_logit_prior).float().to(self.device)
         self.empty_UMI_threshold = torch.tensor(empty_UMI_threshold).float().to(self.device)
-        self.rho_alpha_prior = rho_alpha_prior * torch.ones([]).to(self.device)
-        self.rho_beta_prior = rho_beta_prior * torch.ones([]).to(self.device)
 
         # Convenience reference to GE modality (always required).
         assert "gene_expression" in modalities, "modalities must include 'gene_expression'"
@@ -113,6 +107,11 @@ class RemoveBackgroundPyroModel(nn.Module):
     @property
     def n_genes(self) -> int:
         return int(self._gene_expression.feature_indices_f.shape[0])
+
+    @property
+    def include_rho(self) -> bool:
+        """True if any modality models the PCR-chimera / swapping fraction."""
+        return self._gene_expression.include_rho
 
     # ------------------------------------------------------------------
     # Utility
@@ -154,11 +153,6 @@ class RemoveBackgroundPyroModel(nn.Module):
         for name, mod in self._iter_modalities():
             global_model_params[name] = mod.model_global()
 
-        # Global RNA-swapping fraction rho_n prior parameters.
-        if self.include_rho:
-            rho_alpha = self.rho_alpha_prior
-            rho_beta = self.rho_beta_prior
-
         # --- Inside plate: per-droplet sampling ---
 
         # Total UMI counts used for cell/empty classification (from
@@ -181,14 +175,6 @@ class RemoveBackgroundPyroModel(nn.Module):
                     rate=self.epsilon_prior,
                 ).expand([N]),
             )
-
-            if self.include_rho:
-                rho_n = pyro.sample(
-                    "rho_n",
-                    dist.Beta(rho_alpha, rho_beta).expand([N]),
-                )
-            else:
-                rho_n = None
 
             if self.include_empties:
                 p_logit_prior_n = get_p_logit_prior(
@@ -223,12 +209,11 @@ class RemoveBackgroundPyroModel(nn.Module):
                 phi = global_model_params[name]["phi"]
                 chi_ambient_f = global_model_params[name]["chi_ambient_f"]
 
-                d_cell_n, d_empty_n = mod.model_per_droplet(
+                d_cell_n, d_empty_n, rho_n = mod.model_per_droplet(
                     x_nf=x_mod_nf,
                     empty_mask_n=empty_mask_n,
                     epsilon_n=epsilon_n,
                     y_n=y_n,
-                    rho_n=rho_n,
                     phi=phi,
                 )
 
@@ -236,7 +221,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 decoder_input = mod.prepare_decoder_input(latents_dict)
                 chi_nf = pyro.deterministic(f"chi_{name}", mod.decode(decoder_input), event_dim=1)
 
-                # Compute mean signal and ambient rates.
+                # Compute mean signal and ambient rates using per-modality rho.
                 mu_nf = calculate_mu(
                     epsilon_n=epsilon_n,
                     d_cell_n=d_cell_n,
@@ -369,19 +354,6 @@ class RemoveBackgroundPyroModel(nn.Module):
         for name, mod in self._iter_modalities():
             global_guide_params[name] = mod.guide_global()
 
-        # Global rho variational parameters.
-        if self.include_rho:
-            rho_alpha = pyro.param(
-                "rho_alpha",
-                self.rho_alpha_prior.clone(),
-                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
-            )
-            rho_beta = pyro.param(
-                "rho_beta",
-                self.rho_beta_prior.clone(),
-                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
-            )
-
         # --- Run GE encoder before entering the plate ---
         # The GE encoder output is needed for the global p_n and epsilon_n sites,
         # which must be sampled inside the plate.  Running it here avoids a
@@ -393,9 +365,6 @@ class RemoveBackgroundPyroModel(nn.Module):
         # --- Inside plate ---
 
         with pyro.plate("data", N, use_cuda=self.use_cuda, device=self.device):
-            if self.include_rho:
-                pyro.sample("rho_n", dist.Beta(rho_alpha, rho_beta).expand([N]))
-
             if self.include_empties:
                 # p regularisation and passback (GE-only global supervision sites).
                 pyro.sample("p_logit_reg", dist.Normal(loc=enc_gex["p_y"], scale=consts.P_LOGIT_SCALE))
@@ -442,8 +411,10 @@ class RemoveBackgroundPyroModel(nn.Module):
                 x_mod_nf = raw_data_dict[name]
                 mod.guide_per_droplet(x_mod_nf, prob_n)
 
-        # Clear GE encoder cache to avoid stale tensors between training steps.
-        self._gene_expression._enc_cache = None
+        # Clear encoder caches to avoid stale tensors between training steps.
+        for _, mod in self._iter_modalities():
+            if hasattr(mod, "_enc_cache"):
+                mod._enc_cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -478,17 +449,45 @@ def get_p_logit_prior(
     return p_logit_prior_n
 
 
-def get_rho() -> Optional[np.ndarray]:
-    """Return (alpha, beta) of the learned rho posterior, or None."""
-    rho = None
-    if "rho_alpha" in pyro.get_param_store() and "rho_beta" in pyro.get_param_store():
-        rho = np.array(
-            [
-                to_ndarray(pyro.param("rho_alpha")).item(),
-                to_ndarray(pyro.param("rho_beta")).item(),
-            ]
-        )
-    return rho
+def get_modality_params(*prefixes: str) -> Dict[str, np.ndarray]:
+    """Collect param store entries by prefix into {modality_name: array}.
+
+    Single prefix (e.g. "chi_ambient_"): returns the full param array per name.
+    Multiple prefixes (e.g. "rho_alpha_", "rho_beta_"): stacks scalar items
+    from each prefix into a 1-D array; entries are included only when ALL
+    prefixes are present.
+    """
+    param_store = pyro.get_param_store()
+    keys = set(param_store.keys())
+    result: Dict[str, np.ndarray] = {}
+    first = prefixes[0]
+    for key in keys:
+        if not key.startswith(first):
+            continue
+        mod_name = key[len(first) :]
+        if not all(f"{p}{mod_name}" in keys for p in prefixes[1:]):
+            continue
+        if len(prefixes) == 1:
+            result[mod_name] = to_ndarray(pyro.param(key))
+        else:
+            result[mod_name] = np.array([to_ndarray(pyro.param(f"{p}{mod_name}")).item() for p in prefixes])
+    return result
+
+
+def get_rho() -> Optional[Dict[str, np.ndarray]]:
+    """Return per-modality [alpha, beta] of the learned rho posteriors, or None."""
+    result = get_modality_params("rho_alpha_", "rho_beta_")
+    return result if result else None
+
+
+def get_chi_ambient() -> Dict[str, np.ndarray]:
+    """Return per-modality ambient expression profile arrays."""
+    return get_modality_params("chi_ambient_")
+
+
+def get_phi() -> Dict[str, np.ndarray]:
+    """Return per-modality [phi_loc, phi_scale] overdispersion params."""
+    return get_modality_params("phi_loc_", "phi_scale_")
 
 
 def get_param_store_key(key: str) -> Union[np.ndarray, None]:

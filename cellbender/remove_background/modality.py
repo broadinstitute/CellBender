@@ -72,8 +72,12 @@ class ModalityPriors:
     chi_ambient_init: torch.Tensor
     phi_loc_prior: float = consts.PHI_LOC_PRIOR
     phi_scale_prior: float = consts.PHI_SCALE_PRIOR
-    # Mean cell expression profile.  Populated only for GE (used in swapping model).
+    # Mean cell expression profile used in the RNA-swapping model.
     chi_bar: Optional[torch.Tensor] = None
+    # Per-modality RNA swapping / PCR-chimera fraction.
+    include_rho: bool = False
+    rho_alpha_prior: float = consts.RHO_ALPHA_PRIOR
+    rho_beta_prior: float = consts.RHO_BETA_PRIOR
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ class ModalityModule(nn.Module, ABC):
     In model():
       Outside plate: model_global() -> dict with 'phi', 'chi_ambient_f'
       Inside  plate: model_latent(N) -> z_nk
-                     model_per_droplet(...) -> (d_cell_n, d_empty_n)
+                     model_per_droplet(...) -> (d_cell_n, d_empty_n, rho_n)
 
     In guide():
       Outside plate: guide_global() -> dict with 'phi'
@@ -104,6 +108,8 @@ class ModalityModule(nn.Module, ABC):
     feature_indices_f: torch.Tensor
     phi_conc_prior: torch.Tensor
     phi_rate_prior: torch.Tensor
+    rho_alpha_prior_buf: torch.Tensor
+    rho_beta_prior_buf: torch.Tensor
     encoder: nn.Module
     decoder: nn.Module
 
@@ -120,11 +126,14 @@ class ModalityModule(nn.Module, ABC):
         self.encoder = encoder
         self.decoder = decoder
         self.device = device
+        self.include_rho: bool = priors.include_rho
         self.register_buffer("feature_indices_f", feature_indices_f)
         phi_conc = priors.phi_loc_prior**2 / priors.phi_scale_prior**2
         phi_rate = priors.phi_loc_prior / priors.phi_scale_prior**2
         self.register_buffer("phi_conc_prior", torch.tensor(phi_conc).float())
         self.register_buffer("phi_rate_prior", torch.tensor(phi_rate).float())
+        self.register_buffer("rho_alpha_prior_buf", torch.tensor(priors.rho_alpha_prior).float())
+        self.register_buffer("rho_beta_prior_buf", torch.tensor(priors.rho_beta_prior).float())
 
     # --- Abstract identity properties ---
 
@@ -147,7 +156,7 @@ class ModalityModule(nn.Module, ABC):
         ...
 
     # Convenience property: average expression profile for swapping model.
-    # Subclasses that use it (GE) override to return their buffer.
+    # Subclasses that use it override to return their buffer.
     @property
     def chi_bar_f(self) -> Optional[torch.Tensor]:
         return None
@@ -160,10 +169,7 @@ class ModalityModule(nn.Module, ABC):
         raw_data_dict: Dict[str, torch.Tensor],
         transforms: Optional[dict] = None,
     ) -> torch.Tensor:
-        """Select / transform raw features to produce this modality's encoder input.
-
-        raw_data_dict keys are modality names; values are (N, n_features_m) tensors.
-        """
+        """Select / transform raw features to produce this modality's encoder input."""
         ...
 
     @abstractmethod
@@ -185,12 +191,7 @@ class ModalityModule(nn.Module, ABC):
 
     @abstractmethod
     def model_latent(self, n_droplets: int) -> Optional[torch.Tensor]:
-        """Sample z_nk from the prior inside pyro.plate.
-
-        Modalities that own their own z must contain
-        pyro.sample(f'z_{self.name}', prior) and return z_nk of shape (N, z_dim).
-        Modalities that share GEX z (e.g. ATAC, Protein) return None.
-        """
+        """Sample z_nk from the prior inside pyro.plate."""
         ...
 
     @abstractmethod
@@ -200,14 +201,13 @@ class ModalityModule(nn.Module, ABC):
         empty_mask_n: torch.Tensor,
         epsilon_n: torch.Tensor,
         y_n: torch.Tensor,
-        rho_n: Optional[torch.Tensor],
         phi: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Sample per-droplet parameters inside pyro.plate.
 
-        Must sample d_cell_{name} and d_empty_{name} and emit the
-        obs_empty_{name} ambient regularization site.
-        Returns (d_cell_n, d_empty_n).
+        Must sample d_cell_{name}, d_empty_{name}, emit obs_empty_{name}, and
+        (when include_rho) sample rho_n_{name}.
+        Returns (d_cell_n, d_empty_n, rho_n).  rho_n is None when not include_rho.
         """
         ...
 
@@ -224,20 +224,11 @@ class ModalityModule(nn.Module, ABC):
 
     @abstractmethod
     def guide_latent(self, encoder_input_nf: torch.Tensor) -> Optional[torch.Tensor]:
-        """Run encoder and sample z_nk from variational inside pyro.plate.
-
-        Modalities that own their own z must contain
-        pyro.sample(f'z_{self.name}', variational) and return z_nk.
-        Modalities that share GEX z (e.g. ATAC, Protein) return None.
-        """
+        """Run encoder and sample z_nk from variational inside pyro.plate."""
         ...
 
     def guide_epsilon_dist(self, enc_output: dict) -> Optional[dist.Distribution]:
-        """Return the variational distribution for global epsilon_n, or None.
-
-        The orchestrator samples epsilon_n using this distribution (only the
-        modality with contributes_to_epsilon_inference=True returns non-None).
-        """
+        """Return the variational distribution for global epsilon_n, or None."""
         return None
 
     @abstractmethod
@@ -248,7 +239,8 @@ class ModalityModule(nn.Module, ABC):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Sample per-droplet variational parameters inside pyro.plate.
 
-        Must sample d_cell_{name} and d_empty_{name}.
+        Must sample d_cell_{name}, d_empty_{name}, and (when include_rho)
+        rho_n_{name}.
         Returns (d_cell_n, d_empty_n).
         """
         ...
@@ -324,6 +316,7 @@ class GeneExpressionModality(ModalityModule):
     Informs: cell probability (p_n), ambient scaling (epsilon_n), z.
     Owns:    chi_ambient_gene_expression (simplex param), d_empty_gene_expression,
              d_cell_gene_expression, phi_gene_expression.
+             When include_rho: rho_n_gene_expression (per-modality swapping fraction).
     """
 
     name = "gene_expression"
@@ -365,7 +358,6 @@ class GeneExpressionModality(ModalityModule):
         else:
             self._chi_bar_f = None
 
-        # Ephemeral cache populated by run_encoder() during each guide() call.
         self._enc_cache = None
 
     @property
@@ -383,14 +375,8 @@ class GeneExpressionModality(ModalityModule):
     # --- GE-specific: run the full composite encoder once ---
 
     def run_encoder(self, x_gex_nf: torch.Tensor) -> dict:
-        """Run composite encoder (EncodeZ + EncodeNonZLatents) and cache the result.
-
-        The orchestrator's guide() calls this once before the pyro.plate so that
-        p_y and epsilon outputs are available for global site sampling.  The
-        cached result is reused by guide_latent() and guide_per_droplet().
-        """
+        """Run composite encoder (EncodeZ + EncodeNonZLatents) and cache the result."""
         chi_ambient_f = pyro.param(f"chi_ambient_{self.name}")
-        # d_empty_loc may not exist on the very first call; use the prior as fallback.
         param_store = pyro.get_param_store()
         d_empty_loc_key = f"d_empty_loc_{self.name}"
         if d_empty_loc_key in param_store:
@@ -426,7 +412,9 @@ class GeneExpressionModality(ModalityModule):
             dist.Normal(self.z_loc_prior, self.z_scale_prior).expand_by([n_droplets]).to_event(1),
         )
 
-    def model_per_droplet(self, x_nf, empty_mask_n, epsilon_n, y_n, rho_n, phi) -> Tuple[torch.Tensor, torch.Tensor]:
+    def model_per_droplet(
+        self, x_nf, empty_mask_n, epsilon_n, y_n, phi
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         chi_ambient_f = pyro.param(f"chi_ambient_{self.name}")
 
         d_empty_n = pyro.sample(
@@ -437,6 +425,15 @@ class GeneExpressionModality(ModalityModule):
             f"d_cell_{self.name}",
             dist.LogNormal(self.d_cell_loc_prior, self.d_cell_scale_prior).expand([x_nf.shape[0]]),
         )
+
+        # Sample per-modality PCR-chimera / swapping fraction.
+        if self.include_rho:
+            rho_n: Optional[torch.Tensor] = pyro.sample(
+                f"rho_n_{self.name}",
+                dist.Beta(self.rho_alpha_prior_buf, self.rho_beta_prior_buf).expand([x_nf.shape[0]]),
+            )
+        else:
+            rho_n = None
 
         # Semi-supervise chi_ambient using known empty droplets.
         with poutine.mask(mask=empty_mask_n):
@@ -457,13 +454,11 @@ class GeneExpressionModality(ModalityModule):
                     obs=x_nf,
                 )
 
-        return d_cell_n, d_empty_n
+        return d_cell_n, d_empty_n, rho_n
 
     # --- Guide ---
 
     def guide_global(self) -> dict:
-        # chi_ambient must be declared in the guide as well as the model so that
-        # run_encoder() can read it during guide execution.
         chi_ambient_f = pyro.param(
             f"chi_ambient_{self.name}",
             self.chi_ambient_init,
@@ -482,6 +477,18 @@ class GeneExpressionModality(ModalityModule):
         phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
         phi_rate = phi_loc / phi_scale.pow(2)
         phi = pyro.sample(f"phi_{self.name}", dist.Gamma(phi_conc, phi_rate))
+        # Declare per-modality rho variational params outside the plate.
+        if self.include_rho:
+            pyro.param(
+                f"rho_alpha_{self.name}",
+                self.rho_alpha_prior_buf.clone(),
+                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
+            )
+            pyro.param(
+                f"rho_beta_{self.name}",
+                self.rho_beta_prior_buf.clone(),
+                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
+            )
         return {"phi": phi, "chi_ambient_f": chi_ambient_f}
 
     def guide_epsilon_dist(self, enc_output: dict) -> dist.Distribution:
@@ -532,6 +539,15 @@ class GeneExpressionModality(ModalityModule):
             f"d_cell_{self.name}",
             dist.LogNormal(loc=d_cell_loc_gated, scale=d_cell_scale),
         )
+
+        if self.include_rho:
+            rho_alpha = pyro.param(f"rho_alpha_{self.name}")
+            rho_beta = pyro.param(f"rho_beta_{self.name}")
+            pyro.sample(
+                f"rho_n_{self.name}",
+                dist.Beta(rho_alpha, rho_beta).expand([x_nf.shape[0]]),
+            )
+
         return d_cell_n, d_empty_n
 
     # --- Compute ---
@@ -561,16 +577,16 @@ class GuidePerturbationModality(ModalityModule):
     counts) to capture perturbation identity.  The decoder reconstructs guide
     RNA counts from the perturbation latent z_guide_nk.
 
-    Observation model: NegativeBinomial (NB), same family as GE but typically
-    with different overdispersion.
-
-    The precomputed transform (e.g. t-statistics per gene reflecting
-    perturbation effect) must be supplied at construction time via
-    transform_params.  It is stored as a non-learnable buffer.
+    Observation model: NBPCapprox (signal NB + noise Poisson convolution),
+    consistent with the posterior noise-count estimator.
 
     cell_probability: does NOT contribute (guide capture is unreliable for
     distinguishing cells from empty droplets).
     epsilon: does NOT contribute (epsilon is inferred from GE only).
+
+    When include_rho: models per-modality PCR-chimera fraction rho_n_guide_perturbation.
+    chi_bar_guide_perturbation is the population-average guide count profile (law of
+    mass action), used in the swapping model.
     """
 
     name = "guide_perturbation"
@@ -585,6 +601,7 @@ class GuidePerturbationModality(ModalityModule):
     chi_ambient_init: torch.Tensor
     z_loc_prior: torch.Tensor
     z_scale_prior: torch.Tensor
+    _chi_bar_f_buf: Optional[torch.Tensor]
     transform_mean: Optional[torch.Tensor]
     transform_std: Optional[torch.Tensor]
     transform_hvg_indices: Optional[torch.Tensor]
@@ -615,10 +632,11 @@ class GuidePerturbationModality(ModalityModule):
         self.register_buffer("z_loc_prior", torch.zeros(self.z_dim).float())
         self.register_buffer("z_scale_prior", torch.ones(self.z_dim).float())
 
-        # Precomputed static transform for the encoder input.
-        # These are registered as None-able buffers so they survive checkpoint
-        # round-trips.  All three must be provided together; a missing set
-        # causes _apply_transform to raise at runtime.
+        if priors.chi_bar is not None:
+            self.register_buffer("_chi_bar_f_buf", priors.chi_bar.clone().float())
+        else:
+            self._chi_bar_f_buf = None
+
         self.register_buffer(
             "transform_mean",
             transform_mean.float() if transform_mean is not None else None,
@@ -634,14 +652,12 @@ class GuidePerturbationModality(ModalityModule):
         self.register_buffer("transform_clamp_min", torch.tensor(transform_clamp_min).float())
         self.register_buffer("transform_clamp_max", torch.tensor(transform_clamp_max).float())
 
+    @property
+    def chi_bar_f(self) -> Optional[torch.Tensor]:
+        return self._chi_bar_f_buf
+
     def _apply_transform(self, x_gex_nf: torch.Tensor) -> torch.Tensor:
-        """Select HVG columns from GEX counts and z-score using control cell statistics.
-
-        Transform: select HVGs → log1p → z-score (mean/std from negative control
-        cells) → clamp to data-derived bounds.
-
-        The encoder expects input of shape (N, n_hvg) — not (N, n_gex).
-        """
+        """Select HVG columns from GEX counts and z-score using control cell statistics."""
         if self.transform_hvg_indices is None:
             raise RuntimeError(
                 "GuidePerturbationModality transform parameters are not set.  "
@@ -683,7 +699,9 @@ class GuidePerturbationModality(ModalityModule):
             dist.Normal(self.z_loc_prior, self.z_scale_prior).expand_by([n_droplets]).to_event(1),
         )
 
-    def model_per_droplet(self, x_nf, empty_mask_n, epsilon_n, y_n, rho_n, phi) -> Tuple[torch.Tensor, torch.Tensor]:
+    def model_per_droplet(
+        self, x_nf, empty_mask_n, epsilon_n, y_n, phi
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         chi_ambient_f = pyro.param(f"chi_ambient_{self.name}")
 
         d_empty_n = pyro.sample(
@@ -695,15 +713,26 @@ class GuidePerturbationModality(ModalityModule):
             dist.LogNormal(self.d_cell_loc_prior, self.d_cell_scale_prior).expand([x_nf.shape[0]]),
         )
 
+        if self.include_rho:
+            rho_n: Optional[torch.Tensor] = pyro.sample(
+                f"rho_n_{self.name}",
+                dist.Beta(self.rho_alpha_prior_buf, self.rho_beta_prior_buf).expand([x_nf.shape[0]]),
+            )
+        else:
+            rho_n = None
+
         # Semi-supervise guide chi_ambient using known empty droplets.
         with poutine.mask(mask=empty_mask_n):
             with poutine.scale(scale=consts.REG_SCALE_AMBIENT_EXPRESSION):
+                r = rho_n.detach() if rho_n is not None else None
                 lam_empty_nf = calculate_lambda(
                     epsilon_n=torch.ones_like(epsilon_n),
                     chi_ambient_f=chi_ambient_f,
                     d_empty_n=d_empty_n,
                     y_n=torch.zeros_like(y_n),
                     d_cell_n=d_cell_n.detach(),
+                    rho_n=r,
+                    chi_bar_f=self._chi_bar_f_buf,
                 )
                 pyro.sample(
                     f"obs_empty_{self.name}",
@@ -711,11 +740,17 @@ class GuidePerturbationModality(ModalityModule):
                     obs=x_nf,
                 )
 
-        return d_cell_n, d_empty_n
+        return d_cell_n, d_empty_n, rho_n
 
     # --- Guide ---
 
     def guide_global(self) -> dict:
+        # Declare chi_ambient in the guide so the Adam optimizer tracks it.
+        chi_ambient_f = pyro.param(
+            f"chi_ambient_{self.name}",
+            self.chi_ambient_init,
+            constraint=constraints.simplex,
+        )
         phi_loc = pyro.param(
             f"phi_loc_{self.name}",
             torch.tensor(self.priors.phi_loc_prior, device=self.device),
@@ -729,7 +764,18 @@ class GuidePerturbationModality(ModalityModule):
         phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
         phi_rate = phi_loc / phi_scale.pow(2)
         phi = pyro.sample(f"phi_{self.name}", dist.Gamma(phi_conc, phi_rate))
-        return {"phi": phi}
+        if self.include_rho:
+            pyro.param(
+                f"rho_alpha_{self.name}",
+                self.rho_alpha_prior_buf.clone(),
+                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
+            )
+            pyro.param(
+                f"rho_beta_{self.name}",
+                self.rho_beta_prior_buf.clone(),
+                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
+            )
+        return {"phi": phi, "chi_ambient_f": chi_ambient_f}
 
     def guide_latent(self, encoder_input_nf: torch.Tensor) -> torch.Tensor:
         enc = self.encoder(encoder_input_nf)
@@ -759,13 +805,24 @@ class GuidePerturbationModality(ModalityModule):
             torch.tensor([consts.D_CELL_SCALE_INIT], device=self.device),
             constraint=constraints.positive,
         )
-        # Guide encoder does not provide a d_loc estimate; use prior location.
-        d_cell_loc_gated = self.d_cell_loc_prior.expand(x_nf.shape[0])
+        # Use log(max guide count + 1) as a data-derived point estimate for d_loc_guide.
+        # The encoder sees GEX-derived features and cannot estimate guide depth directly;
+        # the max count across guides is a reliable proxy for the dominant guide UMI depth.
+        d_cell_loc_gated = prob_n * x_nf.max(dim=-1).values.log1p() + (1.0 - prob_n) * self.d_cell_loc_prior
 
         d_cell_n = pyro.sample(
             f"d_cell_{self.name}",
             dist.LogNormal(loc=d_cell_loc_gated, scale=d_cell_scale),
         )
+
+        if self.include_rho:
+            rho_alpha = pyro.param(f"rho_alpha_{self.name}")
+            rho_beta = pyro.param(f"rho_beta_{self.name}")
+            pyro.sample(
+                f"rho_n_{self.name}",
+                dist.Beta(rho_alpha, rho_beta).expand([x_nf.shape[0]]),
+            )
+
         return d_cell_n, d_empty_n
 
     # --- Compute ---
@@ -774,13 +831,13 @@ class GuidePerturbationModality(ModalityModule):
         return self.decoder(decoder_input)
 
     def observation_dist(self, mu_nf, lam_nf, phi) -> dist.Distribution:
-        """Negative binomial observation model for guide capture counts."""
-        total_rate_nf = mu_nf + lam_nf + consts.NBPC_MU_EPS_SAFEGAURD
-        alpha = phi.reciprocal() + consts.NBPC_ALPHA_EPS_SAFEGAURD
-        # NB parameterised as NB(total_count=alpha, probs=...) via concentration.
-        # Equivalent to NB(mu=total_rate_nf, alpha=alpha).
-        probs = total_rate_nf / (total_rate_nf + alpha)
-        return dist.NegativeBinomial(total_count=alpha, probs=probs)
+        """NBPCapprox observation model: consistent with posterior noise estimator."""
+        alpha = phi.reciprocal()
+        return NBPCapprox(
+            mu=mu_nf + consts.NBPC_MU_EPS_SAFEGAURD,
+            alpha=alpha + consts.NBPC_ALPHA_EPS_SAFEGAURD,
+            lam=lam_nf + consts.NBPC_LAM_EPS_SAFEGAURD,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -792,13 +849,15 @@ class _SecondaryModalityBase(ModalityModule, ABC):
     """Base for secondary modalities (ATAC, Protein).
 
     Each secondary modality infers its own per-modality latent z_self from its
-    own features.  The decoder reconstructs chi from concat(z_gex.detach(), z_self),
-    where z_gex is detached so that gradients from this modality's observation
-    loss do not flow back into the GEX encoder.
+    own features.  The decoder reconstructs chi from concat(z_gex.detach(), z_self).
 
-    These modalities do not contribute to cell probability or epsilon inference;
-    both are anchored to GEX.  z_self is gated by y_n (same as GEX z) so that
-    empty droplets do not update the secondary latent space.
+    These modalities do not contribute to cell probability or epsilon inference.
+    When include_rho: models per-modality PCR-chimera fraction rho_n_{name}.
+    chi_bar_{name} is the population-average profile for this modality (law of
+    mass action), used in the swapping model alongside rho.
+
+    d_cell_{name} uses log(total_counts + 1) for the posterior d_loc estimate,
+    gated by cell probability (analogous to the GEX encoder's depth estimate).
     """
 
     contributes_to_cell_probability = False
@@ -812,6 +871,7 @@ class _SecondaryModalityBase(ModalityModule, ABC):
     chi_ambient_init: torch.Tensor
     z_loc_prior: torch.Tensor
     z_scale_prior: torch.Tensor
+    _chi_bar_f_buf: Optional[torch.Tensor]
 
     def __init__(
         self,
@@ -832,13 +892,19 @@ class _SecondaryModalityBase(ModalityModule, ABC):
         self.register_buffer("z_loc_prior", torch.zeros(z_dim).float())
         self.register_buffer("z_scale_prior", torch.ones(z_dim).float())
 
+        if priors.chi_bar is not None:
+            self.register_buffer("_chi_bar_f_buf", priors.chi_bar.clone().float())
+        else:
+            self._chi_bar_f_buf = None
+
+    @property
+    def chi_bar_f(self) -> Optional[torch.Tensor]:
+        return self._chi_bar_f_buf
+
     def prepare_encoder_input(self, raw_data_dict, transforms=None):
-        # Raw counts for this modality; the EncodeZ encoder handles normalization.
         return raw_data_dict[self.name]
 
     def prepare_decoder_input(self, latents_dict):
-        # Decoder input is concat(z_gex, z_self).  z_gex is detached so that
-        # gradients from this modality's obs loss do not flow to the GEX encoder.
         z_gex = latents_dict["gene_expression"].detach()
         z_self = latents_dict[self.name]
         return torch.cat([z_gex, z_self], dim=-1)
@@ -863,7 +929,9 @@ class _SecondaryModalityBase(ModalityModule, ABC):
             dist.Normal(self.z_loc_prior, self.z_scale_prior).expand_by([n_droplets]).to_event(1),
         )
 
-    def model_per_droplet(self, x_nf, empty_mask_n, epsilon_n, y_n, rho_n, phi) -> Tuple[torch.Tensor, torch.Tensor]:
+    def model_per_droplet(
+        self, x_nf, empty_mask_n, epsilon_n, y_n, phi
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         chi_ambient_f = pyro.param(f"chi_ambient_{self.name}")
         d_empty_n = pyro.sample(
             f"d_empty_{self.name}",
@@ -873,23 +941,34 @@ class _SecondaryModalityBase(ModalityModule, ABC):
             f"d_cell_{self.name}",
             dist.LogNormal(self.d_cell_loc_prior, self.d_cell_scale_prior).expand([x_nf.shape[0]]),
         )
+
+        if self.include_rho:
+            rho_n: Optional[torch.Tensor] = pyro.sample(
+                f"rho_n_{self.name}",
+                dist.Beta(self.rho_alpha_prior_buf, self.rho_beta_prior_buf).expand([x_nf.shape[0]]),
+            )
+        else:
+            rho_n = None
+
         # Semi-supervise chi_ambient using known empty droplets.
-        # epsilon set to 1 so ambient reg is independent of RT efficiency.
         with poutine.mask(mask=empty_mask_n):
             with poutine.scale(scale=consts.REG_SCALE_AMBIENT_EXPRESSION):
+                r = rho_n.detach() if rho_n is not None else None
                 lam_empty_nf = calculate_lambda(
                     epsilon_n=torch.ones_like(epsilon_n),
                     chi_ambient_f=chi_ambient_f,
                     d_empty_n=d_empty_n,
                     y_n=torch.zeros_like(y_n),
                     d_cell_n=d_cell_n.detach(),
+                    rho_n=r,
+                    chi_bar_f=self._chi_bar_f_buf,
                 )
                 pyro.sample(
                     f"obs_empty_{self.name}",
                     dist.Poisson(lam_empty_nf + consts.POISSON_EPS_SAFEGAURD).to_event(1),
                     obs=x_nf,
                 )
-        return d_cell_n, d_empty_n
+        return d_cell_n, d_empty_n, rho_n
 
     # --- Guide ---
 
@@ -912,6 +991,17 @@ class _SecondaryModalityBase(ModalityModule, ABC):
         phi_conc = phi_loc.pow(2) / phi_scale.pow(2)
         phi_rate = phi_loc / phi_scale.pow(2)
         phi = pyro.sample(f"phi_{self.name}", dist.Gamma(phi_conc, phi_rate))
+        if self.include_rho:
+            pyro.param(
+                f"rho_alpha_{self.name}",
+                self.rho_alpha_prior_buf.clone(),
+                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
+            )
+            pyro.param(
+                f"rho_beta_{self.name}",
+                self.rho_beta_prior_buf.clone(),
+                constraint=constraints.interval(consts.RHO_PARAM_MIN, consts.RHO_PARAM_MAX),
+            )
         return {"phi": phi, "chi_ambient_f": chi_ambient_f}
 
     def guide_latent(self, encoder_input_nf: torch.Tensor) -> torch.Tensor:
@@ -943,10 +1033,22 @@ class _SecondaryModalityBase(ModalityModule, ABC):
             torch.tensor([consts.D_CELL_SCALE_INIT], device=self.device),
             constraint=constraints.positive,
         )
+        # Use log(total modality counts + 1) as d_loc, gated by cell probability.
+        # Total counts in this modality is a direct proxy for per-modality depth.
+        d_cell_loc_gated = prob_n * x_nf.sum(dim=-1).log1p() + (1.0 - prob_n) * self.d_cell_loc_prior
         d_cell_n = pyro.sample(
             f"d_cell_{self.name}",
-            dist.LogNormal(loc=self.d_cell_loc_prior.expand(x_nf.shape[0]), scale=d_cell_scale),
+            dist.LogNormal(loc=d_cell_loc_gated, scale=d_cell_scale),
         )
+
+        if self.include_rho:
+            rho_alpha = pyro.param(f"rho_alpha_{self.name}")
+            rho_beta = pyro.param(f"rho_beta_{self.name}")
+            pyro.sample(
+                f"rho_n_{self.name}",
+                dist.Beta(rho_alpha, rho_beta).expand([x_nf.shape[0]]),
+            )
+
         return d_cell_n, d_empty_n
 
     # --- Compute ---
@@ -955,10 +1057,13 @@ class _SecondaryModalityBase(ModalityModule, ABC):
         return self.decoder(decoder_input)
 
     def observation_dist(self, mu_nf, lam_nf, phi) -> dist.Distribution:
-        total_rate_nf = mu_nf + lam_nf + consts.NBPC_MU_EPS_SAFEGAURD
-        alpha = phi.reciprocal() + consts.NBPC_ALPHA_EPS_SAFEGAURD
-        probs = total_rate_nf / (total_rate_nf + alpha)
-        return dist.NegativeBinomial(total_count=alpha, probs=probs)
+        """NBPCapprox observation model: consistent with posterior noise estimator."""
+        alpha = phi.reciprocal()
+        return NBPCapprox(
+            mu=mu_nf + consts.NBPC_MU_EPS_SAFEGAURD,
+            alpha=alpha + consts.NBPC_ALPHA_EPS_SAFEGAURD,
+            lam=lam_nf + consts.NBPC_LAM_EPS_SAFEGAURD,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +1077,7 @@ class ATACModality(_SecondaryModalityBase):
 
     Encoder: EncodeZ on log-normalised ATAC features → z_atac.
     Decoder: z_gex.detach() ++ z_atac → chi_atac (simplex over peaks).
-    Observation: NegativeBinomial.
+    Observation: NBPCapprox.
     """
 
     name = "atac"
@@ -989,7 +1094,7 @@ class ProteinModality(_SecondaryModalityBase):
 
     Encoder: EncodeZ on log-normalised protein features → z_protein.
     Decoder: z_gex.detach() ++ z_protein → chi_protein (simplex over proteins).
-    Observation: NegativeBinomial.
+    Observation: NBPCapprox.
     """
 
     name = "protein"

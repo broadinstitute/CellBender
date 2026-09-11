@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, cast
 
 import pyarrow.parquet as pq
 
@@ -38,6 +38,7 @@ from cellbender.remove_background.data.io import (
 )
 from cellbender.remove_background.estimation import estimate_mean_noise_per_gene
 from cellbender.remove_background.modality import ModalityModule, calculate_lambda, calculate_mu
+from cellbender.remove_background.model import get_phi
 from cellbender.remove_background.sparse_utils import (
     dense_to_sparse_op_torch,
 )
@@ -810,9 +811,6 @@ class Posterior:
         p = np.zeros(n_analyzed)
         epsilon = np.zeros(n_analyzed)
 
-        phi_loc = pyro.param("phi_loc_gene_expression")
-        phi_scale = pyro.param("phi_scale_gene_expression")
-
         start = 0
         for i, data in enumerate(data_loader):
             data = data.to(data_loader.device, non_blocking=True)
@@ -840,11 +838,14 @@ class Posterior:
 
             start = end
 
+        phi_loc_scale: Dict[str, List[float]] = {k: [float(v[0]), float(v[1])] for k, v in get_phi().items()}
+
         self._latents = {
             "z": z,
             "d": d,
             "p": p,
-            "phi_loc_scale": [phi_loc.item(), phi_scale.item()],
+            "phi_loc_scale": phi_loc_scale.get("gene_expression"),
+            "phi_loc_scale_per_modality": phi_loc_scale,
             "epsilon": epsilon,
         }
 
@@ -887,12 +888,13 @@ class Posterior:
         d_cell = dist.LogNormal(loc=enc["d_loc"], scale=pyro.param("d_cell_scale_gene_expression")).mean
         epsilon = dist.Gamma(enc["epsilon"] * self.vi_model.epsilon_prior, self.vi_model.epsilon_prior).mean
 
-        if self.vi_model.include_rho:
-            rho = pyro.param("rho_alpha") / (pyro.param("rho_alpha") + pyro.param("rho_beta"))
+        include_rho = self.vi_model.include_rho
+        if include_rho:
+            rho_alpha = pyro.param("rho_alpha_gene_expression")
+            rho_beta = pyro.param("rho_beta_gene_expression")
+            rho = rho_alpha / (rho_alpha + rho_beta)
         else:
             rho = None
-
-        include_rho = self.vi_model.model_type in ("full", "swapping")
 
         # Calculate MAP estimates of mu and lambda.
         mu_map = calculate_mu(
