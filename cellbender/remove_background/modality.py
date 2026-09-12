@@ -119,13 +119,11 @@ class ModalityModule(nn.Module, ABC):
         feature_indices_f: torch.Tensor,
         encoder: nn.Module,
         decoder: nn.Module,
-        device: str = "cpu",
     ):
         super().__init__()
         self.priors = priors
         self.encoder = encoder
         self.decoder = decoder
-        self.device = device
         self.include_rho: bool = priors.include_rho
         self.register_buffer("feature_indices_f", feature_indices_f)
         phi_conc = priors.phi_loc_prior**2 / priors.phi_scale_prior**2
@@ -134,6 +132,11 @@ class ModalityModule(nn.Module, ABC):
         self.register_buffer("phi_rate_prior", torch.tensor(phi_rate).float())
         self.register_buffer("rho_alpha_prior_buf", torch.tensor(priors.rho_alpha_prior).float())
         self.register_buffer("rho_beta_prior_buf", torch.tensor(priors.rho_beta_prior).float())
+
+    @property
+    def device(self) -> torch.device:
+        """Current device, derived from the feature_indices buffer — moves with the module."""
+        return self.feature_indices_f.device
 
     # --- Abstract identity properties ---
 
@@ -340,9 +343,8 @@ class GeneExpressionModality(ModalityModule):
         feature_indices_f: torch.Tensor,
         encoder: nn.Module,
         decoder: nn.Module,
-        device: str = "cpu",
     ):
-        super().__init__(priors, feature_indices_f, encoder, decoder, device)
+        super().__init__(priors, feature_indices_f, encoder, decoder)
         self.z_dim = cast(int, decoder.input_dim)
 
         self.register_buffer("d_cell_loc_prior", torch.tensor(priors.d_cell_loc_prior).float())
@@ -614,14 +616,13 @@ class GuidePerturbationModality(ModalityModule):
         feature_indices_f: torch.Tensor,
         encoder: nn.Module,
         decoder: nn.Module,
-        device: str = "cpu",
         transform_mean: Optional[torch.Tensor] = None,
         transform_std: Optional[torch.Tensor] = None,
         transform_hvg_indices: Optional[torch.Tensor] = None,
         transform_clamp_min: float = -5.0,
         transform_clamp_max: float = 5.0,
     ):
-        super().__init__(priors, feature_indices_f, encoder, decoder, device)
+        super().__init__(priors, feature_indices_f, encoder, decoder)
         self.z_dim = cast(int, decoder.input_dim)
 
         self.register_buffer("d_cell_loc_prior", torch.tensor(priors.d_cell_loc_prior).float())
@@ -880,9 +881,8 @@ class _SecondaryModalityBase(ModalityModule, ABC):
         encoder: nn.Module,
         decoder: nn.Module,
         z_dim: int,
-        device: str = "cpu",
     ):
-        super().__init__(priors, feature_indices_f, encoder, decoder, device)
+        super().__init__(priors, feature_indices_f, encoder, decoder)
         self.z_dim = z_dim
         self.register_buffer("d_cell_loc_prior", torch.tensor(priors.d_cell_loc_prior).float())
         self.register_buffer("d_cell_scale_prior", torch.tensor(priors.d_cell_scale_prior).float())
