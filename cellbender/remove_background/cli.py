@@ -8,7 +8,6 @@ import sys
 import torch
 
 from cellbender.base_cli import AbstractCLI, get_version
-from cellbender.remove_background.posterior import Posterior
 from cellbender.remove_background.run import run_remove_background
 
 
@@ -179,17 +178,11 @@ class CLI(AbstractCLI):
             )
             sys.stdout.flush()  # Write immediately
 
-        # Posterior regularization checking.
+        # Estimator checking.
         if args.cdf_threshold_q is not None:
             assert (args.cdf_threshold_q >= 0.0) and (args.cdf_threshold_q <= 1.0), (
                 "Argument --q must be in range [0, 1] since it is a CDF threshold."
             )
-        if args.posterior_regularization == "PRq":
-            # We need q for the CDF threshold estimator.
-            assert args.prq_alpha is not None, (
-                "Input argument --alpha must be specified when using --posterior-regularization PRq"
-            )
-
         # Estimator checking.
         if args.estimator == "cdf":
             # We need q for the CDF threshold estimator.
@@ -198,7 +191,7 @@ class CLI(AbstractCLI):
         return args
 
     @staticmethod
-    def run(args) -> Posterior:
+    def run(args) -> None:
         """Run the main tool functionality on parsed arguments."""
 
         # Run the tool.
@@ -229,13 +222,13 @@ def setup_and_logging(args):
     return args, file_handler
 
 
-def main(args) -> Posterior:
+def main(args) -> None:
     """Take command-line input, parse arguments, and run tests or tool."""
 
     args, file_handler = setup_and_logging(args)
 
     # Run the tool.
-    posterior = run_remove_background(args)
+    run_remove_background(args)
     file_handler.close()
 
-    return posterior
+    return None

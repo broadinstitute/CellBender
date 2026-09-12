@@ -10,10 +10,14 @@ on:
       input_file:
         description: "GCS path to input .h5 file (e.g. gs://bucket/path/to/input.h5)"
         required: true
+      checkpoint_file:
+        description: "GCS path to a checkpoint tarball to resume from (optional)"
+        required: false
+        default: ""
       extra_args:
         description: "Extra cellbender args (e.g. --total-droplets-included 25000 --epochs 150)"
         required: false
-        default: ""
+        default: "--exclude-feature-types Peaks --checkpoint-mins 200 --debug"
       output_bucket:
         description: "GCS output prefix (default: gs://broad-dsde-methods-sfleming/cellbender_test/github_dev_runs)"
         required: false
@@ -32,6 +36,10 @@ on:
       memory_gb:
         description: "Memory in GB — used only when machine_type is cleared (leave blank to use machine_type)."
         required: false
+      boot_disk_gb:
+        description: "Boot disk size in GB (default: 100). Increase for large datasets with heavy temp spill."
+        required: false
+        default: "100"
 
 jobs:
   submit:
@@ -83,8 +91,10 @@ jobs:
             --git-hash "${{ steps.sha.outputs.full }}" \
             --run-id "${{ github.run_id }}-${{ github.run_attempt }}" \
             --input-file "${{ inputs.input_file }}" \
+            --checkpoint-file "${{ inputs.checkpoint_file }}" \
             --extra-args "${{ inputs.extra_args }}" \
             --output-bucket "${{ inputs.output_bucket }}" \
             --machine-type "${{ inputs.machine_type }}" \
             --gpu-type "${{ inputs.gpu_type }}" \
+            --boot-disk-gb "${{ inputs.boot_disk_gb }}" \
             $EXTRA_HW_ARGS

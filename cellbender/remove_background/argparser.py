@@ -303,29 +303,6 @@ def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubP
         "(will be slower).",
     )
     subparser.add_argument(
-        "--posterior-regularization",
-        type=str,
-        default=None,
-        choices=["PRq", "PRmu", "PRmu_gene"],
-        dest="posterior_regularization",
-        help="Posterior regularization method. (For experts: "
-        "not required for normal usage, see "
-        "documentation). PRq is approximate quantile-"
-        "targeting. PRmu is approximate mean-targeting "
-        "aggregated over genes (behavior of v0.2.0). "
-        "PRmu_gene is approximate mean-targeting per "
-        "gene.",
-    )
-    subparser.add_argument(
-        "--alpha",
-        type=float,
-        default=None,
-        dest="prq_alpha",
-        help="Tunable parameter alpha for the PRq posterior "
-        "regularization method (not normally used: see "
-        "documentation).",
-    )
-    subparser.add_argument(
         "--q",
         type=float,
         default=None,
@@ -376,6 +353,65 @@ def add_subparser_args(subparsers: argparse._SubParsersAction) -> argparse._SubP
         default=None,
         dest="n_threads",
         help="Number of threads to use when pytorch is run on CPU. Defaults to the number of logical cores.",
+    )
+    subparser.add_argument(
+        "--estimator-memory-limit",
+        type=str,
+        default=None,
+        dest="duckdb_memory_limit",
+        help="Memory limit for DuckDB SQL-based noise count estimation (e.g. '30GB'). "
+        "Defaults to DuckDB's automatic limit (~80%% of system RAM). "
+        "Useful on shared cluster nodes where you want to cap CellBender's memory footprint.",
+    )
+    subparser.add_argument(
+        "--dataloader-workers",
+        type=int,
+        default=0,
+        dest="dataloader_workers",
+        help="Number of worker processes for the training DataLoader.  "
+        "0 (the default) loads data in the main process.  Increasing this "
+        "to 1 on a Linux machine may improve GPU utilisation at the cost of extra "
+        "memory and process-spawn overhead.  Values above 1 are slower on benchmarks.",
+    )
+    subparser.add_argument(
+        "--backed-mode",
+        dest="backed_mode",
+        action="store_true",
+        default=False,
+        help="Store the training count matrices as memory-mapped files on disk "
+        "instead of keeping them in RAM.  Useful when the dataset is large "
+        "enough that holding two copies of the count matrix (train and test "
+        "splits) in memory is problematic.  The mmap files are written once "
+        "next to the output file and reused on checkpoint resume.  Dataloader speed "
+        "will be slightly slower due to disk I/O (68%% speed on test data).",
+    )
+    subparser.add_argument(
+        "--negative-control-guide-feature",
+        type=str,
+        default="negative_control",
+        dest="negative_control_guide_feature",
+        help="Name (or comma-separated names) identifying the negative control guide "
+        "feature(s) in a CRISPR Guide Capture dataset.  A guide feature matches if "
+        "any supplied string is a substring of its name (case-sensitive).  Only "
+        "relevant when the input contains CRISPR Guide Capture features.  "
+        "Default: 'negative_control'.",
+    )
+    subparser.add_argument(
+        "--num-guide-hvgs",
+        type=int,
+        default=2000,
+        dest="num_guide_hvgs",
+        help="Number of highly variable genes to use as input to the guide perturbation "
+        "encoder.  HVGs are selected by the ratio of total-cell variance to negative "
+        "control cell variance of log1p gene expression, after excluding genes detected "
+        "in fewer than 5%% of high-confidence cells.  Only relevant when the input "
+        "contains CRISPR Guide Capture features.  Default: 2000.",
+    )
+    subparser.add_argument(
+        "--no-report",
+        dest="no_report",
+        action="store_true",
+        help="Skip HTML report generation after training completes.",
     )
     subparser.add_argument(
         "--debug",

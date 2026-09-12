@@ -102,6 +102,29 @@ def simulated_dataset():
         + ["Custom"] * 5
     )  # a mix of types
     d["matrix"] = (d["counts_true"] + d["counts_bkg"]).tocsc()
+
+    # Rename last CRISPR guide feature to "negative_control" and plant clear
+    # negative-control cells so the guide transform computation has something to
+    # work with.
+    #   - Barcodes 0-19 (high-UMI cells): 15 counts in negative_control, 0 in others.
+    #   - Barcodes 30-99 (empties): 2 counts in negative_control so it is not
+    #     filtered out by the ambient-expression exclusion step.
+    n_genes = d["gene_names"].size
+    neg_ctrl_col = n_genes - 6  # last CRISPR Guide Capture column (index 994)
+    other_guide_cols = list(range(n_genes - 10, n_genes - 6))  # columns 990-993
+    # Build a new array with a wider str dtype so "negative_control" is not truncated.
+    gene_names_list = list(d["gene_names"])
+    gene_names_list[neg_ctrl_col] = "negative_control"
+    d["gene_names"] = np.array(gene_names_list)
+    mat = d["matrix"].tolil()
+    for i in range(20):  # first 20 barcodes are high-UMI cells
+        for col in other_guide_cols:
+            mat[i, col] = 0
+        mat[i, neg_ctrl_col] = 15
+    for i in range(30, 100):  # empties: add small ambient signal so feature is retained
+        mat[i, neg_ctrl_col] = 2
+    d["matrix"] = mat.tocsc()
+
     return d
 
 

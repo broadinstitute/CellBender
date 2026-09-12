@@ -8,7 +8,7 @@ from cellbender.remove_background import consts
 from cellbender.remove_background.vae.base import FullyConnectedNetwork
 
 
-class CompositeEncoder(dict):
+class CompositeEncoder(nn.ModuleDict):
     """A composite of several encoders to be run together on the same input.
 
     This represents an encoder that is a composite of several
@@ -18,27 +18,24 @@ class CompositeEncoder(dict):
     are the output tensors created by calling .forward(x) on those encoder
     instances.
 
-    Attributes:
-        module_dict: A dictionary of encoder modules.
+    Using nn.ModuleDict ensures all sub-module parameters (including batch-norm
+    running statistics) are properly tracked by PyTorch and included in
+    state_dict() / load_state_dict().
 
     """
 
     def __init__(self, module_dict):
         super(CompositeEncoder, self).__init__(module_dict)
-        self.module_dict = module_dict
-
-    def __call__(self, **kwargs):
-        return self.forward(**kwargs)
 
     def forward(self, **kwargs) -> Dict[str, torch.Tensor]:
 
         out = dict()
         # Encode z first.
-        out["z"] = self.module_dict["z"].forward(**kwargs)
+        out["z"] = self["z"].forward(**kwargs)
 
         # For each other module in the dict of the composite encoder,
         # call forward(), and pass in the encoded z.
-        for key, value in self.module_dict.items():
+        for key, value in self.items():
             if key == "z":
                 continue  # already done
 
@@ -123,10 +120,6 @@ class EncodeZ(FullyConnectedNetwork):
         scale = torch.exp(self.sig_out(hidden))
 
         return {"loc": loc.squeeze(), "scale": scale.squeeze()}
-
-
-def _poisson_log_prob(lam, value):
-    return (lam.log() * value) - lam - (value + 1).lgamma()
 
 
 class EncodeNonZLatents(nn.Module):
@@ -238,8 +231,22 @@ class EncodeNonZLatents(nn.Module):
         self.x_scaling = None
         self.batchnorm0 = nn.BatchNorm1d(num_features=self.n_genes)
 
+    def get_extra_state(self):
+        """Return extra state (non-parameter, non-buffer attributes) for state_dict."""
+        return {"offset": self.offset, "x_scaling": self.x_scaling}
+
+    def set_extra_state(self, state):
+        """Restore extra state when loading from state_dict."""
+        self.offset = state.get("offset")
+        self.x_scaling = state.get("x_scaling")
+
     def forward(
-        self, x: torch.Tensor, chi_ambient: Optional[torch.Tensor], z: torch.Tensor, **kwargs
+        self,
+        x: torch.Tensor,
+        chi_ambient: Optional[torch.Tensor],
+        z: torch.Tensor,
+        d_empty_loc: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Dict[str, torch.Tensor]:
         # Define the forward computation to go from gene expression to cell
         # probabilities.  The log of the total UMI counts is concatenated with
@@ -248,6 +255,10 @@ class EncodeNonZLatents(nn.Module):
         # an augmented input.
 
         x = x.reshape(-1, self.n_genes)
+
+        # Resolve d_empty_loc: accept explicit value or fall back to param store.
+        if d_empty_loc is None:
+            d_empty_loc = pyro.param("d_empty_loc").detach()
 
         # Calculate log total UMI counts per barcode.
         counts = x.sum(dim=-1, keepdim=True)
@@ -259,13 +270,13 @@ class EncodeNonZLatents(nn.Module):
         # Calculate probability that log counts are consistent with d_empty.
         if chi_ambient is not None:
             # Gaussian log probability
-            overlap = -0.5 * (torch.clamp(log_sum - pyro.param("d_empty_loc").detach(), min=0.0) / 0.1).pow(2)
+            overlap = -0.5 * (torch.clamp(log_sum - d_empty_loc, min=0.0) / 0.1).pow(2)
         else:
             overlap = torch.zeros_like(counts)
 
         # Calculate a dot product between expression and ambient, for epsilon.
         if chi_ambient is not None:
-            x_ambient = pyro.param("d_empty_loc").exp().detach() * chi_ambient.detach().unsqueeze(0)
+            x_ambient = d_empty_loc.exp() * chi_ambient.detach().unsqueeze(0)
             x_ambient_norm = x_ambient / torch.linalg.vector_norm(x_ambient, ord=2, dim=-1, keepdim=True)
             eps_overlap = (x_ambient_norm * x).sum(dim=-1, keepdim=True)
         else:
@@ -327,7 +338,7 @@ class EncodeNonZLatents(nn.Module):
         # 1.0986122886681098 = log(3)
         epsilon = 2.0 * (eps_out * self.EPS_OUTPUT_SCALE - 1.0986122886681098).sigmoid() + 0.5
 
-        d_empty = pyro.param("d_empty_loc").exp().detach()
+        d_empty = d_empty_loc.exp()
 
         d_loc = (
             self.softplus(
